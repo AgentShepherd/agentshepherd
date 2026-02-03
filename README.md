@@ -1,7 +1,11 @@
+<p align="center">
+  <img src="docs/banner.png" alt="AgentShepherd Banner" width="100%" />
+</p>
+
 <h1 align="center">AgentShepherd</h1>
 
 <p align="center">
-  <strong>Your agents should never (try to) read your secrets.</strong>
+  <strong>Your agents should never <del>(try to)</del> read your secrets.</strong>
 </p>
 
 <p align="center">
@@ -17,8 +21,6 @@
   <img src="https://img.shields.io/badge/License-Elastic%202.0-blue.svg" alt="License" />
   <img src="https://img.shields.io/badge/Platform-macOS%20%7C%20Linux-lightgrey" alt="Platform" />
 </p>
-
----
 
 ## The Problem
 
@@ -55,12 +57,12 @@ We specifically monitor **tool call requests**, not responses, because the reque
 By guarding this single chokepoint, AgentShepherd catches threats at the point *before* they reach the real world.
 
 <p align="center">
-  <img src="docs/agentshepherd.svg" alt="How AgentShepherd works" />
+  <img src="docs/agentshepherd.svg" alt="How AgentShepherd works" width="100%" />
 </p>
 
 ## Quick Start
 
-**One command. That's it.**
+> **One command. That's it.**
 
 ```bash
 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/AgentShepherd/agentshepherd/main/install.sh)"
