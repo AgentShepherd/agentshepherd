@@ -1,0 +1,142 @@
+# Schema Examples - Progressive Disclosure
+# Each level adds complexity only when needed
+
+rules:
+  # ==========================================================================
+  # LEVEL 1: One-Liner (80% of rules)
+  # ==========================================================================
+
+  # Single pattern
+  - block: "**/.env"
+    message: "Environment files are blocked"
+
+  # Multiple patterns in one rule
+  - name: block-credential-files
+    block: ["**/credentials*", "**/secrets*", "**/passwords*"]
+    message: "Credential files are blocked"
+
+  # Home directory (tilde expanded)
+  - name: block-ssh-private-keys
+    block: "~/.ssh/id_*"
+    message: "SSH private keys are blocked"
+
+  # ==========================================================================
+  # LEVEL 2: With Exceptions
+  # ==========================================================================
+
+  # Block .env files except examples
+  - name: block-env-except-examples
+    block: "**/.env*"
+    except: "**/.env.example"
+    message: "Environment files blocked (except .env.example)"
+
+  # Block SSH keys except public keys
+  - name: block-ssh-except-pub
+    block: "~/.ssh/id_*"
+    except: "~/.ssh/*.pub"
+    message: "SSH private keys blocked (public keys allowed)"
+
+  # ==========================================================================
+  # LEVEL 3: With Actions/Message
+  # ==========================================================================
+
+  # Block only delete operations
+  - name: block-etc-delete
+    block: "/etc/**"
+    actions: [delete]
+    message: "Cannot delete system files"
+
+  # Block only write operations
+  - name: block-authorized-keys-write
+    block: "~/.ssh/authorized_keys"
+    actions: [write]
+    message: "Cannot modify SSH authorized keys"
+
+  # Block read/write to tmp with severity
+  - name: block-tmp-sensitive
+    block: "/tmp/secrets/**"
+    actions: [read, write]
+    message: "Cannot access sensitive temp files"
+    severity: high
+
+  # ==========================================================================
+  # LEVEL 4: Advanced Match
+  # ==========================================================================
+
+  # Regex pattern for /proc
+  - name: block-proc-memory
+    match:
+      path: "re:/proc/(\\d+|self)/(environ|cmdline)"
+    message: "Cannot read process memory"
+
+  # Command pattern matching
+  - name: block-obfuscation
+    match:
+      command: "re:\\$\\([^)]+\\)|`[^`]+`"
+    actions: [execute]
+    message: "Command obfuscation blocked"
+
+  # Network host matching (literal)
+  - name: block-metadata
+    match:
+      host: "169.254.169.254"
+    actions: [network]
+    message: "Cannot access cloud metadata endpoint"
+
+  # Network host matching (regex)
+  - name: block-internal-networks
+    match:
+      host: "re:^(10\\.|192\\.168\\.|172\\.(1[6-9]|2[0-9]|3[01])\\.)"
+    actions: [network]
+    message: "Cannot access internal network (SSRF protection)"
+
+  # Network host matching (glob)
+  - name: block-local-domains
+    match:
+      host: "*.internal"
+    actions: [network]
+    message: "Cannot access internal domains"
+
+  # Tool-specific rules
+  - name: block-bash-secrets
+    match:
+      path: "**/.env"
+      tool: [Bash]
+    message: "Cannot access secrets via Bash"
+
+  # ==========================================================================
+  # LEVEL 5: Composite Rules
+  # ==========================================================================
+
+  # AND: All conditions must match
+  - name: block-symlink-bypass
+    all:
+      - command: "re:ln\\s+-s"
+      - path: "/etc/**"
+    message: "Cannot create symlinks to system files"
+
+  # OR: Any condition matches
+  - name: block-dangerous-curl
+    any:
+      - command: "re:curl.*--upload-file"
+      - command: "re:curl.*-T\\s"
+      - command: "re:curl.*-d\\s*@"
+    actions: [execute]
+    message: "Cannot upload files via curl"
+
+  # ==========================================================================
+  # FALLBACK RULES (Content-only)
+  # Matches raw JSON args of ANY tool, including MCP plugins
+  # ==========================================================================
+
+  # Block any tool call containing a domain (literal match)
+  - name: block-malicious-domain
+    match:
+      content: "malicious.com"
+    message: "Cannot access malicious.com"
+
+  # Block with regex pattern
+  - name: block-suspicious-domains
+    match:
+      content: "re:(phishing|malware|evil)\\.(com|org|net)"
+    message: "Cannot access suspicious domain"

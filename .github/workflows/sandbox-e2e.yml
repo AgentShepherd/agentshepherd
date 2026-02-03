@@ -1,0 +1,126 @@
+name: Sandbox E2E Tests
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'internal/sandbox/**'
+      - 'internal/rules/**'
+      - 'internal/rules/builtin/**'
+      - 'cmd/sandbox-exec/**'
+      - 'go.mod'
+      - 'go.sum'
+      - '.github/workflows/sandbox-e2e.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'internal/sandbox/**'
+      - 'internal/rules/**'
+      - 'internal/rules/builtin/**'
+      - 'cmd/sandbox-exec/**'
+      - 'go.mod'
+      - 'go.sum'
+      - '.github/workflows/sandbox-e2e.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  linux:
+    name: Linux (Landlock)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+
+      - name: Check Landlock support
+        run: |
+          echo "Kernel: $(uname -r)"
+          if [ -f /sys/kernel/security/landlock/abi_version ]; then
+            echo "Landlock ABI: $(cat /sys/kernel/security/landlock/abi_version)"
+          else
+            echo "Landlock detection will happen at runtime"
+          fi
+
+      - name: Build sandbox-exec helper
+        run: make -C cmd/sandbox-exec
+
+      - name: Check rule-sandbox consistency
+        run: go run . check-sandbox
+
+      - name: Create test data
+        run: |
+          # Landlock works at directory level, not file level.
+          # Blocked files must be outside allowed paths (/tmp, /var, /etc, etc.)
+          # Allowed files go in /tmp which is in Landlock's allowed paths.
+
+          # BLOCKED data: /blocked-data (NOT in Landlock allowed paths)
+          sudo mkdir -p /blocked-data/.ssh /blocked-data/secrets
+          echo "SECRET=test" | sudo tee /blocked-data/.env
+          echo "LOCAL=test" | sudo tee /blocked-data/.env.local
+          echo "fake-rsa-key" | sudo tee /blocked-data/.ssh/id_rsa
+          echo "fake-ed25519" | sudo tee /blocked-data/.ssh/id_ed25519
+          echo '{"key":"secret"}' | sudo tee /blocked-data/secrets/credentials.json
+          echo "password: test" | sudo tee /blocked-data/secrets/secrets.yaml
+          sudo chmod -R 755 /blocked-data
+
+          # ALLOWED data: /tmp/test-data (within Landlock allowed paths)
+          mkdir -p /tmp/test-data/project
+          echo "package main" > /tmp/test-data/project/main.go
+          echo "# README" > /tmp/test-data/project/README.md
+          echo "hello" > /tmp/test-data/project/data.txt
+          chmod -R 755 /tmp/test-data
+
+      - name: Run E2E tests
+        run: |
+          TEST_DATA_DIR=/tmp/test-data \
+          TEST_BLOCKED_DATA_DIR=/blocked-data \
+          go test -v -tags=sandbox_e2e -timeout=5m ./internal/sandbox/...
+
+  macos:
+    name: macOS (sandbox-exec)
+    runs-on: macos-latest
+    # macOS runners cost 10x more - only run on main branch pushes
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+
+      - name: Check sandbox-exec
+        run: |
+          echo "macOS: $(sw_vers -productVersion)"
+          which sandbox-exec
+
+      - name: Build sandbox-exec helper
+        run: make -C cmd/sandbox-exec
+
+      - name: Check rule-sandbox consistency
+        run: go run . check-sandbox
+
+      - name: Create test data
+        run: |
+          # macOS Seatbelt does file-level filtering, so all data can be in /tmp
+          mkdir -p /tmp/test-data/.ssh /tmp/test-data/secrets /tmp/test-data/project
+          echo "SECRET=test" > /tmp/test-data/.env
+          echo "LOCAL=test" > /tmp/test-data/.env.local
+          echo "fake-rsa-key" > /tmp/test-data/.ssh/id_rsa
+          echo "fake-ed25519" > /tmp/test-data/.ssh/id_ed25519
+          echo '{"key":"secret"}' > /tmp/test-data/secrets/credentials.json
+          echo "password: test" > /tmp/test-data/secrets/secrets.yaml
+          echo "package main" > /tmp/test-data/project/main.go
+          echo "# README" > /tmp/test-data/project/README.md
+          echo "hello" > /tmp/test-data/project/data.txt
+          chmod -R 755 /tmp/test-data
+
+      - name: Run E2E tests
+        run: |
+          TEST_DATA_DIR=/tmp/test-data \
+          TEST_BLOCKED_DATA_DIR=/tmp/test-data \
+          go test -v -tags=sandbox_e2e -timeout=5m ./internal/sandbox/...

@@ -1,0 +1,107 @@
+repos:
+  # Go formatting (runs first, auto-fixes files)
+  - repo: local
+    hooks:
+      - id: gofmt
+        name: gofmt
+        entry: gofmt -w
+        language: system
+        files: \.go$
+        pass_filenames: true
+
+  # Go linting
+  - repo: local
+    hooks:
+      - id: golangci-lint
+        name: golangci-lint
+        entry: bash -c '~/go/bin/golangci-lint run --config .golangci.yml ./...'
+        language: system
+        files: \.go$
+        pass_filenames: false
+
+  # Shell script checking
+  - repo: local
+    hooks:
+      - id: shellcheck
+        name: shellcheck
+        entry: shellcheck
+        args: [--severity=warning]
+        language: system
+        types: [shell]
+
+  # YAML linting
+  - repo: https://github.com/adrienverge/yamllint
+    rev: v1.37.0
+    hooks:
+      - id: yamllint
+        name: yamllint
+        files: \.ya?ml$
+        args: [-d, "{extends: relaxed, rules: {line-length: {max: 150}}}"]
+
+  # GitHub Actions linting
+  - repo: https://github.com/rhysd/actionlint
+    rev: v1.7.7
+    hooks:
+      - id: actionlint
+        name: actionlint (GitHub Actions)
+        files: ^\.github/workflows/
+
+  # Secret detection
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.24.2
+    hooks:
+      - id: gitleaks
+        name: gitleaks (secret detection)
+        exclude: (node_modules/|\.venv/|\.git/|__pycache__/)
+
+  # Rule linting - validate rule syntax and patterns
+  - repo: local
+    hooks:
+      - id: rule-lint
+        name: rule lint
+        entry: bash -c 'go build -o /tmp/agentshepherd-lint . && /tmp/agentshepherd-lint lint-rules'
+        language: system
+        pass_filenames: false
+        files: (internal/rules/builtin/.*\.yaml)$
+
+  # Rule coverage check - ensure all rules have unit tests and fuzz tests
+  - repo: local
+    hooks:
+      - id: rule-coverage
+        name: rule coverage check
+        entry: scripts/check-rule-coverage.sh
+        language: script
+        pass_filenames: false
+        files: (internal/rules/builtin/security\.yaml|internal/rules/.*_test\.go)$
+
+  # Sandbox consistency check - ensure rules translate to sandbox correctly
+  - repo: local
+    hooks:
+      - id: sandbox-consistency
+        name: sandbox consistency check
+        entry: bash -c 'go build -o /tmp/agentshepherd-check . && /tmp/agentshepherd-check check-sandbox'
+        language: system
+        pass_filenames: false
+        files: (internal/rules/builtin/.*\.yaml|internal/sandbox/.*\.go)$
+
+  # Go unit tests
+  - repo: local
+    hooks:
+      - id: go-test
+        name: go test
+        entry: bash -c 'go test ./... -short'
+        language: system
+        pass_filenames: false
+        files: \.go$
+        stages: [pre-commit]
+
+  # E2E / integration tests (sandbox)
+  - repo: local
+    hooks:
+      - id: go-test-e2e
+        name: go test e2e
+        entry: bash -c 'go test ./internal/sandbox/... -run "TestSandbox" -v'
+        language: system
+        pass_filenames: false
+        files: (internal/sandbox/.*\.go|cmd/sandbox-exec/)$
+        stages: [pre-commit]

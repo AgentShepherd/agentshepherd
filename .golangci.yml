@@ -1,0 +1,110 @@
+# golangci-lint configuration
+# https://golangci-lint.run/usage/configuration/
+
+run:
+  timeout: 5m
+  modules-download-mode: readonly
+
+linters:
+  enable:
+    # Critical - must have
+    - staticcheck      # Gold standard static analysis
+    - errcheck         # Unchecked error returns
+    - gosec            # Security vulnerabilities
+    - govet            # Suspicious constructs
+
+    # High priority
+    - revive           # Fast, extensible linter (replaces golint)
+    - ineffassign      # Ineffective assignments
+    - unused           # Unused code
+    - typecheck        # Type checking
+
+    # Formatting
+    - misspell         # Spelling mistakes in comments
+    - gofmt            # Formatting
+    - goimports        # Import organization
+
+    # Resource leak detection
+    - bodyclose        # HTTP response body close
+    - noctx            # HTTP requests without context
+    - sqlclosecheck    # SQL rows/stmt close
+
+linters-settings:
+  errcheck:
+    # Check for blank identifier assignments like `_ = f()`
+    check-blank: true
+    # Exclude certain functions where ignoring errors is acceptable
+    exclude-functions:
+      # Cleanup/defer operations
+      - (*os.File).Close
+      - (io.Closer).Close
+      - (*database/sql.DB).Close
+      - (*database/sql.Rows).Close
+      - (*compress/gzip.Reader).Close
+      - io.Closer.Close
+      # Process cleanup (best effort)
+      - (*os/exec.Cmd).Wait
+      - (*os.Process).Kill
+      - (*os.Process).Signal
+      - (*os.Process).Release
+      # Flag parsing (errors shown via usage)
+      - (*flag.FlagSet).Parse
+      # HTTP response body (often in defer)
+      - (*net/http.Response).Body.Close
+      # Daemon PID file cleanup (best effort)
+      - github.com/AgentShepherd/agentshepherd/internal/daemon.RemovePID
+      # Telemetry stats (best effort, non-critical)
+      - (database/sql.Result).RowsAffected
+      # TUI user input (best effort)
+      - (*bufio.Reader).ReadString
+      # Shutdown operations (best effort cleanup)
+      - (*github.com/AgentShepherd/agentshepherd/internal/security.Manager).Shutdown
+      - (*github.com/AgentShepherd/agentshepherd/internal/telemetry.Provider).Shutdown
+      - (*github.com/AgentShepherd/agentshepherd/internal/rules.Watcher).Stop
+      # HTTP write to client (can't recover if client disconnects)
+      - (net/http.ResponseWriter).Write
+      - io.Copy
+
+  revive:
+    rules:
+      - name: blank-imports
+      - name: context-as-argument
+      - name: context-keys-type
+      - name: dot-imports
+      - name: error-return
+      - name: error-strings
+      - name: error-naming
+      - name: exported
+      - name: increment-decrement
+      - name: var-naming
+      - name: package-comments
+      - name: range
+      - name: receiver-naming
+      - name: time-naming
+      - name: unexported-return
+      - name: indent-error-flow
+      - name: errorf
+
+  gosec:
+    excludes:
+      - G104  # Audit errors not checked (too noisy for some patterns)
+
+  misspell:
+    locale: US
+
+issues:
+  exclude-rules:
+    # Ignore long lines in generated code
+    - path: _test\.go
+      linters:
+        - gocyclo
+        - errcheck
+        - gosec
+
+    # Ignore certain issues in main.go
+    - path: main\.go
+      linters:
+        - gocyclo
+
+  max-issues-per-linter: 50
+  max-same-issues: 10

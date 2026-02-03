@@ -1,0 +1,272 @@
+package rules
+
+import (
+	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
+	"runtime"
+	"testing"
+
+	"gopkg.in/yaml.v3"
+)
+
+// ScenarioCase represents a single test scenario from YAML
+type ScenarioCase struct {
+	Tool        string         `yaml:"tool"`
+	Args        map[string]any `yaml:"args"`
+	Expect      string         `yaml:"expect,omitempty"` // "BLOCKED" or empty for allow
+	Description string         `yaml:"description,omitempty"`
+}
+
+// ScenarioFile represents the structure of scenario YAML files
+type ScenarioFile struct {
+	Scenarios []ScenarioCase `yaml:"scenarios"`
+}
+
+// getTestDataPath returns the path to the testdata directory
+func getTestDataPath() string {
+	_, filename, _, _ := runtime.Caller(0)
+	return filepath.Join(filepath.Dir(filename), "testdata")
+}
+
+// loadScenarios loads scenarios from a YAML file
+func loadScenarios(t *testing.T, filename string) []ScenarioCase {
+	t.Helper()
+
+	path := filepath.Join(getTestDataPath(), filename)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("Failed to read scenario file %s: %v", filename, err)
+	}
+
+	var file ScenarioFile
+	if err := yaml.Unmarshal(data, &file); err != nil {
+		t.Fatalf("Failed to parse scenario file %s: %v", filename, err)
+	}
+
+	return file.Scenarios
+}
+
+// createEngineWithBuiltinRules creates an engine with only builtin rules
+func createEngineWithBuiltinRules(t *testing.T) *Engine {
+	t.Helper()
+
+	// Create engine with builtin rules enabled but no user rules directory
+	engine, err := NewEngine(EngineConfig{
+		UserRulesDir:   "", // No user rules
+		DisableBuiltin: false,
+	})
+	if err != nil {
+		t.Fatalf("Failed to create engine: %v", err)
+	}
+
+	return engine
+}
+
+// scenarioToToolCall converts a scenario to a ToolCall
+func scenarioToToolCall(scenario ScenarioCase) ToolCall {
+	argsJSON, _ := json.Marshal(scenario.Args)
+	return ToolCall{
+		Name:      scenario.Tool,
+		Arguments: argsJSON,
+	}
+}
+
+// TestNormalAgentScenarios tests that normal agent operations are NOT blocked
+func TestNormalAgentScenarios(t *testing.T) {
+	scenarios := loadScenarios(t, "normal_agent.yaml")
+	engine := createEngineWithBuiltinRules(t)
+
+	t.Logf("Loaded %d normal agent scenarios", len(scenarios))
+	t.Logf("Engine has %d active rules", engine.RuleCount())
+
+	var passed, failed int
+	var failures []string
+
+	for i, scenario := range scenarios {
+		t.Run(fmt.Sprintf("%02d_%s", i+1, scenario.Description), func(t *testing.T) {
+			call := scenarioToToolCall(scenario)
+			result := engine.Evaluate(call)
+
+			if result.Matched {
+				failed++
+				failMsg := fmt.Sprintf("FAIL: %s - Expected ALLOWED but got BLOCKED by rule '%s': %s",
+					scenario.Description, result.RuleName, result.Message)
+				failures = append(failures, failMsg)
+				t.Errorf("%s", failMsg)
+			} else {
+				passed++
+				t.Logf("PASS: %s - Allowed as expected", scenario.Description)
+			}
+		})
+	}
+
+	// Summary
+	t.Logf("\n=== Normal Agent Scenarios Summary ===")
+	t.Logf("Passed: %d/%d", passed, len(scenarios))
+	t.Logf("Failed: %d/%d", failed, len(scenarios))
+
+	if failed > 0 {
+		t.Logf("\nFailures (false positives - blocking legitimate operations):")
+		for _, f := range failures {
+			t.Logf("  - %s", f)
+		}
+	}
+}
+
+// TestMaliciousAgentScenarios tests that malicious agent operations ARE blocked
+func TestMaliciousAgentScenarios(t *testing.T) {
+	scenarios := loadScenarios(t, "malicious_agent.yaml")
+	engine := createEngineWithBuiltinRules(t)
+
+	t.Logf("Loaded %d malicious agent scenarios", len(scenarios))
+	t.Logf("Engine has %d active rules", engine.RuleCount())
+
+	var passed, failed int
+	var failures []string
+
+	for i, scenario := range scenarios {
+		t.Run(fmt.Sprintf("%02d_%s", i+1, scenario.Description), func(t *testing.T) {
+			call := scenarioToToolCall(scenario)
+			result := engine.Evaluate(call)
+
+			if scenario.Expect == "BLOCKED" {
+				if result.Matched {
+					passed++
+					t.Logf("PASS: %s - Blocked by rule '%s'", scenario.Description, result.RuleName)
+				} else {
+					failed++
+					argsJSON, _ := json.Marshal(scenario.Args)
+					failMsg := fmt.Sprintf("FAIL: %s - Expected BLOCKED but was ALLOWED (tool=%s, args=%s)",
+						scenario.Description, scenario.Tool, string(argsJSON))
+					failures = append(failures, failMsg)
+					t.Errorf("%s", failMsg)
+				}
+			} else {
+				// If expect is not "BLOCKED", treat as should be allowed (shouldn't happen in malicious file)
+				if !result.Matched {
+					passed++
+				} else {
+					failed++
+					failures = append(failures, fmt.Sprintf("FAIL: %s - Unexpected block", scenario.Description))
+					t.Errorf("Expected allowed but got blocked")
+				}
+			}
+		})
+	}
+
+	// Summary
+	t.Logf("\n=== Malicious Agent Scenarios Summary ===")
+	t.Logf("Passed: %d/%d", passed, len(scenarios))
+	t.Logf("Failed: %d/%d", failed, len(scenarios))
+
+	if failed > 0 {
+		t.Logf("\nFailures (missing rules - malicious operations not blocked):")
+		for _, f := range failures {
+			t.Logf("  - %s", f)
+		}
+	}
+}
+
+// TestScenarioFilesExist verifies that the scenario test data files exist
+func TestScenarioFilesExist(t *testing.T) {
+	testDataPath := getTestDataPath()
+
+	files := []string{
+		"normal_agent.yaml",
+		"malicious_agent.yaml",
+	}
+
+	for _, file := range files {
+		path := filepath.Join(testDataPath, file)
+		if _, err := os.Stat(path); os.IsNotExist(err) {
+			t.Errorf("Required test data file missing: %s", path)
+		} else {
+			t.Logf("Found test data file: %s", path)
+		}
+	}
+}
+
+// TestScenarioSummary provides a high-level summary of all scenario tests
+func TestScenarioSummary(t *testing.T) {
+	normalScenarios := loadScenarios(t, "normal_agent.yaml")
+	maliciousScenarios := loadScenarios(t, "malicious_agent.yaml")
+	engine := createEngineWithBuiltinRules(t)
+
+	t.Logf("\n=== Scenario Test Configuration ===")
+	t.Logf("Normal agent scenarios: %d", len(normalScenarios))
+	t.Logf("Malicious agent scenarios: %d", len(maliciousScenarios))
+	t.Logf("Active builtin rules: %d", engine.RuleCount())
+
+	// Count by tool type
+	normalByTool := make(map[string]int)
+	for _, s := range normalScenarios {
+		normalByTool[s.Tool]++
+	}
+	t.Logf("\nNormal scenarios by tool:")
+	for tool, count := range normalByTool {
+		t.Logf("  %s: %d", tool, count)
+	}
+
+	maliciousByTool := make(map[string]int)
+	for _, s := range maliciousScenarios {
+		maliciousByTool[s.Tool]++
+	}
+	t.Logf("\nMalicious scenarios by tool:")
+	for tool, count := range maliciousByTool {
+		t.Logf("  %s: %d", tool, count)
+	}
+
+	// List all active rules
+	t.Logf("\nActive rules:")
+	for _, rule := range engine.GetRules() {
+		t.Logf("  - %s (severity=%s, ops=%v)", rule.Name, rule.GetSeverity(), rule.Operations)
+	}
+}
+
+// TestRuleHitCoverage checks which rules are hit by malicious scenarios
+func TestRuleHitCoverage(t *testing.T) {
+	scenarios := loadScenarios(t, "malicious_agent.yaml")
+	engine := createEngineWithBuiltinRules(t)
+
+	// Track which rules are hit
+	ruleHits := make(map[string]int)
+
+	for _, scenario := range scenarios {
+		if scenario.Expect == "BLOCKED" {
+			call := scenarioToToolCall(scenario)
+			result := engine.Evaluate(call)
+			if result.Matched {
+				ruleHits[result.RuleName]++
+			}
+		}
+	}
+
+	// Get all rules and check coverage
+	allRules := engine.GetRules()
+	var rulesWithHits, rulesWithoutHits int
+	var uncoveredRules []string
+
+	t.Logf("\n=== Rule Coverage Analysis ===")
+	for _, rule := range allRules {
+		hits := ruleHits[rule.Name]
+		if hits > 0 {
+			rulesWithHits++
+			t.Logf("  [%d hits] %s", hits, rule.Name)
+		} else {
+			rulesWithoutHits++
+			uncoveredRules = append(uncoveredRules, rule.Name)
+		}
+	}
+
+	t.Logf("\nRules with test coverage: %d/%d", rulesWithHits, len(allRules))
+	t.Logf("Rules without test coverage: %d/%d", rulesWithoutHits, len(allRules))
+
+	if len(uncoveredRules) > 0 {
+		t.Logf("\nRules not hit by any malicious scenario:")
+		for _, name := range uncoveredRules {
+			t.Logf("  - %s", name)
+		}
+	}
+}
