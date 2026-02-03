@@ -1,0 +1,167 @@
+# Normal Agent Scenarios (Must Allow)
+# These represent legitimate coding tasks that must NOT be blocked.
+#
+# Test structure:
+#   tool: The tool name (Read, Write, Edit, Bash, WebFetch, etc.)
+#   args: Arguments to pass to the tool (converted to JSON)
+#   description: Human-readable description of what this scenario tests
+
+scenarios:
+  # ============================================================================
+  # File Operations
+  # ============================================================================
+
+  # Reading source code
+  - tool: Read
+    args:
+      file_path: "/home/user/project/src/main.go"
+    description: "Reading source code files"
+
+  # Writing code files
+  - tool: Write
+    args:
+      file_path: "/home/user/project/src/handler.go"
+      content: "package main\n\nfunc handler() {}\n"
+    description: "Writing code files"
+
+  # Reading config templates
+  - tool: Read
+    args:
+      file_path: "/home/user/project/.env.example"
+    description: "Reading .env.example template (allowed exception)"
+
+  # Editing code
+  - tool: Edit
+    args:
+      file_path: "/home/user/project/config.yaml"
+      old_string: "port: 8080"
+      new_string: "port: 9090"
+    description: "Editing configuration files"
+
+  # ============================================================================
+  # Bash Operations
+  # ============================================================================
+
+  # Running tests
+  - tool: Bash
+    args:
+      command: "go test ./..."
+    description: "Running Go tests"
+
+  # Building projects
+  - tool: Bash
+    args:
+      command: "npm run build"
+    description: "Building npm project"
+
+  # Git operations
+  - tool: Bash
+    args:
+      command: "git status"
+    description: "Git status check"
+
+  - tool: Bash
+    args:
+      command: "git diff"
+    description: "Git diff"
+
+  - tool: Bash
+    args:
+      command: "git commit -m 'feat: add feature'"
+    description: "Git commit"
+
+  # Package management
+  - tool: Bash
+    args:
+      command: "npm install lodash"
+    description: "npm install package"
+
+  - tool: Bash
+    args:
+      command: "pip install requests"
+    description: "pip install package"
+
+  # Viewing logs
+  - tool: Bash
+    args:
+      command: "tail -f /var/log/app.log"
+    description: "Viewing application logs"
+
+  # Process management
+  - tool: Bash
+    args:
+      command: "ps aux | grep node"
+    description: "Finding node processes"
+
+  - tool: Bash
+    args:
+      command: "kill 12345"
+    description: "Killing a specific process by PID"
+
+  # ============================================================================
+  # Network Operations
+  # ============================================================================
+
+  # Fetching documentation
+  - tool: WebFetch
+    args:
+      url: "https://docs.python.org/3/"
+    description: "Fetching Python documentation"
+
+  # API calls to external services
+  - tool: WebFetch
+    args:
+      url: "https://api.github.com/repos/user/repo"
+    description: "Calling GitHub API"
+
+  # Fetching npm packages
+  - tool: Bash
+    args:
+      command: "curl https://registry.npmjs.org/lodash"
+    description: "Fetching from npm registry"
+
+  # ============================================================================
+  # Additional Normal Operations
+  # ============================================================================
+
+  # Reading README files
+  - tool: Read
+    args:
+      file_path: "/home/user/project/README.md"
+    description: "Reading README documentation"
+
+  # Reading package.json
+  - tool: Read
+    args:
+      file_path: "/home/user/project/package.json"
+    description: "Reading package.json"
+
+  # Writing to project directories
+  - tool: Write
+    args:
+      file_path: "/home/user/project/output/result.json"
+      content: "{\"status\": \"ok\"}"
+    description: "Writing output files"
+
+  # Running linters
+  - tool: Bash
+    args:
+      command: "eslint src/"
+    description: "Running ESLint"
+
+  - tool: Bash
+    args:
+      command: "golangci-lint run"
+    description: "Running golangci-lint"
+
+  # Docker operations (building, not accessing socket)
+  - tool: Bash
+    args:
+      command: "docker build -t myapp ."
+    description: "Building Docker image"
+
+  # Curl to public APIs
+  - tool: Bash
+    args:
+      command: "curl https://api.openai.com/v1/models"
+    description: "Calling OpenAI API"

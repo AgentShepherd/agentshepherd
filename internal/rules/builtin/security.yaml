@@ -1,0 +1,187 @@
+rules:
+  # ===========================================================================
+  # 1. CREDENTIAL PROTECTION
+  # ===========================================================================
+  - name: protect-env-files
+    block: ["**/.env", "**/.env.*"]
+    except: ["**/.env.example", "**/.env.template"]
+    actions: [read, write, delete, copy, move]
+    message: "Cannot access .env files - may contain secrets"
+    severity: critical
+
+  - name: protect-ssh-keys
+    block: ["**/.ssh/id_*"]
+    except: ["**/.ssh/id_*.pub"]
+    actions: [read, write, delete, copy, move]
+    message: "Cannot access SSH private keys"
+    severity: critical
+
+  # ===========================================================================
+  # 2. SELF PROTECTION
+  # ===========================================================================
+  - name: protect-agentshepherd
+    block:
+      - "**/.agentshepherd/**"
+      - "**/agentshepherd*.db"
+    actions: [read, write, delete]
+    message: "Cannot access AgentShepherd data"
+    severity: critical
+
+  # ===========================================================================
+  # 3. SHELL HISTORY PROTECTION
+  # ===========================================================================
+  - name: protect-shell-history
+    block:
+      - "**/.bash_history"
+      - "**/.zsh_history"
+      - "**/.sh_history"
+      - "**/.history"
+      - "**/.python_history"
+      - "**/.node_repl_history"
+      - "**/.mysql_history"
+      - "**/.psql_history"
+      - "**/.sqlite_history"
+      - "**/.lesshst"
+    actions: [read, write, delete, copy, move]
+    message: "Cannot access shell history files"
+    severity: high
+
+  # ===========================================================================
+  # 4. CLOUD CREDENTIALS PROTECTION
+  # ===========================================================================
+  - name: protect-cloud-credentials
+    block:
+      # AWS
+      - "**/.aws/credentials"
+      - "**/.aws/config"
+      # Google Cloud
+      - "**/.config/gcloud/**"
+      - "**/application_default_credentials.json"
+      # Azure
+      - "**/.azure/**"
+      # Kubernetes
+      - "**/.kube/config"
+      - "**/.kube/cache/**"
+      # Docker
+      - "**/.docker/config.json"
+      # Terraform
+      - "**/.terraform.d/credentials.tfrc.json"
+      - "**/terraform.tfstate"
+      - "**/terraform.tfstate.backup"
+    actions: [read, write, delete, copy, move]
+    message: "Cannot access cloud credentials"
+    severity: critical
+
+  # ===========================================================================
+  # 5. GPG/PGP KEY PROTECTION
+  # ===========================================================================
+  - name: protect-gpg-keys
+    block:
+      - "**/.gnupg/private-keys-v1.d/**"
+      - "**/.gnupg/secring.gpg"
+      - "**/.gnupg/trustdb.gpg"
+      - "**/.gnupg/random_seed"
+    except:
+      - "**/.gnupg/pubring.gpg"
+      - "**/.gnupg/*.conf"
+    actions: [read, write, delete, copy, move]
+    message: "Cannot access GPG private keys"
+    severity: critical
+
+  # ===========================================================================
+  # 6. BROWSER DATA PROTECTION
+  # ===========================================================================
+  - name: protect-browser-data
+    block:
+      # Chrome (macOS)
+      - "**/Library/Application Support/Google/Chrome/**/Login Data"
+      - "**/Library/Application Support/Google/Chrome/**/Cookies"
+      - "**/Library/Application Support/Google/Chrome/**/History"
+      # Chrome (Linux)
+      - "**/.config/google-chrome/**/Login Data"
+      - "**/.config/google-chrome/**/Cookies"
+      - "**/.config/google-chrome/**/History"
+      # Firefox
+      - "**/.mozilla/firefox/**/logins.json"
+      - "**/.mozilla/firefox/**/key*.db"
+      - "**/.mozilla/firefox/**/cookies.sqlite"
+      # Safari
+      - "**/Library/Safari/History.db"
+      - "**/Library/Cookies/Cookies.binarycookies"
+    actions: [read, copy]
+    message: "Cannot access browser sensitive data"
+    severity: high
+
+  # ===========================================================================
+  # 7. GIT CREDENTIALS PROTECTION
+  # ===========================================================================
+  - name: protect-git-credentials
+    block:
+      - "**/.git-credentials"
+      - "**/.config/git/credentials"
+    actions: [read, write, delete, copy, move]
+    message: "Cannot access git credentials"
+    severity: high
+
+  # ===========================================================================
+  # 8. PACKAGE MANAGER TOKENS
+  # ===========================================================================
+  - name: protect-package-tokens
+    block:
+      # npm
+      - "**/.npmrc"
+      # Yarn
+      - "**/.yarnrc"
+      - "**/.yarnrc.yml"
+      # pip/PyPI
+      - "**/.pypirc"
+      - "**/.pip/pip.conf"
+      # Cargo
+      - "**/.cargo/credentials"
+      - "**/.cargo/credentials.toml"
+      # Composer
+      - "**/.composer/auth.json"
+      # NuGet
+      - "**/.nuget/NuGet.Config"
+      # Gem
+      - "**/.gem/credentials"
+    actions: [read, write, delete, copy, move]
+    message: "Cannot access package manager tokens"
+    severity: high
+
+  # ===========================================================================
+  # 9. PERSISTENCE PROTECTION - Shell RC Files
+  # ===========================================================================
+  - name: protect-shell-rc
+    block:
+      - "**/.bashrc"
+      - "**/.bash_profile"
+      - "**/.bash_login"
+      - "**/.zshrc"
+      - "**/.zprofile"
+      - "**/.zshenv"
+      - "**/.profile"
+    actions: [write, delete]
+    message: "Cannot modify shell startup files - persistence vector"
+    severity: critical
+
+  # ===========================================================================
+  # 10. SSH AUTHORIZED KEYS PROTECTION
+  # ===========================================================================
+  - name: protect-ssh-authorized-keys
+    block:
+      - "**/.ssh/authorized_keys"
+      - "**/.ssh/authorized_keys2"
+    actions: [write, delete]
+    message: "Cannot modify SSH authorized keys - persistence vector"
+    severity: critical
+
+  # ===========================================================================
+  # 11. PRIVATE KEY CONTENT DETECTION
+  # ===========================================================================
+  - name: detect-private-key-write
+    match:
+      content: "re:-----BEGIN (RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----"
+    actions: [write]
+    message: "Cannot write private key content - potential key exfiltration"
+    severity: critical

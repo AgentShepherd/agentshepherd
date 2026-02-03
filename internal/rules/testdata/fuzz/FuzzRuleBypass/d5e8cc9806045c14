@@ -1,0 +1,3 @@
+go test fuzz v1
+string("BAsh")
+string("{\"CommAnd\":\"rm -rf /etC/0\"}")

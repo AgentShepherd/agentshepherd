@@ -1,0 +1,158 @@
+package security
+
+import (
+	"net/http"
+	"time"
+
+	"github.com/gin-gonic/gin"
+
+	"github.com/AgentShepherd/agentshepherd/internal/api"
+	"github.com/AgentShepherd/agentshepherd/internal/rules"
+	"github.com/AgentShepherd/agentshepherd/internal/telemetry"
+)
+
+// APIServer handles HTTP API requests for security management and telemetry
+type APIServer struct {
+	storage      *telemetry.Storage
+	interceptor  *Interceptor
+	telemetryAPI *telemetry.APIHandler
+	router       *gin.Engine
+}
+
+// NewAPIServer creates a new API server
+func NewAPIServer(storage *telemetry.Storage, interceptor *Interceptor) *APIServer {
+	gin.SetMode(gin.ReleaseMode)
+	router := gin.New()
+
+	// Apply middleware in order
+	router.Use(gin.Recovery())
+	router.Use(api.SecurityHeadersMiddleware())
+	router.Use(api.BodySizeLimitMiddleware(api.MaxBodySize)) // Limit request body size
+
+	s := &APIServer{
+		storage:      storage,
+		interceptor:  interceptor,
+		telemetryAPI: telemetry.NewAPIHandler(storage),
+		router:       router,
+	}
+
+	s.registerRoutes()
+	return s
+}
+
+// Handler returns the HTTP handler for the API
+func (s *APIServer) Handler() http.Handler {
+	return s.router
+}
+
+func (s *APIServer) registerRoutes() {
+	// Health check
+	s.router.GET("/health", s.handleHealth)
+
+	// API routes
+	apiGroup := s.router.Group("/api")
+	{
+		// Security routes
+		security := apiGroup.Group("/security")
+		{
+			security.GET("/logs", s.handleLogs)
+			security.GET("/stats", s.handleStats)
+			security.GET("/status", s.handleStatus)
+		}
+
+		// Telemetry routes
+		telemetryGroup := apiGroup.Group("/telemetry")
+		{
+			telemetryGroup.GET("/traces", s.telemetryAPI.HandleTraces)
+			telemetryGroup.GET("/traces/:trace_id", s.telemetryAPI.HandleTrace)
+			telemetryGroup.GET("/stats", s.telemetryAPI.HandleStats)
+		}
+
+		// Rules routes (if rule engine is available)
+		if ruleEngine := rules.GetGlobalEngine(); ruleEngine != nil {
+			rulesAPI := rules.NewAPIHandler(ruleEngine)
+			rulesGroup := apiGroup.Group("/agentshepherd/rules")
+			{
+				rulesGroup.GET("", rulesAPI.HandleRules)
+				rulesGroup.GET("/builtin", rulesAPI.HandleBuiltinRules)
+				rulesGroup.GET("/user", rulesAPI.HandleUserRules)
+				rulesGroup.DELETE("/user/:filename", rulesAPI.HandleDeleteUserRuleFile)
+				rulesGroup.POST("/reload", rulesAPI.HandleReload)
+				rulesGroup.POST("/validate", rulesAPI.HandleValidate)
+				rulesGroup.GET("/files", rulesAPI.HandleListFiles)
+				rulesGroup.POST("/files", rulesAPI.HandleAddFile)
+			}
+		}
+	}
+}
+
+// LogsQuery represents query parameters for logs endpoint
+type LogsQuery struct {
+	// SECURITY: Added max limits to prevent resource exhaustion
+	Minutes int `form:"minutes" binding:"omitempty,min=1,max=10080"` // max 7 days
+	Limit   int `form:"limit" binding:"omitempty,min=1,max=1000"`    // reduced from 10000
+}
+
+// handleLogs handles GET /api/security/logs
+func (s *APIServer) handleLogs(c *gin.Context) {
+	var query LogsQuery
+	if err := c.ShouldBindQuery(&query); err != nil {
+		api.Error(c, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	// Set defaults
+	if query.Minutes == 0 {
+		query.Minutes = 60
+	}
+	if query.Limit == 0 {
+		query.Limit = 100
+	}
+
+	logs, err := s.storage.GetRecentLogs(query.Minutes, query.Limit)
+	if err != nil {
+		api.Error(c, http.StatusInternalServerError, "Failed to get logs")
+		return
+	}
+
+	if logs == nil {
+		logs = []telemetry.ToolCallLog{}
+	}
+
+	api.Success(c, logs)
+}
+
+// handleStats handles GET /api/security/stats
+func (s *APIServer) handleStats(c *gin.Context) {
+	stats, err := s.storage.GetStats()
+	if err != nil {
+		api.Error(c, http.StatusInternalServerError, "Failed to get stats")
+		return
+	}
+
+	api.Success(c, stats)
+}
+
+// handleStatus handles GET /api/security/status
+func (s *APIServer) handleStatus(c *gin.Context) {
+	ruleCount := 0
+	if ruleEngine := rules.GetGlobalEngine(); ruleEngine != nil {
+		ruleCount = ruleEngine.RuleCount()
+	}
+
+	enabled := false
+	if s.interceptor != nil {
+		enabled = s.interceptor.IsEnabled()
+	}
+
+	api.Success(c, gin.H{
+		"enabled":     enabled,
+		"rules_count": ruleCount,
+		"timestamp":   time.Now().UTC().Format(time.RFC3339),
+	})
+}
+
+// handleHealth handles GET /health
+func (s *APIServer) handleHealth(c *gin.Context) {
+	c.String(http.StatusOK, "OK")
+}

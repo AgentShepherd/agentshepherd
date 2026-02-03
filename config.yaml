@@ -1,0 +1,41 @@
+# AgentShepherd Configuration
+
+server:
+  port: 9090
+  log_level: info    # debug, info, warn, error
+  no_color: false
+
+# Upstream target (where to forward requests)
+upstream:
+  url: "https://openrouter.ai/api"  # Base URL (client sends /v1/chat/completions)
+  timeout: 300                      # seconds
+
+# Unified storage (SQLCipher encrypted SQLite)
+storage:
+  db_path: "./agentshepherd.db"
+  encryption_key: ""        # SQLCipher key (empty = no encryption)
+
+# Management API
+api:
+  port: 9091
+
+# Telemetry (writes to SQLite via storage)
+telemetry:
+  enabled: false
+  service_name: "agentshepherd"
+  sample_rate: 1.0
+
+# Security (Tool Call Interception)
+security:
+  enabled: true
+  buffer_streaming: true      # Buffer streaming responses for security evaluation (default: true)
+  max_buffer_size: 1000       # Maximum SSE events to buffer
+  buffer_timeout: 60          # Buffer timeout in seconds
+  block_mode: remove          # "remove" (delete tool calls) or "replace" (substitute with echo command)
+
+# Rules Engine
+rules:
+  enabled: true
+  user_dir: ""              # default: ~/.agentshepherd/rules.d
+  disable_builtin: false    # set true to disable embedded security rules
+  watch: true               # enable hot reload via file watching

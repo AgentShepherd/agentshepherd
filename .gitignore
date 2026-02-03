@@ -1,0 +1,24 @@
+# Binaries
+agentshepherd
+cmd/sandbox-exec/sandbox-exec
+
+# Database
+*.db
+*.db-shm
+*.db-wal
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# Build
+*.o
+*.exe
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Claude settings
+.claude/settings.local.json
