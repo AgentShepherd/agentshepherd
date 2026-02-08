@@ -5,7 +5,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
-	"github.com/AgentShepherd/agentshepherd/internal/api"
+	"github.com/BakeLens/crust/internal/api"
 )
 
 // APIHandler handles HTTP API requests for telemetry

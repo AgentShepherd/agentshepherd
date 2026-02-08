@@ -3,16 +3,28 @@ package rules
 import (
 	"encoding/json"
 	"strings"
+
+	"mvdan.cc/sh/v3/syntax"
 )
 
 // ExtractedInfo contains paths and operation from a tool call
 type ExtractedInfo struct {
-	Operation Operation
-	Paths     []string
-	Hosts     []string
-	Command   string // Raw command string (for Bash tool)
-	Content   string // Content being written (for Write/Edit tools)
-	RawArgs   map[string]any
+	Operation     Operation
+	Paths         []string
+	Hosts         []string
+	Command       string // Raw command string (for Bash tool)
+	Content       string // Content being written (for Write/Edit tools)
+	RawArgs       map[string]any
+	Evasive       bool   // true if command uses shell tricks that prevent static analysis
+	EvasiveReason string // human-readable reason for evasion detection
+}
+
+// parsedCommand represents a single command extracted from a shell AST.
+type parsedCommand struct {
+	Name       string
+	Args       []string
+	HasSubst   bool     // true if any arg contains $() or backticks
+	RedirPaths []string // paths from redirections (>, >>)
 }
 
 // Extractor extracts paths and operations from tool calls
@@ -25,6 +37,7 @@ type CommandInfo struct {
 	Operation    Operation
 	PathArgIndex []int    // positional args that are paths
 	PathFlags    []string // flags followed by paths (-o, --output)
+	SkipFlags    []string // flags followed by non-path values (-n, --count)
 }
 
 // NewExtractor creates a new Extractor with the default command database
@@ -41,11 +54,11 @@ func defaultCommandDB() map[string]CommandInfo {
 		// READ OPERATIONS
 		// ===========================================
 		"cat":  {Operation: OpRead, PathArgIndex: []int{0, 1, 2, 3, 4, 5, 6, 7, 8, 9}},
-		"head": {Operation: OpRead, PathArgIndex: []int{0, 1, 2, 3, 4, 5}},
-		"tail": {Operation: OpRead, PathArgIndex: []int{0, 1, 2, 3, 4, 5}},
+		"head": {Operation: OpRead, PathArgIndex: []int{0, 1, 2, 3, 4, 5}, SkipFlags: []string{"-n", "--lines", "-c", "--bytes"}},
+		"tail": {Operation: OpRead, PathArgIndex: []int{0, 1, 2, 3, 4, 5}, SkipFlags: []string{"-n", "--lines", "-c", "--bytes"}},
 		"less": {Operation: OpRead, PathArgIndex: []int{0, 1, 2, 3, 4, 5}},
 		"more": {Operation: OpRead, PathArgIndex: []int{0, 1, 2, 3, 4, 5}},
-		"grep": {Operation: OpRead, PathArgIndex: []int{1, 2, 3, 4, 5, 6, 7, 8, 9}},
+		"grep": {Operation: OpRead, PathArgIndex: []int{1, 2, 3, 4, 5, 6, 7, 8, 9}, SkipFlags: []string{"-e", "--regexp", "-m", "--max-count", "-A", "-B", "-C", "--context"}},
 		"vim":  {Operation: OpRead, PathArgIndex: []int{0, 1, 2, 3, 4, 5}},
 		"vi":   {Operation: OpRead, PathArgIndex: []int{0, 1, 2, 3, 4, 5}},
 		"nano": {Operation: OpRead, PathArgIndex: []int{0, 1, 2, 3, 4, 5}},
@@ -161,29 +174,26 @@ func defaultCommandDB() map[string]CommandInfo {
 	}
 }
 
-// skipFlagsDB contains flags that take non-path arguments (value follows the flag)
-var skipFlagsDB = map[string]bool{
-	// head/tail
-	"-n": true, "--lines": true,
-	// grep (note: -f in grep takes a file, but we already handle paths)
-	"-e": true, "--regexp": true,
-	"-m": true, "--max-count": true, "-A": true, "-B": true, "-C": true,
-	// general option flags (not boolean flags like -f for force or follow)
-	"-c": true, "--count": true,
-}
-
 // Extract extracts info from a tool call
 func (e *Extractor) Extract(toolName string, args json.RawMessage) ExtractedInfo {
 	info := ExtractedInfo{
 		RawArgs: make(map[string]any),
 	}
 
-	// Store raw args as Content for universal content matching
-	info.Content = string(args)
-
 	// Parse the raw args
 	if err := json.Unmarshal(args, &info.RawArgs); err != nil {
+		info.Content = string(args)
 		return info
+	}
+
+	// SECURITY: Re-marshal decoded args for content matching.
+	// json.Unmarshal decodes \uXXXX escapes → actual chars, then json.Marshal
+	// writes them back as plain text. This prevents bypassing content-only rules
+	// by encoding "localhost" as "\u006c\u006f\u0063\u0061\u006c\u0068\u006f\u0073\u0074".
+	if normalized, err := json.Marshal(info.RawArgs); err == nil {
+		info.Content = string(normalized)
+	} else {
+		info.Content = string(args)
 	}
 
 	// Normalize tool name for comparison
@@ -209,7 +219,10 @@ func (e *Extractor) Extract(toolName string, args json.RawMessage) ExtractedInfo
 	return info
 }
 
-// extractBashCommand parses a bash command and extracts paths/operation
+// extractBashCommand parses a bash command and extracts paths/operation.
+// Uses the mvdan.cc/sh AST parser to analyze ALL commands in pipelines,
+// chains (&&, ||, ;), and subshells. Falls back to the legacy tokenizer
+// if the AST parser fails (e.g., incomplete or malformed commands from LLM).
 func (e *Extractor) extractBashCommand(info *ExtractedInfo) {
 	cmdRaw, ok := info.RawArgs["command"]
 	if !ok {
@@ -221,73 +234,110 @@ func (e *Extractor) extractBashCommand(info *ExtractedInfo) {
 		return
 	}
 
-	// Store the raw command for advanced rule matching
+	// Store the raw command for advanced rule matching (match.command regex)
 	info.Command = cmd
 
-	// Parse the command into tokens
-	tokens := tokenizeCommand(cmd)
-	if len(tokens) == 0 {
+	// Empty/whitespace-only commands are harmless
+	if strings.TrimSpace(cmd) == "" {
 		return
 	}
 
-	// Find the actual command (skip env vars, sudo, etc.)
-	cmdIndex := 0
-	for i, token := range tokens {
-		// Skip environment variable assignments (FOO=bar)
-		if strings.Contains(token, "=") && !strings.HasPrefix(token, "-") {
-			continue
-		}
-		// Skip sudo, env, time, etc.
-		if token == "sudo" || token == "env" || token == "time" || token == "nice" {
-			continue
-		}
-		cmdIndex = i
-		break
-	}
-
-	if cmdIndex >= len(tokens) {
+	// Parse using full Bash AST parser (handles pipelines, &&, ||, subshells)
+	if parsed := parseShellCommands(cmd); len(parsed) > 0 {
+		e.extractFromParsedCommands(info, parsed)
 		return
 	}
 
-	// Get the base command name (strip path)
-	cmdName := tokens[cmdIndex]
+	// AST parse failed (e.g., severely malformed command) — mark as evasive
+	info.Evasive = true
+	info.EvasiveReason = "command could not be parsed for security analysis"
+}
+
+// extractFromParsedCommands processes all commands from the shell AST parser.
+// Merges paths, hosts, and operations from every command in the pipeline/chain.
+func (e *Extractor) extractFromParsedCommands(info *ExtractedInfo, commands []parsedCommand) {
+	for _, pc := range commands {
+		// Check for command substitution evasion
+		if pc.HasSubst {
+			info.Evasive = true
+			info.EvasiveReason = "command contains shell substitution ($() or backticks) which prevents static analysis"
+		}
+
+		// Resolve the actual command name and args, skipping wrappers like sudo/env
+		cmdName, args := e.resolveCommand(pc.Name, pc.Args)
+
+		// Look up in command database
+		cmdInfo, found := e.commandDB[cmdName]
+		if found {
+			// Use the most dangerous operation
+			if operationPriority(cmdInfo.Operation) > operationPriority(info.Operation) {
+				info.Operation = cmdInfo.Operation
+			}
+			// Extract paths from positional arguments
+			e.extractPathsFromArgs(info, args, cmdInfo)
+
+			// For network commands, extract hosts from all args
+			if cmdInfo.Operation == OpNetwork {
+				info.Hosts = append(info.Hosts, extractHosts(args)...)
+			}
+		}
+
+		// Add redirect target paths (always a write)
+		if len(pc.RedirPaths) > 0 {
+			info.Paths = append(info.Paths, pc.RedirPaths...)
+			if operationPriority(OpWrite) > operationPriority(info.Operation) {
+				info.Operation = OpWrite
+			}
+		}
+	}
+
+	// Deduplicate
+	info.Paths = deduplicateStrings(info.Paths)
+	info.Hosts = deduplicateStrings(info.Hosts)
+}
+
+// resolveCommand skips wrapper commands (sudo, env, time, nice) and returns
+// the actual command name and its arguments.
+func (e *Extractor) resolveCommand(name string, args []string) (string, []string) {
+	// Strip path prefix (e.g., /usr/bin/cat → cat)
+	cmdName := name
 	if idx := strings.LastIndex(cmdName, "/"); idx != -1 {
 		cmdName = cmdName[idx+1:]
 	}
 
-	// Look up command in database
-	cmdInfo, found := e.commandDB[cmdName]
-	if found {
-		info.Operation = cmdInfo.Operation
-		// Extract paths from positional arguments
-		e.extractPathsFromTokens(info, tokens[cmdIndex+1:], cmdInfo)
-	}
+	wrappers := map[string]bool{"sudo": true, "env": true, "time": true, "nice": true}
 
-	// Check for redirections which indicate write operation
-	if hasWriteRedirection(cmd) {
-		if info.Operation == "" {
-			info.Operation = OpWrite
+	// Walk through wrapper commands
+	for wrappers[cmdName] && len(args) > 0 {
+		// Skip flags of the wrapper (e.g., sudo -u root)
+		i := 0
+		for i < len(args) && strings.HasPrefix(args[i], "-") {
+			i++
+			// Skip flag value if it's a separate arg (e.g., sudo -u root)
+			if i < len(args) && !strings.HasPrefix(args[i], "-") &&
+				(i > 0 && (args[i-1] == "-u" || args[i-1] == "-g")) {
+				i++
+			}
 		}
-		// Extract redirect targets
-		paths := extractRedirectTargets(cmd)
-		info.Paths = append(info.Paths, paths...)
+		if i >= len(args) {
+			return cmdName, nil
+		}
+		cmdName = args[i]
+		if idx := strings.LastIndex(cmdName, "/"); idx != -1 {
+			cmdName = cmdName[idx+1:]
+		}
+		args = args[i+1:]
 	}
 
-	// Deduplicate paths
-	info.Paths = deduplicatePaths(info.Paths)
-
-	// For network commands, extract hosts
-	if info.Operation == OpNetwork {
-		info.Hosts = extractHosts(tokens)
-	}
+	return cmdName, args
 }
 
-// extractPathsFromTokens extracts paths from command tokens
-func (e *Extractor) extractPathsFromTokens(info *ExtractedInfo, tokens []string, cmdInfo CommandInfo) {
+// extractPathsFromArgs extracts paths from parsed command arguments using the command database.
+func (e *Extractor) extractPathsFromArgs(info *ExtractedInfo, args []string, cmdInfo CommandInfo) {
 	positionalIdx := 0
 	skipNext := false
 
-	for i, token := range tokens {
+	for i, arg := range args {
 		if skipNext {
 			skipNext = false
 			continue
@@ -296,39 +346,70 @@ func (e *Extractor) extractPathsFromTokens(info *ExtractedInfo, tokens []string,
 		// Check if this is a flag that takes a path argument
 		isPathFlag := false
 		for _, flag := range cmdInfo.PathFlags {
-			if token == flag {
+			if arg == flag || strings.HasPrefix(arg, flag) {
 				isPathFlag = true
 				break
 			}
 		}
 
-		if isPathFlag && i+1 < len(tokens) {
-			// Next token is a path
-			info.Paths = append(info.Paths, tokens[i+1])
+		if isPathFlag {
+			// For flags like "-o", the next token is a path
+			// For flags like "if=/dev/zero", the path is after the "="
+			if strings.Contains(arg, "=") {
+				parts := strings.SplitN(arg, "=", 2)
+				if len(parts) == 2 && parts[1] != "" {
+					info.Paths = append(info.Paths, parts[1])
+				}
+			} else if i+1 < len(args) {
+				info.Paths = append(info.Paths, args[i+1])
+				skipNext = true
+			}
+			continue
+		}
+
+		// Check if this is a skip flag (takes a non-path value)
+		isSkipFlag := false
+		for _, flag := range cmdInfo.SkipFlags {
+			if arg == flag {
+				isSkipFlag = true
+				break
+			}
+		}
+		if isSkipFlag {
 			skipNext = true
 			continue
 		}
 
-		// Check if this is a flag that takes a non-path argument (skip next token)
-		if skipFlagsDB[token] {
-			skipNext = true
+		// Skip flags (including numeric flags like -10 for head/tail)
+		if strings.HasPrefix(arg, "-") {
 			continue
 		}
 
-		// Skip flags (but not paths starting with - like ./-file)
-		if strings.HasPrefix(token, "-") && !looksLikePath(token) {
-			continue
-		}
-
-		// This is a positional argument
-		for _, idx := range cmdInfo.PathArgIndex {
-			if positionalIdx == idx {
-				info.Paths = append(info.Paths, token)
+		// Check if this positional index is a path
+		for _, pathIdx := range cmdInfo.PathArgIndex {
+			if positionalIdx == pathIdx {
+				info.Paths = append(info.Paths, arg)
 				break
 			}
 		}
 		positionalIdx++
 	}
+}
+
+// deduplicateStrings removes duplicate strings from a slice.
+func deduplicateStrings(items []string) []string {
+	if len(items) <= 1 {
+		return items
+	}
+	seen := make(map[string]bool, len(items))
+	result := make([]string, 0, len(items))
+	for _, item := range items {
+		if !seen[item] {
+			seen[item] = true
+			result = append(result, item)
+		}
+	}
+	return result
 }
 
 // extractReadTool extracts info from Read/read_file tool
@@ -405,178 +486,137 @@ func (e *Extractor) extractContentField(info *ExtractedInfo) {
 	}
 }
 
-// tokenizeCommand splits a command string into tokens, respecting quotes
-// It stops at pipe, semicolon, or && and skips redirect targets
-func tokenizeCommand(cmd string) []string {
-	var tokens []string
-	var current strings.Builder
-	inSingleQuote := false
-	inDoubleQuote := false
-	escaped := false
-	skipRedirectTarget := false
-
-	for i := 0; i < len(cmd); i++ {
-		c := cmd[i]
-
-		if escaped {
-			current.WriteByte(c)
-			escaped = false
-			continue
-		}
-
-		if c == '\\' && !inSingleQuote {
-			escaped = true
-			continue
-		}
-
-		if c == '\'' && !inDoubleQuote {
-			inSingleQuote = !inSingleQuote
-			continue
-		}
-
-		if c == '"' && !inSingleQuote {
-			inDoubleQuote = !inDoubleQuote
-			continue
-		}
-
-		if (c == ' ' || c == '\t') && !inSingleQuote && !inDoubleQuote {
-			if current.Len() > 0 {
-				if !skipRedirectTarget {
-					tokens = append(tokens, current.String())
-				}
-				skipRedirectTarget = false
-				current.Reset()
-			}
-			continue
-		}
-
-		// Stop at pipe, semicolon, or && (we only process the first command)
-		if !inSingleQuote && !inDoubleQuote {
-			if c == '|' || c == ';' {
-				break
-			}
-			if c == '&' && i+1 < len(cmd) && cmd[i+1] == '&' {
-				break
-			}
-			// Handle redirection operators - skip the target
-			if c == '>' || c == '<' {
-				if current.Len() > 0 {
-					tokens = append(tokens, current.String())
-					current.Reset()
-				}
-				// Skip >> or <<
-				if i+1 < len(cmd) && cmd[i+1] == c {
-					i++
-				}
-				// Mark that we should skip the next token (redirect target)
-				skipRedirectTarget = true
-				continue
-			}
-		}
-
-		current.WriteByte(c)
+// parseShellCommands parses a shell command string using a full Bash AST parser
+// (mvdan.cc/sh) and extracts ALL individual commands, including those in
+// pipelines (|), chains (&&, ||, ;), subshells, and command substitutions ($()).
+// Returns nil if parsing fails, in which case the caller should fall back to
+// the AST parser.
+func parseShellCommands(cmd string) []parsedCommand {
+	parser := syntax.NewParser(syntax.KeepComments(false), syntax.Variant(syntax.LangBash))
+	file, err := parser.Parse(strings.NewReader(cmd), "")
+	if err != nil {
+		return nil // parse failed — fall back to legacy tokenizer
 	}
 
-	if current.Len() > 0 && !skipRedirectTarget {
-		tokens = append(tokens, current.String())
-	}
+	var commands []parsedCommand
+	syntax.Walk(file, func(node syntax.Node) bool {
+		switch n := node.(type) {
+		case *syntax.CallExpr:
+			if len(n.Args) == 0 {
+				return true
+			}
+			pc := parsedCommand{
+				Name: wordToString(n.Args[0]),
+			}
+			for _, w := range n.Args[1:] {
+				arg := wordToString(w)
+				pc.Args = append(pc.Args, arg)
+				// Check for command substitution in arguments
+				if wordHasSubst(w) {
+					pc.HasSubst = true
+				}
+			}
+			commands = append(commands, pc)
 
-	return tokens
+		case *syntax.Redirect:
+			// Extract redirect target paths (>, >>)
+			if n.Op == syntax.RdrOut || n.Op == syntax.AppOut ||
+				n.Op == syntax.RdrAll || n.Op == syntax.AppAll {
+				path := wordToString(n.Word)
+				if path != "" && len(commands) > 0 {
+					last := &commands[len(commands)-1]
+					last.RedirPaths = append(last.RedirPaths, path)
+				}
+			}
+		}
+		return true
+	})
+
+	return commands
 }
 
-// hasWriteRedirection checks if command has > or >> redirection
-func hasWriteRedirection(cmd string) bool {
-	inSingleQuote := false
-	inDoubleQuote := false
-
-	for i := 0; i < len(cmd); i++ {
-		c := cmd[i]
-
-		if c == '\'' && !inDoubleQuote {
-			inSingleQuote = !inSingleQuote
-			continue
-		}
-		if c == '"' && !inSingleQuote {
-			inDoubleQuote = !inDoubleQuote
-			continue
-		}
-
-		if !inSingleQuote && !inDoubleQuote && c == '>' {
-			// Make sure it's not &> or 2>&1 etc. - still a write
-			return true
+// wordToString extracts the literal string value from a syntax.Word.
+// For words containing expansions ($VAR, $(), etc.), it reconstructs
+// the string as it would appear in the source.
+func wordToString(w *syntax.Word) string {
+	if w == nil {
+		return ""
+	}
+	var sb strings.Builder
+	for _, part := range w.Parts {
+		switch p := part.(type) {
+		case *syntax.Lit:
+			sb.WriteString(p.Value)
+		case *syntax.SglQuoted:
+			sb.WriteString(p.Value)
+		case *syntax.DblQuoted:
+			for _, inner := range p.Parts {
+				if lit, ok := inner.(*syntax.Lit); ok {
+					sb.WriteString(lit.Value)
+				}
+			}
+		case *syntax.ParamExp:
+			// Reconstruct $VAR or ${VAR}
+			if p.Param != nil {
+				if p.Short {
+					sb.WriteString("$")
+					sb.WriteString(p.Param.Value)
+				} else {
+					sb.WriteString("${")
+					sb.WriteString(p.Param.Value)
+					sb.WriteString("}")
+				}
+			}
+		case *syntax.CmdSubst:
+			// Mark as $(...) — caller detects via wordHasSubst
+			sb.WriteString("$(…)")
 		}
 	}
+	return sb.String()
+}
 
+// wordHasSubst checks if a syntax.Word contains command substitution ($() or backticks)
+// or process substitution (<() or >()).
+func wordHasSubst(w *syntax.Word) bool {
+	if w == nil {
+		return false
+	}
+	for _, part := range w.Parts {
+		switch part.(type) {
+		case *syntax.CmdSubst, *syntax.ProcSubst:
+			return true
+		case *syntax.DblQuoted:
+			dq := part.(*syntax.DblQuoted)
+			for _, inner := range dq.Parts {
+				switch inner.(type) {
+				case *syntax.CmdSubst, *syntax.ProcSubst:
+					return true
+				}
+			}
+		}
+	}
 	return false
 }
 
-// extractRedirectTargets extracts file paths from shell redirections
-func extractRedirectTargets(cmd string) []string {
-	var paths []string
-	inSingleQuote := false
-	inDoubleQuote := false
-
-	for i := 0; i < len(cmd); i++ {
-		c := cmd[i]
-
-		if c == '\'' && !inDoubleQuote {
-			inSingleQuote = !inSingleQuote
-			continue
-		}
-		if c == '"' && !inSingleQuote {
-			inDoubleQuote = !inDoubleQuote
-			continue
-		}
-
-		if !inSingleQuote && !inDoubleQuote && c == '>' {
-			// Skip >> (append)
-			if i+1 < len(cmd) && cmd[i+1] == '>' {
-				i++
-			}
-			// Skip whitespace
-			j := i + 1
-			for j < len(cmd) && (cmd[j] == ' ' || cmd[j] == '\t') {
-				j++
-			}
-			// Extract the path
-			if j < len(cmd) {
-				path := extractNextToken(cmd[j:])
-				if path != "" {
-					paths = append(paths, path)
-				}
-			}
-		}
+// operationPriority returns the danger level of an operation for merging.
+// Higher = more dangerous = takes precedence when merging multiple commands.
+func operationPriority(op Operation) int {
+	switch op {
+	case OpDelete:
+		return 6
+	case OpWrite:
+		return 5
+	case OpCopy, OpMove:
+		return 4
+	case OpExecute:
+		return 3
+	case OpNetwork:
+		return 2
+	case OpRead:
+		return 1
+	default:
+		return 0
 	}
-
-	return paths
-}
-
-// extractNextToken extracts the next token from a string
-func extractNextToken(s string) string {
-	var result strings.Builder
-	inSingleQuote := false
-	inDoubleQuote := false
-
-	for i := 0; i < len(s); i++ {
-		c := s[i]
-
-		if c == '\'' && !inDoubleQuote {
-			inSingleQuote = !inSingleQuote
-			continue
-		}
-		if c == '"' && !inSingleQuote {
-			inDoubleQuote = !inDoubleQuote
-			continue
-		}
-
-		if (c == ' ' || c == '\t' || c == ';' || c == '|' || c == '&') && !inSingleQuote && !inDoubleQuote {
-			break
-		}
-
-		result.WriteByte(c)
-	}
-
-	return result.String()
 }
 
 // extractHosts extracts hostnames/IPs from tokens (for network commands)
@@ -675,23 +715,4 @@ func looksLikeHost(s string) bool {
 	}
 
 	return hasLetter && strings.Contains(s, ".")
-}
-
-// looksLikePath checks if a token starting with - might actually be a path
-func looksLikePath(token string) bool {
-	// Paths like ./-file or paths containing /
-	return strings.HasPrefix(token, "./") || strings.Contains(token, "/")
-}
-
-// deduplicatePaths removes duplicate paths while preserving order
-func deduplicatePaths(paths []string) []string {
-	seen := make(map[string]bool)
-	result := make([]string, 0, len(paths))
-	for _, p := range paths {
-		if !seen[p] {
-			seen[p] = true
-			result = append(result, p)
-		}
-	}
-	return result
 }

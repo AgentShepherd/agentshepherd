@@ -8,13 +8,11 @@ import (
 	"regexp"
 	"strings"
 	"sync"
-	"text/template"
-
-	"github.com/AgentShepherd/agentshepherd/internal/rules"
+	"unicode/utf8"
 )
 
 const (
-	profileHeader = `; AgentShepherd Sandbox Profile
+	profileHeader = `; Crust Sandbox Profile
 ; Auto-generated - do not edit manually
 (version 1)
 (allow default)
@@ -45,7 +43,7 @@ func DefaultProfilePath() string {
 	if err != nil {
 		home = "/tmp" // Fallback if home dir unavailable
 	}
-	return filepath.Join(home, ".agentshepherd", "sandbox.sb")
+	return filepath.Join(home, ".crust", "sandbox.sb")
 }
 
 // ProfilePath returns the path to the sandbox profile.
@@ -54,7 +52,7 @@ func (m *Mapper) ProfilePath() string {
 }
 
 // AddRule adds or updates a path-based rule mapping.
-func (m *Mapper) AddRule(rule rules.Rule) error {
+func (m *Mapper) AddRule(rule SecurityRule) error {
 	if !rule.IsEnabled() {
 		return nil
 	}
@@ -71,7 +69,7 @@ func (m *Mapper) AddRule(rule rules.Rule) error {
 	}
 
 	m.mu.Lock()
-	m.mappings[rule.Name] = buf.String()
+	m.mappings[rule.GetName()] = buf.String()
 	m.mu.Unlock()
 
 	return m.writeProfile()
@@ -105,7 +103,7 @@ func (m *Mapper) writeProfile() error {
 
 	// Ensure directory exists
 	dir := filepath.Dir(m.profilePath)
-	if err := os.MkdirAll(dir, 0755); err != nil {
+	if err := os.MkdirAll(dir, 0700); err != nil {
 		return fmt.Errorf("failed to create profile directory: %w", err)
 	}
 
@@ -114,10 +112,11 @@ func (m *Mapper) writeProfile() error {
 
 	// Write each rule section with markers
 	for ruleName, directives := range m.mappings {
-		buf.WriteString(fmt.Sprintf(ruleStartMarker, ruleName))
+		safeName := sanitizeRuleName(ruleName)
+		buf.WriteString(fmt.Sprintf(ruleStartMarker, safeName))
 		buf.WriteString("\n")
 		buf.WriteString(directives)
-		buf.WriteString(fmt.Sprintf(ruleEndMarker, ruleName))
+		buf.WriteString(fmt.Sprintf(ruleEndMarker, safeName))
 		buf.WriteString("\n\n")
 	}
 
@@ -193,26 +192,150 @@ func (m *Mapper) GenerateProfileContent() string {
 	buf.WriteString(profileHeader)
 
 	for ruleName, directives := range m.mappings {
-		buf.WriteString(fmt.Sprintf(ruleStartMarker, ruleName))
+		safeName := sanitizeRuleName(ruleName)
+		buf.WriteString(fmt.Sprintf(ruleStartMarker, safeName))
 		buf.WriteString("\n")
 		buf.WriteString(directives)
-		buf.WriteString(fmt.Sprintf(ruleEndMarker, ruleName))
+		buf.WriteString(fmt.Sprintf(ruleEndMarker, safeName))
 		buf.WriteString("\n\n")
 	}
 
 	return buf.String()
 }
 
-// ProfileTemplate is for advanced profile generation.
-var ProfileTemplate = template.Must(template.New("sandbox").Parse(`
-; AgentShepherd Sandbox Profile
-; Generated for: {{ .Platform }}
-(version 1)
-(allow default)
+// sanitizeRuleName strips characters that could inject Seatbelt profile directives.
+func sanitizeRuleName(name string) string {
+	var b strings.Builder
+	for _, r := range name {
+		switch {
+		case r == '\n', r == '\r', r == ';', r == '(', r == ')', r == '"', r == '#':
+			continue
+		case r == utf8.RuneError:
+			continue
+		default:
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}
 
-{{- range .Rules }}
-; --- RULE: {{ .Name }} ---
-{{ .Directives }}
-; --- END RULE: {{ .Name }} ---
-{{- end }}
-`))
+// ConsistencyError represents a rule-mapping inconsistency.
+type ConsistencyError struct {
+	MissingInSandbox []string // Rules without sandbox mapping
+	OrphanedMappings []string // Sandbox entries without rules
+}
+
+func (e *ConsistencyError) Error() string {
+	var parts []string
+	if len(e.MissingInSandbox) > 0 {
+		parts = append(parts, fmt.Sprintf("missing mappings: %v", e.MissingInSandbox))
+	}
+	if len(e.OrphanedMappings) > 0 {
+		parts = append(parts, fmt.Sprintf("orphaned mappings: %v", e.OrphanedMappings))
+	}
+	return strings.Join(parts, "; ")
+}
+
+// HasErrors returns true if there are any consistency errors.
+func (e *ConsistencyError) HasErrors() bool {
+	return len(e.MissingInSandbox) > 0 || len(e.OrphanedMappings) > 0
+}
+
+// CheckConsistency verifies path-based rules and sandbox profile are in sync.
+func (m *Mapper) CheckConsistency(pbRules []SecurityRule) *ConsistencyError {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	// Build set of rule names that should have mappings
+	expectedRules := make(map[string]bool)
+	for _, rule := range pbRules {
+		if rule.IsEnabled() && len(rule.GetBlockPaths()) > 0 {
+			expectedRules[rule.GetName()] = true
+		}
+	}
+
+	// Check for missing mappings
+	var missing []string
+	for name := range expectedRules {
+		if _, ok := m.mappings[name]; !ok {
+			missing = append(missing, name)
+		}
+	}
+
+	// Check for orphaned mappings
+	var orphaned []string
+	for name := range m.mappings {
+		if !expectedRules[name] {
+			orphaned = append(orphaned, name)
+		}
+	}
+
+	if len(missing) > 0 || len(orphaned) > 0 {
+		return &ConsistencyError{
+			MissingInSandbox: missing,
+			OrphanedMappings: orphaned,
+		}
+	}
+
+	return nil
+}
+
+// Repair fixes inconsistencies by regenerating from path-based rules.
+func (m *Mapper) Repair(pbRules []SecurityRule) error {
+	m.mu.Lock()
+
+	// Clear existing mappings
+	m.mappings = make(map[string]string)
+
+	// Regenerate from rules
+	for _, rule := range pbRules {
+		if !rule.IsEnabled() {
+			continue
+		}
+
+		directives := TranslateRule(rule)
+		if len(directives) > 0 {
+			var buf strings.Builder
+			for _, d := range directives {
+				buf.WriteString(d.String())
+				buf.WriteString("\n")
+			}
+			m.mappings[rule.GetName()] = buf.String()
+		}
+	}
+
+	m.mu.Unlock()
+
+	return m.writeProfile()
+}
+
+// Sync synchronizes the sandbox profile with path-based rules.
+func (m *Mapper) Sync(pbRules []SecurityRule) error {
+	if err := m.CheckConsistency(pbRules); err != nil {
+		return m.Repair(pbRules)
+	}
+	return nil
+}
+
+// RuleCount returns the number of rules currently mapped.
+func (m *Mapper) RuleCount() int {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return len(m.mappings)
+}
+
+// HasRule checks if a rule is currently mapped.
+func (m *Mapper) HasRule(ruleName string) bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	_, ok := m.mappings[ruleName]
+	return ok
+}
+
+// GetRuleDirectives returns the sandbox directives for a specific rule.
+func (m *Mapper) GetRuleDirectives(ruleName string) (string, bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	directives, ok := m.mappings[ruleName]
+	return directives, ok
+}

@@ -1,13 +1,13 @@
 #!/bin/bash
 #
-# AgentShepherd Installer
-# https://agentshepherd.ai
+# Crust Installer
+# https://getcrust.io
 #
 # Usage:
-#   curl -fsSL https://raw.githubusercontent.com/AgentShepherd/agentshepherd/main/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/BakeLens/crust/main/install.sh | bash
 #
 # Or with options:
-#   curl -fsSL https://raw.githubusercontent.com/AgentShepherd/agentshepherd/main/install.sh | bash -s -- --version v1.0.0
+#   curl -fsSL https://raw.githubusercontent.com/BakeLens/crust/main/install.sh | bash -s -- --version v1.0.0
 #
 
 set -e
@@ -21,10 +21,10 @@ BOLD='\033[1m'
 NC='\033[0m' # No Color
 
 # Configuration
-GITHUB_REPO="AgentShepherd/agentshepherd"
+GITHUB_REPO="BakeLens/crust"
 INSTALL_DIR="$HOME/.local/bin"
-BINARY_NAME="agentshepherd"
-DATA_DIR="$HOME/.agentshepherd"
+BINARY_NAME="crust"
+DATA_DIR="$HOME/.crust"
 
 # Parse arguments
 VERSION="latest"
@@ -35,9 +35,9 @@ while [[ $# -gt 0 ]]; do
             shift 2
             ;;
         --help|-h)
-            echo "AgentShepherd Installer"
+            echo "Crust Installer"
             echo ""
-            echo "Usage: curl -fsSL https://raw.githubusercontent.com/AgentShepherd/agentshepherd/main/install.sh | bash"
+            echo "Usage: curl -fsSL https://raw.githubusercontent.com/BakeLens/crust/main/install.sh | bash"
             echo ""
             echo "Options:"
             echo "  --version, -v    Install specific version (default: latest)"
@@ -87,11 +87,22 @@ detect_arch() {
 
 # Check for required commands
 check_requirements() {
-    local missing=()
-
     if ! command -v curl &> /dev/null && ! command -v wget &> /dev/null; then
-        missing+=("curl or wget")
+        echo -e "${RED}Error: Missing required command: curl or wget${NC}"
+        echo "Install curl or wget and try again."
+        exit 1
     fi
+
+    if ! command -v tar &> /dev/null; then
+        echo -e "${RED}Error: Missing required command: tar${NC}"
+        echo "Install tar and try again."
+        exit 1
+    fi
+}
+
+# Check for source build requirements
+check_source_requirements() {
+    local missing=()
 
     if ! command -v git &> /dev/null; then
         missing+=("git")
@@ -102,8 +113,7 @@ check_requirements() {
     fi
 
     if [ ${#missing[@]} -gt 0 ]; then
-        echo -e "${RED}Error: Missing required commands: ${missing[*]}${NC}"
-        echo "Install the missing tools and try again."
+        echo -e "${RED}Error: Pre-built binary not available and source build requires: ${missing[*]}${NC}"
         exit 1
     fi
 }
@@ -120,14 +130,14 @@ download() {
     fi
 }
 
-# Get latest version from GitHub (uses latest tag or main)
+# Get latest version from GitHub releases API (falls back to main)
 get_latest_version() {
-    local url="https://api.github.com/repos/${GITHUB_REPO}/tags"
+    local url="https://api.github.com/repos/${GITHUB_REPO}/releases/latest"
     local version
     if command -v curl &> /dev/null; then
-        version=$(curl -fsSL "$url" 2>/dev/null | grep '"name"' | head -1 | sed -E 's/.*"([^"]+)".*/\1/')
+        version=$(curl -fsSL "$url" 2>/dev/null | grep '"tag_name"' | head -1 | sed -E 's/.*"([^"]+)".*/\1/')
     elif command -v wget &> /dev/null; then
-        version=$(wget -qO- "$url" 2>/dev/null | grep '"name"' | head -1 | sed -E 's/.*"([^"]+)".*/\1/')
+        version=$(wget -qO- "$url" 2>/dev/null | grep '"tag_name"' | head -1 | sed -E 's/.*"([^"]+)".*/\1/')
     fi
     echo "${version:-main}"
 }
@@ -143,13 +153,13 @@ main() {
 
     if [ "$os" = "unsupported" ]; then
         echo -e "${RED}Error: Unsupported operating system: $(uname -s)${NC}"
-        echo "AgentShepherd supports macOS and Linux only."
+        echo "Crust supports macOS and Linux only."
         exit 1
     fi
 
     if [ "$arch" = "unsupported" ]; then
         echo -e "${RED}Error: Unsupported architecture: $(uname -m)${NC}"
-        echo "AgentShepherd supports amd64 and arm64 only."
+        echo "Crust supports amd64 and arm64 only."
         exit 1
     fi
 
@@ -172,20 +182,33 @@ main() {
     tmp_dir=$(mktemp -d)
     trap 'rm -rf "$tmp_dir"' EXIT
 
-    echo -e "${YELLOW}Cloning repository...${NC}"
-    if ! git clone --depth 1 --branch "$VERSION" "https://github.com/${GITHUB_REPO}.git" "$tmp_dir/agentshepherd" 2>/dev/null; then
-        # Fallback to main if version tag doesn't exist
-        git clone --depth 1 "https://github.com/${GITHUB_REPO}.git" "$tmp_dir/agentshepherd"
+    # Try downloading pre-built binary from GitHub Releases
+    local archive_name="crust_${VERSION#v}_${os}_${arch}.tar.gz"
+    local download_url="https://github.com/${GITHUB_REPO}/releases/download/${VERSION}/${archive_name}"
+    local installed=false
+
+    echo -e "${YELLOW}Downloading pre-built binary...${NC}"
+    if download "$download_url" "$tmp_dir/$archive_name" 2>/dev/null; then
+        tar -xzf "$tmp_dir/$archive_name" -C "$tmp_dir"
+        if [ -f "$tmp_dir/crust" ]; then
+            installed=true
+        fi
     fi
 
-    echo -e "${YELLOW}Building AgentShepherd...${NC}"
-    cd "$tmp_dir/agentshepherd"
-    go build -ldflags "-X main.Version=${VERSION#v}" -o agentshepherd .
+    if [ "$installed" = false ]; then
+        echo -e "${YELLOW}Pre-built binary not available, building from source...${NC}"
+        check_source_requirements
+        if ! git clone --depth 1 --branch "$VERSION" "https://github.com/${GITHUB_REPO}.git" "$tmp_dir/crust-src" 2>/dev/null; then
+            git clone --depth 1 "https://github.com/${GITHUB_REPO}.git" "$tmp_dir/crust-src"
+        fi
+        cd "$tmp_dir/crust-src"
+        go build -ldflags "-X main.Version=${VERSION#v}" -o "$tmp_dir/crust" .
+    fi
 
     # Install binary
     echo -e "${YELLOW}Installing to ${INSTALL_DIR}...${NC}"
     mkdir -p "$INSTALL_DIR"
-    mv "$tmp_dir/agentshepherd/agentshepherd" "$INSTALL_DIR/$BINARY_NAME"
+    mv "$tmp_dir/crust" "$INSTALL_DIR/$BINARY_NAME"
     chmod +x "$INSTALL_DIR/$BINARY_NAME"
 
     # Create data directory
@@ -195,13 +218,13 @@ main() {
 
     # Verify installation
     echo ""
-    echo -e "${GREEN}${BOLD}AgentShepherd installed successfully!${NC}"
+    echo -e "${GREEN}${BOLD}Crust installed successfully!${NC}"
     echo ""
     echo -e "  Binary: ${BLUE}${INSTALL_DIR}/${BINARY_NAME}${NC}"
     echo -e "  Data:   ${BLUE}${DATA_DIR}/${NC}"
     echo ""
 
-    if ! command -v agentshepherd &> /dev/null; then
+    if ! command -v crust &> /dev/null; then
         echo -e "${YELLOW}Add ~/.local/bin to your PATH:${NC}"
         echo ""
         echo "  echo 'export PATH=\"\$HOME/.local/bin:\$PATH\"' >> ~/.bashrc"
@@ -211,10 +234,10 @@ main() {
 
     echo -e "${BOLD}Quick Start:${NC}"
     echo ""
-    echo "  agentshepherd start                    # Start with interactive setup"
-    echo "  agentshepherd status                   # Check status"
-    echo "  agentshepherd logs -f                  # Follow logs"
-    echo "  agentshepherd stop                     # Stop agentshepherd"
+    echo "  crust start                    # Start with interactive setup"
+    echo "  crust status                   # Check status"
+    echo "  crust logs -f                  # Follow logs"
+    echo "  crust stop                     # Stop crust"
     echo ""
 }
 

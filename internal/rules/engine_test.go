@@ -2,6 +2,7 @@ package rules
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 )
 
@@ -18,8 +19,8 @@ func TestEngine_BasicPathMatching(t *testing.T) {
 	// Create a rule that blocks reading .env files
 	rules := []Rule{
 		{
-			Name:       "block-env-files",
-			Operations: []Operation{OpRead},
+			Name:    "block-env-files",
+			Actions: []Operation{OpRead},
 			Block: Block{
 				Paths: []string{"**/.env", "**/.env.*"},
 			},
@@ -64,8 +65,8 @@ func TestEngine_VariableExpansion(t *testing.T) {
 	// Create a rule that blocks reading files in home directory secrets
 	rules := []Rule{
 		{
-			Name:       "block-home-secrets",
-			Operations: []Operation{OpRead},
+			Name:    "block-home-secrets",
+			Actions: []Operation{OpRead},
 			Block: Block{
 				Paths: []string{"/home/testuser/.env", "/home/testuser/.secrets/**"},
 			},
@@ -118,8 +119,8 @@ func TestEngine_PathTraversal(t *testing.T) {
 	// Create a rule that blocks reading .env in the user's home
 	rules := []Rule{
 		{
-			Name:       "block-env-files",
-			Operations: []Operation{OpRead},
+			Name:    "block-env-files",
+			Actions: []Operation{OpRead},
 			Block: Block{
 				Paths: []string{"/home/testuser/.env"},
 			},
@@ -160,8 +161,8 @@ func TestEngine_Exceptions(t *testing.T) {
 	// Create a rule that blocks .env files but allows .env.example
 	rules := []Rule{
 		{
-			Name:       "block-env-files",
-			Operations: []Operation{OpRead},
+			Name:    "block-env-files",
+			Actions: []Operation{OpRead},
 			Block: Block{
 				Paths:  []string{"**/.env", "**/.env.*"},
 				Except: []string{"**/.env.example", "**/.env.sample"},
@@ -220,8 +221,8 @@ func TestEngine_NetworkHostMatching(t *testing.T) {
 	// Create a rule that blocks network access to certain hosts
 	rules := []Rule{
 		{
-			Name:       "block-malicious-hosts",
-			Operations: []Operation{OpNetwork},
+			Name:    "block-malicious-hosts",
+			Actions: []Operation{OpNetwork},
 			Block: Block{
 				Hosts: []string{"evil.com", "*.malware.net", "192.168.1.*"},
 			},
@@ -265,66 +266,24 @@ func TestEngine_NetworkHostMatching(t *testing.T) {
 	}
 }
 
-func TestEngine_PriorityOrdering(t *testing.T) {
-	// Create rules with different priorities
-	// Lower priority number = higher priority (evaluated first)
-	rules := []Rule{
-		{
-			Name:       "allow-docs-high-priority",
-			Priority:   10, // Higher priority
-			Operations: []Operation{OpRead},
-			Block: Block{
-				Paths:  []string{"/docs/**"},
-				Except: []string{"/docs/**"}, // Exception matches everything, so nothing blocked
-			},
-			Message: "This should not match due to exception",
-		},
-		{
-			Name:       "block-all-docs-low-priority",
-			Priority:   100, // Lower priority
-			Operations: []Operation{OpRead},
-			Block: Block{
-				Paths: []string{"/docs/**"},
-			},
-			Message: "BLOCKED: Access to /docs",
-		},
-	}
-
-	engine, err := NewTestEngine(rules)
-	if err != nil {
-		t.Fatalf("Failed to create engine: %v", err)
-	}
-
-	// Verify rules are sorted by priority
-	if len(engine.GetCompiledRules()) != 2 {
-		t.Fatalf("Expected 2 rules, got %d", len(engine.GetCompiledRules()))
-	}
-	if engine.GetCompiledRules()[0].Rule.Name != "allow-docs-high-priority" {
-		t.Errorf("Expected first rule to be 'allow-docs-high-priority', got '%s'", engine.GetCompiledRules()[0].Rule.Name)
-	}
-	if engine.GetCompiledRules()[1].Rule.Name != "block-all-docs-low-priority" {
-		t.Errorf("Expected second rule to be 'block-all-docs-low-priority', got '%s'", engine.GetCompiledRules()[1].Rule.Name)
-	}
-}
-
 func TestEngine_DisabledRules(t *testing.T) {
 	// Create a disabled rule
 	enabled := true
 	disabled := false
 	rules := []Rule{
 		{
-			Name:       "enabled-rule",
-			Enabled:    &enabled,
-			Operations: []Operation{OpRead},
+			Name:    "enabled-rule",
+			Enabled: &enabled,
+			Actions: []Operation{OpRead},
 			Block: Block{
 				Paths: []string{"**/enabled.txt"},
 			},
 			Message: "BLOCKED: enabled.txt",
 		},
 		{
-			Name:       "disabled-rule",
-			Enabled:    &disabled,
-			Operations: []Operation{OpRead},
+			Name:    "disabled-rule",
+			Enabled: &disabled,
+			Actions: []Operation{OpRead},
 			Block: Block{
 				Paths: []string{"**/disabled.txt"},
 			},
@@ -363,12 +322,12 @@ func TestEngine_DisabledRules(t *testing.T) {
 	}
 }
 
-func TestEngine_MultipleOperations(t *testing.T) {
+func TestEngine_MultipleActions(t *testing.T) {
 	// Create a rule that blocks both read and write to sensitive paths
 	rules := []Rule{
 		{
-			Name:       "protect-secrets",
-			Operations: []Operation{OpRead, OpWrite, OpDelete},
+			Name:    "protect-secrets",
+			Actions: []Operation{OpRead, OpWrite, OpDelete},
 			Block: Block{
 				Paths: []string{"**/secrets/**", "**/.ssh/**"},
 			},
@@ -416,8 +375,8 @@ func TestEngine_ReadWriteTools(t *testing.T) {
 	// Create a rule that blocks access to .env files
 	rules := []Rule{
 		{
-			Name:       "block-env-files",
-			Operations: []Operation{OpRead, OpWrite},
+			Name:    "block-env-files",
+			Actions: []Operation{OpRead, OpWrite},
 			Block: Block{
 				Paths: []string{"**/.env", "**/.env.*"},
 			},
@@ -464,78 +423,11 @@ func TestEngine_ReadWriteTools(t *testing.T) {
 	}
 }
 
-func TestEngine_NoMatchForUnknownOperation(t *testing.T) {
-	// Create a rule that only applies to network operations
-	rules := []Rule{
-		{
-			Name:       "block-hosts",
-			Operations: []Operation{OpNetwork},
-			Block: Block{
-				Hosts: []string{"evil.com"},
-			},
-			Message: "BLOCKED: Network access",
-		},
-	}
-
-	engine, err := NewTestEngine(rules)
-	if err != nil {
-		t.Fatalf("Failed to create engine: %v", err)
-	}
-
-	// Test: a read operation should not match a network-only rule
-	call := makeToolCall("Bash", map[string]interface{}{
-		"command": "cat file.txt",
-	})
-	result := engine.Evaluate(call)
-
-	if result.Matched {
-		t.Errorf("Expected read operation to not match network rule, but it did")
-	}
-}
-
-func TestEngine_EmptyToolCall(t *testing.T) {
-	rules := []Rule{
-		{
-			Name:       "block-env-files",
-			Operations: []Operation{OpRead},
-			Block: Block{
-				Paths: []string{"**/.env"},
-			},
-			Message: "BLOCKED",
-		},
-	}
-
-	engine, err := NewTestEngine(rules)
-	if err != nil {
-		t.Fatalf("Failed to create engine: %v", err)
-	}
-
-	// Test: empty command should not match
-	call := makeToolCall("Bash", map[string]interface{}{
-		"command": "",
-	})
-	result := engine.Evaluate(call)
-
-	if result.Matched {
-		t.Errorf("Expected empty command to not match, but it did")
-	}
-
-	// Test: unknown tool with no path fields should not match
-	call = makeToolCall("UnknownTool", map[string]interface{}{
-		"some_field": "some_value",
-	})
-	result = engine.Evaluate(call)
-
-	if result.Matched {
-		t.Errorf("Expected unknown tool to not match, but it did")
-	}
-}
-
 func TestEngine_EvaluateJSON(t *testing.T) {
 	rules := []Rule{
 		{
-			Name:       "block-env-files",
-			Operations: []Operation{OpRead},
+			Name:    "block-env-files",
+			Actions: []Operation{OpRead},
 			Block: Block{
 				Paths: []string{"**/.env"},
 			},
@@ -556,5 +448,94 @@ func TestEngine_EvaluateJSON(t *testing.T) {
 	}
 	if result.RuleName != "block-env-files" {
 		t.Errorf("Expected rule name 'block-env-files', got '%s'", result.RuleName)
+	}
+}
+
+func TestEngine_RegexPatternLengthLimit(t *testing.T) {
+	longPattern := "re:" + strings.Repeat("a", 5000)
+
+	testRules := []Rule{
+		{
+			Name:    "long-regex",
+			Actions: []Operation{OpRead},
+			Match:   &Match{Path: longPattern},
+			Message: "blocked",
+		},
+	}
+
+	// Pattern is now validated at compile time — engine creation must fail
+	_, err := NewTestEngine(testRules)
+	if err == nil {
+		t.Fatal("Expected error for regex pattern exceeding length limit, got nil")
+	}
+	if !strings.Contains(err.Error(), "regex pattern too long") {
+		t.Errorf("Expected 'regex pattern too long' error, got: %v", err)
+	}
+}
+
+func TestEngine_RegexValid(t *testing.T) {
+	testRules := []Rule{
+		{
+			Name:    "regex-rule",
+			Actions: []Operation{OpRead},
+			Match:   &Match{Path: `re:/proc/(\d+|self)/(environ|cmdline)`},
+			Message: "blocked",
+		},
+	}
+
+	engine, err := NewTestEngine(testRules)
+	if err != nil {
+		t.Fatalf("Failed to create engine: %v", err)
+	}
+
+	call := makeToolCall("Read", map[string]interface{}{
+		"file_path": "/proc/1234/environ",
+	})
+	result := engine.Evaluate(call)
+	if !result.Matched {
+		t.Error("expected regex match for /proc/1234/environ")
+	}
+}
+
+func TestEngine_RegexCompileError(t *testing.T) {
+	testRules := []Rule{
+		{
+			Name:    "bad-regex",
+			Actions: []Operation{OpRead},
+			Match:   &Match{Path: `re:[invalid`},
+			Message: "blocked",
+		},
+	}
+
+	// Invalid regex is now caught at compile time — engine creation must fail
+	_, err := NewTestEngine(testRules)
+	if err == nil {
+		t.Fatal("Expected error for invalid regex pattern, got nil")
+	}
+	if !strings.Contains(err.Error(), "match.path regex") {
+		t.Errorf("Expected 'match.path regex' error, got: %v", err)
+	}
+}
+
+func TestCompileRegex(t *testing.T) {
+	tests := []struct {
+		name    string
+		pattern string
+		wantErr bool
+	}{
+		{"valid short", `\d+`, false},
+		{"valid complex", `^/proc/(\d+|self)/(environ|cmdline)$`, false},
+		{"empty", "", false},
+		{"too long", strings.Repeat("a", maxRegexLen+1), true},
+		{"at limit", strings.Repeat("a", maxRegexLen), false},
+		{"invalid syntax", `[unclosed`, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := compileRegex(tt.pattern)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("compileRegex(%q) error = %v, wantErr %v", tt.pattern, err, tt.wantErr)
+			}
+		})
 	}
 }

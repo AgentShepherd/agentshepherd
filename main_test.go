@@ -3,9 +3,11 @@ package main
 import (
 	"encoding/json"
 	"testing"
+
+	"github.com/BakeLens/crust/internal/rules"
 )
 
-func TestRuleInfoUnmarshal(t *testing.T) {
+func TestRuleUnmarshal(t *testing.T) {
 	tests := []struct {
 		name     string
 		jsonData string
@@ -18,7 +20,7 @@ func TestRuleInfoUnmarshal(t *testing.T) {
 			jsonData: `{
 				"name": "protect-env-files",
 				"message": "Cannot access .env files",
-				"operations": ["read", "write"],
+				"actions": ["read", "write"],
 				"block": {"paths": ["**/.env"]}
 			}`,
 			wantName: "protect-env-files",
@@ -30,7 +32,7 @@ func TestRuleInfoUnmarshal(t *testing.T) {
 			jsonData: `{
 				"name": "protect-ssh-keys",
 				"message": "Cannot access SSH keys",
-				"operations": ["read"],
+				"actions": ["read"],
 				"block": {
 					"paths": ["**/.ssh/id_*"],
 					"except": ["**/.ssh/id_*.pub"]
@@ -45,7 +47,7 @@ func TestRuleInfoUnmarshal(t *testing.T) {
 			jsonData: `{
 				"name": "block-crontab",
 				"message": "Cannot edit crontab",
-				"operations": ["execute"],
+				"actions": ["execute"],
 				"block": {},
 				"match": {
 					"command": "re:crontab\\s+-e"
@@ -60,7 +62,7 @@ func TestRuleInfoUnmarshal(t *testing.T) {
 			jsonData: `{
 				"name": "detect-private-key",
 				"message": "Private key detected",
-				"operations": ["write"],
+				"actions": ["write"],
 				"block": {},
 				"match": {
 					"content": "re:-----BEGIN.*PRIVATE KEY-----"
@@ -75,7 +77,7 @@ func TestRuleInfoUnmarshal(t *testing.T) {
 			jsonData: `{
 				"name": "composite-rule",
 				"message": "Blocked",
-				"operations": ["execute"],
+				"actions": ["execute"],
 				"block": {},
 				"all_conditions": [
 					{"path": "/etc/**"},
@@ -91,7 +93,7 @@ func TestRuleInfoUnmarshal(t *testing.T) {
 			jsonData: `{
 				"name": "enabled-default",
 				"message": "Test",
-				"operations": ["read"],
+				"actions": ["read"],
 				"block": {"paths": ["/test"]}
 			}`,
 			wantName: "enabled-default",
@@ -102,8 +104,8 @@ func TestRuleInfoUnmarshal(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			var ri ruleInfo
-			err := json.Unmarshal([]byte(tt.jsonData), &ri)
+			var r rules.Rule
+			err := json.Unmarshal([]byte(tt.jsonData), &r)
 
 			if tt.wantErr {
 				if err == nil {
@@ -116,18 +118,18 @@ func TestRuleInfoUnmarshal(t *testing.T) {
 				t.Fatalf("unexpected error: %v", err)
 			}
 
-			if ri.Name != tt.wantName {
-				t.Errorf("name = %q, want %q", ri.Name, tt.wantName)
+			if r.Name != tt.wantName {
+				t.Errorf("name = %q, want %q", r.Name, tt.wantName)
 			}
 
-			if len(ri.Operations) != tt.wantOps {
-				t.Errorf("operations count = %d, want %d", len(ri.Operations), tt.wantOps)
+			if len(r.Actions) != tt.wantOps {
+				t.Errorf("actions count = %d, want %d", len(r.Actions), tt.wantOps)
 			}
 		})
 	}
 }
 
-func TestRuleInfoEnabled(t *testing.T) {
+func TestRuleEnabled(t *testing.T) {
 	tests := []struct {
 		name        string
 		jsonData    string
@@ -135,32 +137,61 @@ func TestRuleInfoEnabled(t *testing.T) {
 	}{
 		{
 			name:        "enabled nil (default true)",
-			jsonData:    `{"name": "test", "operations": ["read"], "block": {}}`,
+			jsonData:    `{"name": "test", "actions": ["read"], "block": {}}`,
 			wantEnabled: true,
 		},
 		{
 			name:        "enabled true",
-			jsonData:    `{"name": "test", "enabled": true, "operations": ["read"], "block": {}}`,
+			jsonData:    `{"name": "test", "enabled": true, "actions": ["read"], "block": {}}`,
 			wantEnabled: true,
 		},
 		{
 			name:        "enabled false",
-			jsonData:    `{"name": "test", "enabled": false, "operations": ["read"], "block": {}}`,
+			jsonData:    `{"name": "test", "enabled": false, "actions": ["read"], "block": {}}`,
 			wantEnabled: false,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			var ri ruleInfo
-			if err := json.Unmarshal([]byte(tt.jsonData), &ri); err != nil {
+			var r rules.Rule
+			if err := json.Unmarshal([]byte(tt.jsonData), &r); err != nil {
 				t.Fatalf("unmarshal error: %v", err)
 			}
 
-			// Check enabled status (nil means true)
-			enabled := ri.Enabled == nil || *ri.Enabled
-			if enabled != tt.wantEnabled {
-				t.Errorf("enabled = %v, want %v", enabled, tt.wantEnabled)
+			if r.IsEnabled() != tt.wantEnabled {
+				t.Errorf("enabled = %v, want %v", r.IsEnabled(), tt.wantEnabled)
+			}
+		})
+	}
+}
+
+func TestRulePriority(t *testing.T) {
+	tests := []struct {
+		name         string
+		jsonData     string
+		wantPriority int
+	}{
+		{
+			name:         "priority omitted (zero value)",
+			jsonData:     `{"name": "test", "actions": ["read"], "block": {}}`,
+			wantPriority: 0,
+		},
+		{
+			name:         "priority explicit",
+			jsonData:     `{"name": "test", "priority": 10, "actions": ["read"], "block": {}}`,
+			wantPriority: 10,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var r rules.Rule
+			if err := json.Unmarshal([]byte(tt.jsonData), &r); err != nil {
+				t.Fatalf("unmarshal error: %v", err)
+			}
+			if r.Priority != tt.wantPriority {
+				t.Errorf("priority = %d, want %d", r.Priority, tt.wantPriority)
 			}
 		})
 	}
@@ -170,7 +201,7 @@ func TestRuleBlockFields(t *testing.T) {
 	jsonData := `{
 		"name": "test-rule",
 		"message": "Test",
-		"operations": ["read", "write", "delete"],
+		"actions": ["read", "write", "delete"],
 		"block": {
 			"paths": ["/path/one", "/path/two"],
 			"except": ["/path/one/allowed"],
@@ -178,21 +209,21 @@ func TestRuleBlockFields(t *testing.T) {
 		}
 	}`
 
-	var ri ruleInfo
-	if err := json.Unmarshal([]byte(jsonData), &ri); err != nil {
+	var r rules.Rule
+	if err := json.Unmarshal([]byte(jsonData), &r); err != nil {
 		t.Fatalf("unmarshal error: %v", err)
 	}
 
-	if len(ri.Block.Paths) != 2 {
-		t.Errorf("paths count = %d, want 2", len(ri.Block.Paths))
+	if len(r.Block.Paths) != 2 {
+		t.Errorf("paths count = %d, want 2", len(r.Block.Paths))
 	}
 
-	if len(ri.Block.Except) != 1 {
-		t.Errorf("except count = %d, want 1", len(ri.Block.Except))
+	if len(r.Block.Except) != 1 {
+		t.Errorf("except count = %d, want 1", len(r.Block.Except))
 	}
 
-	if len(ri.Block.Hosts) != 1 {
-		t.Errorf("hosts count = %d, want 1", len(ri.Block.Hosts))
+	if len(r.Block.Hosts) != 1 {
+		t.Errorf("hosts count = %d, want 1", len(r.Block.Hosts))
 	}
 }
 
@@ -200,7 +231,7 @@ func TestRuleMatchFields(t *testing.T) {
 	jsonData := `{
 		"name": "test-match",
 		"message": "Test",
-		"operations": ["execute"],
+		"actions": ["execute"],
 		"block": {},
 		"match": {
 			"path": "/etc/**",
@@ -211,33 +242,33 @@ func TestRuleMatchFields(t *testing.T) {
 		}
 	}`
 
-	var ri ruleInfo
-	if err := json.Unmarshal([]byte(jsonData), &ri); err != nil {
+	var r rules.Rule
+	if err := json.Unmarshal([]byte(jsonData), &r); err != nil {
 		t.Fatalf("unmarshal error: %v", err)
 	}
 
-	if ri.Match == nil {
+	if r.Match == nil {
 		t.Fatal("match is nil")
 	}
 
-	if ri.Match.Path != "/etc/**" {
-		t.Errorf("match.path = %q, want %q", ri.Match.Path, "/etc/**")
+	if r.Match.Path != "/etc/**" {
+		t.Errorf("match.path = %q, want %q", r.Match.Path, "/etc/**")
 	}
 
-	if ri.Match.Command != "re:rm\\s+-rf" {
-		t.Errorf("match.command = %q, want %q", ri.Match.Command, "re:rm\\s+-rf")
+	if r.Match.Command != "re:rm\\s+-rf" {
+		t.Errorf("match.command = %q, want %q", r.Match.Command, "re:rm\\s+-rf")
 	}
 
-	if ri.Match.Host != "evil.com" {
-		t.Errorf("match.host = %q, want %q", ri.Match.Host, "evil.com")
+	if r.Match.Host != "evil.com" {
+		t.Errorf("match.host = %q, want %q", r.Match.Host, "evil.com")
 	}
 
-	if ri.Match.Content != "re:password" {
-		t.Errorf("match.content = %q, want %q", ri.Match.Content, "re:password")
+	if r.Match.Content != "re:password" {
+		t.Errorf("match.content = %q, want %q", r.Match.Content, "re:password")
 	}
 
-	if len(ri.Match.Tools) != 2 {
-		t.Errorf("match.tools count = %d, want 2", len(ri.Match.Tools))
+	if len(r.Match.Tools) != 2 {
+		t.Errorf("match.tools count = %d, want 2", len(r.Match.Tools))
 	}
 }
 
@@ -253,7 +284,7 @@ func TestRuleCompositeConditions(t *testing.T) {
 			jsonData: `{
 				"name": "test",
 				"message": "Test",
-				"operations": ["execute"],
+				"actions": ["execute"],
 				"block": {},
 				"all_conditions": [
 					{"path": "/etc/**"},
@@ -268,7 +299,7 @@ func TestRuleCompositeConditions(t *testing.T) {
 			jsonData: `{
 				"name": "test",
 				"message": "Test",
-				"operations": ["execute"],
+				"actions": ["execute"],
 				"block": {},
 				"any_conditions": [
 					{"command": "re:curl.*-T"},
@@ -282,17 +313,17 @@ func TestRuleCompositeConditions(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			var ri ruleInfo
-			if err := json.Unmarshal([]byte(tt.jsonData), &ri); err != nil {
+			var r rules.Rule
+			if err := json.Unmarshal([]byte(tt.jsonData), &r); err != nil {
 				t.Fatalf("unmarshal error: %v", err)
 			}
 
-			if len(ri.AllConditions) != tt.wantAll {
-				t.Errorf("all_conditions count = %d, want %d", len(ri.AllConditions), tt.wantAll)
+			if len(r.AllConditions) != tt.wantAll {
+				t.Errorf("all_conditions count = %d, want %d", len(r.AllConditions), tt.wantAll)
 			}
 
-			if len(ri.AnyConditions) != tt.wantAny {
-				t.Errorf("any_conditions count = %d, want %d", len(ri.AnyConditions), tt.wantAny)
+			if len(r.AnyConditions) != tt.wantAny {
+				t.Errorf("any_conditions count = %d, want %d", len(r.AnyConditions), tt.wantAny)
 			}
 		})
 	}
@@ -305,13 +336,13 @@ func TestRulesResponseUnmarshal(t *testing.T) {
 			{
 				"name": "rule-one",
 				"message": "Rule one",
-				"operations": ["read"],
+				"actions": ["read"],
 				"block": {"paths": ["/one"]}
 			},
 			{
 				"name": "rule-two",
 				"message": "Rule two",
-				"operations": ["write"],
+				"actions": ["write"],
 				"block": {"paths": ["/two"]}
 			}
 		]

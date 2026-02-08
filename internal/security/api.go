@@ -6,9 +6,9 @@ import (
 
 	"github.com/gin-gonic/gin"
 
-	"github.com/AgentShepherd/agentshepherd/internal/api"
-	"github.com/AgentShepherd/agentshepherd/internal/rules"
-	"github.com/AgentShepherd/agentshepherd/internal/telemetry"
+	"github.com/BakeLens/crust/internal/api"
+	"github.com/BakeLens/crust/internal/rules"
+	"github.com/BakeLens/crust/internal/telemetry"
 )
 
 // APIServer handles HTTP API requests for security management and telemetry
@@ -71,7 +71,7 @@ func (s *APIServer) registerRoutes() {
 		// Rules routes (if rule engine is available)
 		if ruleEngine := rules.GetGlobalEngine(); ruleEngine != nil {
 			rulesAPI := rules.NewAPIHandler(ruleEngine)
-			rulesGroup := apiGroup.Group("/agentshepherd/rules")
+			rulesGroup := apiGroup.Group("/crust/rules")
 			{
 				rulesGroup.GET("", rulesAPI.HandleRules)
 				rulesGroup.GET("/builtin", rulesAPI.HandleBuiltinRules)

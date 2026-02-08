@@ -5,6 +5,7 @@ import (
 	crypto_rand "crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"sync"
 	"time"
 )
 
@@ -76,22 +77,29 @@ type Provider struct {
 	sampleRate  float64
 }
 
-var globalProvider *Provider
-var globalStorage *Storage
+var (
+	globalProvider *Provider
+	globalStorage  *Storage
+	globalMu       sync.RWMutex
+)
 
 // Init initializes the telemetry provider
 func Init(ctx context.Context, cfg Config) (*Provider, error) {
-	globalProvider = &Provider{
+	p := &Provider{
 		enabled:     cfg.Enabled,
 		serviceName: cfg.ServiceName,
 		sampleRate:  cfg.SampleRate,
 	}
 
+	globalMu.Lock()
+	globalProvider = p
+	globalMu.Unlock()
+
 	if cfg.Enabled {
 		log.Debug("[TELEMETRY] Initialized (service=%s, sample_rate=%.2f)", cfg.ServiceName, cfg.SampleRate)
 	}
 
-	return globalProvider, nil
+	return p, nil
 }
 
 // Shutdown shuts down the provider
@@ -106,16 +114,22 @@ func (p *Provider) IsEnabled() bool {
 
 // GetGlobalProvider returns the global telemetry provider
 func GetGlobalProvider() *Provider {
+	globalMu.RLock()
+	defer globalMu.RUnlock()
 	return globalProvider
 }
 
 // SetGlobalStorage sets the global storage for telemetry
 func SetGlobalStorage(s *Storage) {
+	globalMu.Lock()
+	defer globalMu.Unlock()
 	globalStorage = s
 }
 
 // GetGlobalStorage returns the global storage
 func GetGlobalStorage() *Storage {
+	globalMu.RLock()
+	defer globalMu.RUnlock()
 	return globalStorage
 }
 
@@ -145,7 +159,7 @@ func (p *Provider) EndLLMSpan(spanCtx *SpanContext, data LLMSpanData) {
 		return
 	}
 
-	storage := globalStorage
+	storage := GetGlobalStorage()
 	if storage == nil {
 		log.Debug("[TELEMETRY] Warning: storage not available, skipping span")
 		return

@@ -1,14 +1,14 @@
-# AgentShepherd Makefile
+# Crust Makefile
 
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
-BINARY_NAME = agentshepherd
+BINARY_NAME = crust
 BUILD_DIR = build
 LDFLAGS = -ldflags "-s -w -X main.Version=$(VERSION)"
 
 # Platforms for release
 PLATFORMS = darwin/amd64 darwin/arm64 linux/amd64 linux/arm64
 
-.PHONY: all build clean test test-unit test-e2e test-all test-data release install lint help
+.PHONY: all build clean test test-unit test-e2e test-all test-data release install lint vulncheck semgrep help build-bpf install-bpf uninstall-bpf
 
 all: build
 
@@ -49,28 +49,49 @@ test-data:
 		echo "Test data created at /test-data"; \
 	fi
 
-## Run fuzz tests (30 seconds each)
-test-fuzz:
-	@echo "=== Fuzz Tests (30s each) ==="
-	go test -fuzz=FuzzPatternConversion -fuzztime=30s ./internal/sandbox/
-	go test -fuzz=FuzzRuleMatching -fuzztime=30s ./internal/rules/
-
-## Run fuzz tests (short, 10s each)
-test-fuzz-short:
-	@echo "=== Fuzz Tests (10s each) ==="
-	go test -fuzz=FuzzPatternConversion -fuzztime=10s ./internal/sandbox/
-	go test -fuzz=FuzzExpandHomeDir -fuzztime=10s ./internal/sandbox/
-	go test -fuzz=FuzzExtractPaths -fuzztime=10s ./internal/sandbox/
-	go test -fuzz=FuzzRuleMatching -fuzztime=10s ./internal/rules/
-	go test -fuzz=FuzzExtractJSONField -fuzztime=10s ./internal/rules/
-
-## Run linter
+## Run Go linter
 lint:
 	golangci-lint run ./...
+
+## Check dependencies for known vulnerabilities
+vulncheck:
+	govulncheck ./...
+
+## Run semgrep SAST scan
+semgrep:
+	semgrep scan --config auto .
+
+## Build bpf-helper binary (Linux only)
+build-bpf:
+	go build $(LDFLAGS) -o bpf-helper ./cmd/bpf-helper/
+
+## Install bpf-helper and systemd service
+install-bpf: build-bpf
+	@if [ "$$(uname -s)" != "Linux" ]; then echo "bpf-helper is Linux-only"; exit 1; fi
+	sudo install -d /usr/libexec/crust
+	sudo install -m 755 bpf-helper /usr/libexec/crust/bpf-helper
+	sudo cp init/crust-bpf@.service /etc/systemd/system/
+	sudo systemctl daemon-reload
+	@echo "Installed bpf-helper to /usr/libexec/crust/"
+	@echo ""
+	@echo "Enable for your user:"
+	@echo "  sudo systemctl enable --now crust-bpf@$$(whoami).service"
+
+## Uninstall bpf-helper and systemd service
+uninstall-bpf:
+	@if [ "$$(uname -s)" != "Linux" ]; then echo "bpf-helper is Linux-only"; exit 1; fi
+	-sudo systemctl stop "crust-bpf@$$(whoami).service" 2>/dev/null
+	-sudo systemctl disable "crust-bpf@$$(whoami).service" 2>/dev/null
+	-sudo rm -f /usr/libexec/crust/bpf-helper
+	-sudo rm -f /etc/systemd/system/crust-bpf@.service
+	-sudo rm -rf "/etc/systemd/system/crust-bpf@$$(whoami).service.d"
+	sudo systemctl daemon-reload
+	@echo "Uninstalled bpf-helper"
 
 ## Clean build artifacts
 clean:
 	rm -f $(BINARY_NAME)
+	rm -f bpf-helper
 	rm -rf $(BUILD_DIR)
 
 ## Install to /usr/local/bin
@@ -93,7 +114,7 @@ release: clean
 
 ## Show help
 help:
-	@echo "AgentShepherd Makefile"
+	@echo "Crust Makefile"
 	@echo ""
 	@echo "Usage: make [target]"
 	@echo ""
@@ -102,12 +123,15 @@ help:
 	@echo "  test            Run unit tests (alias for test-unit)"
 	@echo "  test-unit       Run unit tests"
 	@echo "  test-e2e        Run E2E sandbox tests"
-	@echo "  test-fuzz       Run fuzz tests (30s each)"
-	@echo "  test-fuzz-short Run fuzz tests (10s each)"
 	@echo "  test-all        Run all tests (unit + E2E)"
-	@echo "  lint            Run linter"
+	@echo "  lint            Run Go linter"
+	@echo "  vulncheck       Check deps for known CVEs (govulncheck)"
+	@echo "  semgrep         Run semgrep SAST scan"
 	@echo "  clean           Clean build artifacts"
 	@echo "  install         Install to /usr/local/bin"
+	@echo "  build-bpf       Build bpf-helper (Linux only)"
+	@echo "  install-bpf     Install bpf-helper + systemd service"
+	@echo "  uninstall-bpf   Remove bpf-helper + systemd service"
 	@echo "  release         Build release tarball"
 	@echo ""
 	@echo "Variables:"

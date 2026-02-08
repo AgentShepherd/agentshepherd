@@ -1,0 +1,77 @@
+version: 2
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: crust
+    binary: crust
+    main: .
+    env:
+      - CGO_ENABLED=1
+    ldflags:
+      - -s -w -X main.Version={{.Version}}
+    goos:
+      - darwin
+      - linux
+    goarch:
+      - amd64
+      - arm64
+    overrides:
+      - goos: darwin
+        goarch: amd64
+        env:
+          - CC=o64-clang
+          - CXX=o64-clang++
+      - goos: darwin
+        goarch: arm64
+        env:
+          - CC=oa64-clang
+          - CXX=oa64-clang++
+      - goos: linux
+        goarch: amd64
+        env:
+          - CC=x86_64-linux-gnu-gcc
+          - CXX=x86_64-linux-gnu-g++
+      - goos: linux
+        goarch: arm64
+        env:
+          - CC=aarch64-linux-gnu-gcc
+          - CXX=aarch64-linux-gnu-g++
+
+archives:
+  - id: default
+    format: tar.gz
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+
+checksum:
+  name_template: "checksums.txt"
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^ci:"
+      - "^chore:"
+
+release:
+  github:
+    owner: BakeLens
+    name: crust
+  header: |
+    ## Crust {{ .Version }}
+
+    **Crust** (formerly AgentShepherd) — Secure gateway for AI agents.
+
+    ### Highlights
+    - Auto Mode: resolve LLM providers from model names, clients bring their own auth
+    - Rule engine v2 with composable conditions (`all` / `any`)
+    - OS-level sandbox (Landlock + macOS Seatbelt)
+
+    ### Installation
+    Download the appropriate binary for your platform below, extract, and place in your `$PATH`.
+  footer: |
+    **Full Changelog**: https://github.com/BakeLens/crust/compare/v1.0.0...{{ .Tag }}

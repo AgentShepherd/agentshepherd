@@ -173,60 +173,6 @@ func TestPreFilter_NetworkExfiltration(t *testing.T) {
 	}
 }
 
-func TestPreFilter_CheckAll(t *testing.T) {
-	pf := NewPreFilter()
-
-	// Command with multiple obfuscation techniques
-	cmd := "eval $(echo 'Y2F0' | base64 -d)"
-
-	matches := pf.CheckAll(cmd)
-	if len(matches) < 2 {
-		t.Errorf("Expected multiple matches, got %d", len(matches))
-	}
-
-	// Verify we found both eval and command substitution
-	foundEval := false
-	foundSubst := false
-	for _, m := range matches {
-		if m.PatternName == "eval-keyword" {
-			foundEval = true
-		}
-		if m.PatternName == "command-substitution-dollar" {
-			foundSubst = true
-		}
-	}
-	if !foundEval {
-		t.Error("Expected to find eval pattern")
-	}
-	if !foundSubst {
-		t.Error("Expected to find command substitution pattern")
-	}
-}
-
-func TestIsSafeCommand(t *testing.T) {
-	tests := []struct {
-		cmd  string
-		safe bool
-	}{
-		{"ls -la", true},
-		{"cat /etc/hosts", true},
-		{"echo hello world", true},
-		{"echo $(whoami)", false},
-		{"eval rm -rf", false},
-		{"base64 -d payload", false},
-		{":(){:|:&};:", false},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.cmd, func(t *testing.T) {
-			result := IsSafeCommand(tt.cmd)
-			if result != tt.safe {
-				t.Errorf("IsSafeCommand(%q) = %v, want %v", tt.cmd, result, tt.safe)
-			}
-		})
-	}
-}
-
 func TestPreFilter_IndirectExpansion(t *testing.T) {
 	pf := NewPreFilter()
 

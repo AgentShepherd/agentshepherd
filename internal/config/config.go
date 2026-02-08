@@ -3,12 +3,16 @@ package config
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 
-	"github.com/AgentShepherd/agentshepherd/internal/types"
+	"github.com/BakeLens/crust/internal/logger"
+	"github.com/BakeLens/crust/internal/types"
 	"gopkg.in/yaml.v3"
 )
 
-// Config represents the agentshepherd configuration
+var cfgLog = logger.New("config")
+
+// Config represents the crust configuration
 type Config struct {
 	Server    ServerConfig    `yaml:"server"`
 	Upstream  UpstreamConfig  `yaml:"upstream"`
@@ -22,7 +26,8 @@ type Config struct {
 
 // SandboxConfig holds OS sandbox settings
 type SandboxConfig struct {
-	Enabled bool `yaml:"enabled"` // enable OS-level sandbox (Landlock/Seatbelt)
+	Enabled   bool   `yaml:"enabled"`    // enable OS-level sandbox (Landlock/Seatbelt)
+	BPFHelper string `yaml:"bpf_helper"` // path to BPF helper Unix socket (Linux-only, optional)
 }
 
 // APIConfig holds management API settings
@@ -45,6 +50,8 @@ type UpstreamConfig struct {
 	Timeout int `yaml:"timeout"`
 	// APIKey for upstream authentication (set at runtime, not from config file)
 	APIKey string `yaml:"-"`
+	// Providers maps user-defined model keywords to base URLs (e.g. "my-llama": "http://localhost:11434/v1")
+	Providers map[string]string `yaml:"providers"`
 }
 
 // StorageConfig holds unified database settings
@@ -79,6 +86,11 @@ func (c *SecurityConfig) Validate() error {
 		return fmt.Errorf("invalid block_mode %q: must be 'remove' or 'replace'", c.BlockMode)
 	}
 
+	// Warn when security is enabled but streaming bypass is active
+	if c.Enabled && !c.BufferStreaming {
+		cfgLog.Warn("buffer_streaming is disabled: streaming responses will bypass security interception")
+	}
+
 	// Validate buffer settings when buffering is enabled
 	if c.BufferStreaming {
 		if c.MaxBufferSize <= 0 {
@@ -95,9 +107,18 @@ func (c *SecurityConfig) Validate() error {
 // RulesConfig holds rule engine settings
 type RulesConfig struct {
 	Enabled        bool   `yaml:"enabled"`
-	UserDir        string `yaml:"user_dir"`        // directory for user rules (default: ~/.agentshepherd/rules.d)
+	UserDir        string `yaml:"user_dir"`        // directory for user rules (default: ~/.crust/rules.d)
 	DisableBuiltin bool   `yaml:"disable_builtin"` // disable embedded builtin rules
 	Watch          bool   `yaml:"watch"`           // enable file watching for hot reload
+}
+
+// defaultDBPath returns the default database path under ~/.crust/.
+func defaultDBPath() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "./crust.db"
+	}
+	return filepath.Join(home, ".crust", "crust.db")
 }
 
 // DefaultConfig returns the default configuration
@@ -113,7 +134,7 @@ func DefaultConfig() *Config {
 			Timeout: 300,
 		},
 		Storage: StorageConfig{
-			DBPath: "./agentshepherd.db",
+			DBPath: defaultDBPath(),
 		},
 		API: APIConfig{
 			Port: 9091,
@@ -121,7 +142,7 @@ func DefaultConfig() *Config {
 		Telemetry: TelemetryConfig{
 			Enabled:       false, // disabled by default
 			RetentionDays: 7,
-			ServiceName:   "agentshepherd",
+			ServiceName:   "crust",
 			SampleRate:    1.0,
 		},
 		Security: SecurityConfig{
@@ -133,7 +154,7 @@ func DefaultConfig() *Config {
 		},
 		Rules: RulesConfig{
 			Enabled:        true,
-			UserDir:        "", // empty means use default ~/.agentshepherd/rules.d
+			UserDir:        "", // empty means use default ~/.crust/rules.d
 			DisableBuiltin: false,
 			Watch:          true,
 		},

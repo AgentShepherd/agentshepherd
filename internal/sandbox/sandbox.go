@@ -24,10 +24,13 @@ func (s *Sandbox) Wrap(command []string) (int, error) {
 		return 1, fmt.Errorf("no command specified")
 	}
 
-	profilePath := s.mapper.ProfilePath()
+	return s.execute(command)
+}
 
-	// Execute platform-specific sandbox
-	return s.execute(profilePath, command)
+// IsHelperInstalled returns true if the bakelens-sandbox binary is found.
+func IsHelperInstalled() bool {
+	_, err := findBakelensSandbox()
+	return err == nil
 }
 
 // IsSupported returns whether sandbox is supported on this platform.
@@ -46,7 +49,7 @@ func IsSupported() bool {
 func Platform() string {
 	switch runtime.GOOS {
 	case "darwin":
-		return "sandbox-exec (Seatbelt)"
+		return "bakelens-sandbox (Seatbelt)"
 	case "linux":
 		abi := detectLandlockABI()
 		if abi >= 3 {
@@ -58,9 +61,4 @@ func Platform() string {
 	default:
 		return "not supported"
 	}
-}
-
-// GetMapper returns the sandbox mapper.
-func (s *Sandbox) GetMapper() *Mapper {
-	return s.mapper
 }

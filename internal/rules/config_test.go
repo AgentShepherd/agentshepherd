@@ -99,8 +99,8 @@ rules:
 	}
 
 	rules := rs.ToRules()
-	if len(rules[0].Operations) != 1 || rules[0].Operations[0] != OpDelete {
-		t.Errorf("expected [delete], got %v", rules[0].Operations)
+	if len(rules[0].Actions) != 1 || rules[0].Actions[0] != OpDelete {
+		t.Errorf("expected [delete], got %v", rules[0].Actions)
 	}
 }
 

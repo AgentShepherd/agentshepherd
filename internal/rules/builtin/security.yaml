@@ -19,12 +19,12 @@ rules:
   # ===========================================================================
   # 2. SELF PROTECTION
   # ===========================================================================
-  - name: protect-agentshepherd
+  - name: protect-crust
     block:
-      - "**/.agentshepherd/**"
-      - "**/agentshepherd*.db"
+      - "**/.crust/**"
+      - "**/crust*.db"
     actions: [read, write, delete]
-    message: "Cannot access AgentShepherd data"
+    message: "Cannot access Crust data"
     severity: critical
 
   # ===========================================================================
@@ -185,3 +185,13 @@ rules:
     actions: [write]
     message: "Cannot write private key content - potential key exfiltration"
     severity: critical
+
+  # ===========================================================================
+  # 12. SHELL EVASION PATTERNS (defense-in-depth for command regex rules)
+  # ===========================================================================
+  - name: block-eval-exec
+    match:
+      command: "re:\\beval\\b|\\bexec\\b"
+    actions: [execute]
+    message: "eval/exec prevents static security analysis. Use direct commands instead."
+    severity: high

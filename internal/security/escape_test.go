@@ -1,6 +1,7 @@
 package security
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -209,27 +210,57 @@ func FuzzEscapeForShellEcho(f *testing.F) {
 	f.Add("hello\nworld")
 	f.Add("$(rm -rf /)")
 	f.Add("`cmd`")
+	f.Add("\x00")
+	f.Add("a\tb\nc")
+	f.Add(`'; rm -rf / #`)
+	f.Add(`" ; rm -rf / #`)
 
 	f.Fuzz(func(t *testing.T, input string) {
 		result := EscapeForShellEcho(input)
 
-		// Basic invariants:
-		// 1. Result should not panic (implicit)
-		// 2. Result should not contain unescaped newlines
-		for i, c := range result {
-			if c == '\n' {
-				t.Errorf("Result contains newline at position %d", i)
-			}
-			if c == '\r' {
-				t.Errorf("Result contains carriage return at position %d", i)
+		// INVARIANT 1: Result must not contain raw newlines.
+		if strings.ContainsRune(result, '\n') {
+			t.Errorf("result contains newline: input=%q result=%q", input, result)
+		}
+
+		// INVARIANT 2: Result must not contain carriage returns.
+		if strings.ContainsRune(result, '\r') {
+			t.Errorf("result contains carriage return: input=%q result=%q", input, result)
+		}
+
+		// INVARIANT 3: All double quotes must be escaped (preceded by \).
+		for i := 0; i < len(result); i++ {
+			if result[i] == '"' {
+				// Count preceding backslashes
+				nBackslashes := 0
+				for j := i - 1; j >= 0 && result[j] == '\\'; j-- {
+					nBackslashes++
+				}
+				// Escaped if preceded by odd number of backslashes
+				if nBackslashes%2 == 0 {
+					t.Errorf("unescaped double quote at position %d: input=%q result=%q", i, input, result)
+				}
 			}
 		}
 
-		// 3. All double quotes should be escaped (preceded by backslash)
-		for i := 0; i < len(result); i++ {
-			if result[i] == '"' && (i == 0 || result[i-1] != '\\') {
-				t.Errorf("Result contains unescaped double quote at position %d", i)
+		// INVARIANT 4: Idempotent for "safe" content.
+		// If input has no special chars, output must equal input.
+		hasSpecial := false
+		for _, c := range input {
+			if c == '\\' || c == '\n' || c == '\r' || c == '"' || c == '\'' {
+				hasSpecial = true
+				break
 			}
+		}
+		if !hasSpecial && result != input {
+			t.Errorf("no special chars but result differs: input=%q result=%q", input, result)
+		}
+
+		// INVARIANT 5: Result length must be >= input length after \r removal.
+		// Escaping only adds chars; only \r is removed entirely.
+		minLen := len(strings.ReplaceAll(strings.ReplaceAll(input, "\r", ""), "\n", " "))
+		if len(result) < minLen {
+			t.Errorf("result too short: len(result)=%d < %d: input=%q result=%q", len(result), minLen, input, result)
 		}
 	})
 }

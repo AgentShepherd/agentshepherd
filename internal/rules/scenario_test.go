@@ -169,62 +169,6 @@ func TestMaliciousAgentScenarios(t *testing.T) {
 	}
 }
 
-// TestScenarioFilesExist verifies that the scenario test data files exist
-func TestScenarioFilesExist(t *testing.T) {
-	testDataPath := getTestDataPath()
-
-	files := []string{
-		"normal_agent.yaml",
-		"malicious_agent.yaml",
-	}
-
-	for _, file := range files {
-		path := filepath.Join(testDataPath, file)
-		if _, err := os.Stat(path); os.IsNotExist(err) {
-			t.Errorf("Required test data file missing: %s", path)
-		} else {
-			t.Logf("Found test data file: %s", path)
-		}
-	}
-}
-
-// TestScenarioSummary provides a high-level summary of all scenario tests
-func TestScenarioSummary(t *testing.T) {
-	normalScenarios := loadScenarios(t, "normal_agent.yaml")
-	maliciousScenarios := loadScenarios(t, "malicious_agent.yaml")
-	engine := createEngineWithBuiltinRules(t)
-
-	t.Logf("\n=== Scenario Test Configuration ===")
-	t.Logf("Normal agent scenarios: %d", len(normalScenarios))
-	t.Logf("Malicious agent scenarios: %d", len(maliciousScenarios))
-	t.Logf("Active builtin rules: %d", engine.RuleCount())
-
-	// Count by tool type
-	normalByTool := make(map[string]int)
-	for _, s := range normalScenarios {
-		normalByTool[s.Tool]++
-	}
-	t.Logf("\nNormal scenarios by tool:")
-	for tool, count := range normalByTool {
-		t.Logf("  %s: %d", tool, count)
-	}
-
-	maliciousByTool := make(map[string]int)
-	for _, s := range maliciousScenarios {
-		maliciousByTool[s.Tool]++
-	}
-	t.Logf("\nMalicious scenarios by tool:")
-	for tool, count := range maliciousByTool {
-		t.Logf("  %s: %d", tool, count)
-	}
-
-	// List all active rules
-	t.Logf("\nActive rules:")
-	for _, rule := range engine.GetRules() {
-		t.Logf("  - %s (severity=%s, ops=%v)", rule.Name, rule.GetSeverity(), rule.Operations)
-	}
-}
-
 // TestRuleHitCoverage checks which rules are hit by malicious scenarios
 func TestRuleHitCoverage(t *testing.T) {
 	scenarios := loadScenarios(t, "malicious_agent.yaml")

@@ -1,33 +1,25 @@
 package sandbox
 
 import (
-	"path/filepath"
 	"strings"
 	"testing"
-
-	"github.com/AgentShepherd/agentshepherd/internal/rules"
 )
 
 func TestCheckConsistency_AllMapped(t *testing.T) {
-	tmpDir := t.TempDir()
-	profilePath := filepath.Join(tmpDir, "sandbox.sb")
-	mapper := NewMapper(profilePath)
+	mapper := newTestMapper(t)
 
-	enabled := true
-	allRules := []rules.Rule{
-		{
-			Name:       "rule-one",
-			Enabled:    &enabled,
-			Block:      rules.Block{Paths: []string{"**/.env"}},
-			Operations: []rules.Operation{rules.OpRead},
-			Message:    "test",
+	allRules := []SecurityRule{
+		&testRule{
+			name:       "rule-one",
+			enabled:    &boolTrue,
+			paths:      []string{"**/.env"},
+			operations: []string{"read"},
 		},
-		{
-			Name:       "rule-two",
-			Enabled:    &enabled,
-			Block:      rules.Block{Paths: []string{"**/.ssh/*"}},
-			Operations: []rules.Operation{rules.OpRead},
-			Message:    "test",
+		&testRule{
+			name:       "rule-two",
+			enabled:    &boolTrue,
+			paths:      []string{"**/.ssh/*"},
+			operations: []string{"read"},
 		},
 	}
 
@@ -42,28 +34,23 @@ func TestCheckConsistency_AllMapped(t *testing.T) {
 }
 
 func TestCheckConsistency_MissingMappings(t *testing.T) {
-	tmpDir := t.TempDir()
-	profilePath := filepath.Join(tmpDir, "sandbox.sb")
-	mapper := NewMapper(profilePath)
+	mapper := newTestMapper(t)
 
-	enabled := true
-	rule1 := rules.Rule{
-		Name:       "rule-one",
-		Enabled:    &enabled,
-		Block:      rules.Block{Paths: []string{"**/.env"}},
-		Operations: []rules.Operation{rules.OpRead},
-		Message:    "test",
+	rule1 := &testRule{
+		name:       "rule-one",
+		enabled:    &boolTrue,
+		paths:      []string{"**/.env"},
+		operations: []string{"read"},
 	}
 	_ = mapper.AddRule(rule1)
 
-	allRules := []rules.Rule{
+	allRules := []SecurityRule{
 		rule1,
-		{
-			Name:       "rule-two",
-			Enabled:    &enabled,
-			Block:      rules.Block{Paths: []string{"**/.ssh/*"}},
-			Operations: []rules.Operation{rules.OpRead},
-			Message:    "test",
+		&testRule{
+			name:       "rule-two",
+			enabled:    &boolTrue,
+			paths:      []string{"**/.ssh/*"},
+			operations: []string{"read"},
 		},
 	}
 
@@ -81,30 +68,25 @@ func TestCheckConsistency_MissingMappings(t *testing.T) {
 }
 
 func TestCheckConsistency_OrphanedMappings(t *testing.T) {
-	tmpDir := t.TempDir()
-	profilePath := filepath.Join(tmpDir, "sandbox.sb")
-	mapper := NewMapper(profilePath)
+	mapper := newTestMapper(t)
 
-	enabled := true
-	rule1 := rules.Rule{
-		Name:       "rule-one",
-		Enabled:    &enabled,
-		Block:      rules.Block{Paths: []string{"**/.env"}},
-		Operations: []rules.Operation{rules.OpRead},
-		Message:    "test",
+	rule1 := &testRule{
+		name:       "rule-one",
+		enabled:    &boolTrue,
+		paths:      []string{"**/.env"},
+		operations: []string{"read"},
 	}
-	rule2 := rules.Rule{
-		Name:       "rule-two",
-		Enabled:    &enabled,
-		Block:      rules.Block{Paths: []string{"**/.ssh/*"}},
-		Operations: []rules.Operation{rules.OpRead},
-		Message:    "test",
+	rule2 := &testRule{
+		name:       "rule-two",
+		enabled:    &boolTrue,
+		paths:      []string{"**/.ssh/*"},
+		operations: []string{"read"},
 	}
 	_ = mapper.AddRule(rule1)
 	_ = mapper.AddRule(rule2)
 
 	// But only claim one rule exists
-	allRules := []rules.Rule{rule1}
+	allRules := []SecurityRule{rule1}
 
 	err := mapper.CheckConsistency(allRules)
 	if err == nil {
@@ -120,29 +102,23 @@ func TestCheckConsistency_OrphanedMappings(t *testing.T) {
 }
 
 func TestCheckConsistency_IgnoresDisabledRules(t *testing.T) {
-	tmpDir := t.TempDir()
-	profilePath := filepath.Join(tmpDir, "sandbox.sb")
-	mapper := NewMapper(profilePath)
+	mapper := newTestMapper(t)
 
-	enabled := true
-	disabled := false
-	rule1 := rules.Rule{
-		Name:       "enabled-rule",
-		Enabled:    &enabled,
-		Block:      rules.Block{Paths: []string{"**/.env"}},
-		Operations: []rules.Operation{rules.OpRead},
-		Message:    "test",
+	rule1 := &testRule{
+		name:       "enabled-rule",
+		enabled:    &boolTrue,
+		paths:      []string{"**/.env"},
+		operations: []string{"read"},
 	}
 	_ = mapper.AddRule(rule1)
 
-	allRules := []rules.Rule{
+	allRules := []SecurityRule{
 		rule1,
-		{
-			Name:       "disabled-rule",
-			Enabled:    &disabled,
-			Block:      rules.Block{Paths: []string{"**/.secret"}},
-			Operations: []rules.Operation{rules.OpRead},
-			Message:    "test",
+		&testRule{
+			name:       "disabled-rule",
+			enabled:    &boolFalse,
+			paths:      []string{"**/.secret"},
+			operations: []string{"read"},
 		},
 	}
 
@@ -153,34 +129,28 @@ func TestCheckConsistency_IgnoresDisabledRules(t *testing.T) {
 }
 
 func TestRepair(t *testing.T) {
-	tmpDir := t.TempDir()
-	profilePath := filepath.Join(tmpDir, "sandbox.sb")
-	mapper := NewMapper(profilePath)
+	mapper := newTestMapper(t)
 
-	enabled := true
-	orphanRule := rules.Rule{
-		Name:       "orphan-rule",
-		Enabled:    &enabled,
-		Block:      rules.Block{Paths: []string{"**/.old"}},
-		Operations: []rules.Operation{rules.OpRead},
-		Message:    "test",
+	orphanRule := &testRule{
+		name:       "orphan-rule",
+		enabled:    &boolTrue,
+		paths:      []string{"**/.old"},
+		operations: []string{"read"},
 	}
 	_ = mapper.AddRule(orphanRule)
 
-	allRules := []rules.Rule{
-		{
-			Name:       "rule-one",
-			Enabled:    &enabled,
-			Block:      rules.Block{Paths: []string{"**/.env"}},
-			Operations: []rules.Operation{rules.OpRead},
-			Message:    "test",
+	allRules := []SecurityRule{
+		&testRule{
+			name:       "rule-one",
+			enabled:    &boolTrue,
+			paths:      []string{"**/.env"},
+			operations: []string{"read"},
 		},
-		{
-			Name:       "rule-two",
-			Enabled:    &enabled,
-			Block:      rules.Block{Paths: []string{"**/.ssh/*"}},
-			Operations: []rules.Operation{rules.OpRead},
-			Message:    "test",
+		&testRule{
+			name:       "rule-two",
+			enabled:    &boolTrue,
+			paths:      []string{"**/.ssh/*"},
+			operations: []string{"read"},
 		},
 	}
 
@@ -207,21 +177,17 @@ func TestRepair(t *testing.T) {
 }
 
 func TestRepair_EmptyRules(t *testing.T) {
-	tmpDir := t.TempDir()
-	profilePath := filepath.Join(tmpDir, "sandbox.sb")
-	mapper := NewMapper(profilePath)
+	mapper := newTestMapper(t)
 
-	enabled := true
-	rule := rules.Rule{
-		Name:       "test-rule",
-		Enabled:    &enabled,
-		Block:      rules.Block{Paths: []string{"**/.env"}},
-		Operations: []rules.Operation{rules.OpRead},
-		Message:    "test",
+	rule := &testRule{
+		name:       "test-rule",
+		enabled:    &boolTrue,
+		paths:      []string{"**/.env"},
+		operations: []string{"read"},
 	}
 	_ = mapper.AddRule(rule)
 
-	err := mapper.Repair([]rules.Rule{})
+	err := mapper.Repair([]SecurityRule{})
 	if err != nil {
 		t.Fatalf("Repair with empty rules failed: %v", err)
 	}
@@ -232,18 +198,14 @@ func TestRepair_EmptyRules(t *testing.T) {
 }
 
 func TestSync(t *testing.T) {
-	tmpDir := t.TempDir()
-	profilePath := filepath.Join(tmpDir, "sandbox.sb")
-	mapper := NewMapper(profilePath)
+	mapper := newTestMapper(t)
 
-	enabled := true
-	allRules := []rules.Rule{
-		{
-			Name:       "rule-one",
-			Enabled:    &enabled,
-			Block:      rules.Block{Paths: []string{"**/.env"}},
-			Operations: []rules.Operation{rules.OpRead},
-			Message:    "test",
+	allRules := []SecurityRule{
+		&testRule{
+			name:       "rule-one",
+			enabled:    &boolTrue,
+			paths:      []string{"**/.env"},
+			operations: []string{"read"},
 		},
 	}
 
@@ -254,6 +216,61 @@ func TestSync(t *testing.T) {
 
 	if !mapper.HasRule("rule-one") {
 		t.Error("rule-one should be present after sync")
+	}
+}
+
+func TestSync_AlreadyConsistent(t *testing.T) {
+	mapper := newTestMapper(t)
+
+	allRules := []SecurityRule{
+		&testRule{
+			name:       "rule-one",
+			enabled:    &boolTrue,
+			paths:      []string{"**/.env"},
+			operations: []string{"read"},
+		},
+	}
+
+	// Add rules first so mapper is consistent
+	for _, r := range allRules {
+		_ = mapper.AddRule(r)
+	}
+
+	// Sync on already-consistent state should return nil without calling Repair
+	err := mapper.Sync(allRules)
+	if err != nil {
+		t.Errorf("Sync on consistent state should return nil, got: %v", err)
+	}
+}
+
+func TestRepair_DisabledRules(t *testing.T) {
+	mapper := newTestMapper(t)
+
+	allRules := []SecurityRule{
+		&testRule{
+			name:       "enabled-rule",
+			enabled:    &boolTrue,
+			paths:      []string{"**/.env"},
+			operations: []string{"read"},
+		},
+		&testRule{
+			name:       "disabled-rule",
+			enabled:    &boolFalse,
+			paths:      []string{"**/.secret"},
+			operations: []string{"read"},
+		},
+	}
+
+	err := mapper.Repair(allRules)
+	if err != nil {
+		t.Fatalf("Repair failed: %v", err)
+	}
+
+	if !mapper.HasRule("enabled-rule") {
+		t.Error("enabled-rule should be present after repair")
+	}
+	if mapper.HasRule("disabled-rule") {
+		t.Error("disabled-rule should be skipped during repair")
 	}
 }
 

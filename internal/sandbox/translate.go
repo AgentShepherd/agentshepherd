@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/AgentShepherd/agentshepherd/internal/rules"
+	"github.com/BakeLens/crust/internal/rules"
 )
 
 // Directive represents a single sandbox directive.
@@ -35,15 +35,18 @@ func (d Directive) String() string {
 // TranslateRule converts a path-based rule to sandbox directives.
 // It generates deny directives for blocked paths and allow directives for exceptions.
 // Order matters: exceptions (allow) should come after denies in the profile.
-func TranslateRule(rule rules.Rule) []Directive {
+func TranslateRule(rule SecurityRule) []Directive {
 	var directives []Directive
 
 	// Convert operations to sandbox operations
-	ops := operationsToSandboxOps(rule.Operations)
+	ops := operationsToSandboxOps(rule.GetActions())
+
+	// Use full normalizer for pattern expansion (handles ~, $HOME, $TMPDIR, etc.)
+	normalizer := rules.NewNormalizer()
 
 	// Process path patterns (deny)
-	for _, pattern := range rule.Block.Paths {
-		expanded := expandHomeDir(pattern)
+	for _, pattern := range rule.GetBlockPaths() {
+		expanded := normalizer.NormalizePattern(pattern)
 		sbPattern := globToSandboxRegex(expanded)
 
 		for _, op := range ops {
@@ -58,8 +61,8 @@ func TranslateRule(rule rules.Rule) []Directive {
 
 	// Process exception patterns (allow)
 	// Exceptions override the deny rules for specific paths
-	for _, pattern := range rule.Block.Except {
-		expanded := expandHomeDir(pattern)
+	for _, pattern := range rule.GetBlockExcept() {
+		expanded := normalizer.NormalizePattern(pattern)
 		sbPattern := globToSandboxRegex(expanded)
 
 		for _, op := range ops {
@@ -75,38 +78,27 @@ func TranslateRule(rule rules.Rule) []Directive {
 	return directives
 }
 
-// TranslateRules converts multiple path-based rules to sandbox directives.
-func TranslateRules(pbRules []rules.Rule) []Directive {
-	var all []Directive
-	for _, rule := range pbRules {
-		if rule.IsEnabled() {
-			all = append(all, TranslateRule(rule)...)
-		}
-	}
-	return all
-}
-
 // operationsToSandboxOps maps path-based operations to sandbox operations.
-func operationsToSandboxOps(ops []rules.Operation) []string {
+func operationsToSandboxOps(ops []string) []string {
 	var sandboxOps []string
 	seen := make(map[string]bool)
 
 	for _, op := range ops {
 		var sbOps []string
-		switch op {
-		case rules.OpRead:
+		switch Operation(op) {
+		case OpRead:
 			sbOps = []string{"file-read*"}
-		case rules.OpWrite:
+		case OpWrite:
 			sbOps = []string{"file-write*"}
-		case rules.OpDelete:
+		case OpDelete:
 			sbOps = []string{"file-write-unlink"}
-		case rules.OpCopy:
+		case OpCopy:
 			sbOps = []string{"file-read*", "file-write*"}
-		case rules.OpMove:
+		case OpMove:
 			sbOps = []string{"file-read*", "file-write*", "file-write-unlink"}
-		case rules.OpExecute:
+		case OpExecute:
 			sbOps = []string{"process-exec*"}
-		case rules.OpNetwork:
+		case OpNetwork:
 			sbOps = []string{"network-outbound"}
 		}
 
@@ -138,6 +130,12 @@ func globToSandboxRegex(glob string) string {
 	pattern = strings.ReplaceAll(pattern, "**", doubleStar)
 	pattern = strings.ReplaceAll(pattern, "*", singleStar)
 
+	// Escape backslash FIRST (before any other escaping adds backslashes)
+	pattern = strings.ReplaceAll(pattern, `\`, `\\`)
+
+	// Escape double-quote (Seatbelt profile string delimiter)
+	pattern = strings.ReplaceAll(pattern, `"`, `\"`)
+
 	// Escape regex metacharacters
 	pattern = strings.ReplaceAll(pattern, ".", "\\.")
 	pattern = strings.ReplaceAll(pattern, "+", "\\+")
@@ -161,6 +159,11 @@ func globToSandboxRegex(glob string) string {
 	pattern = strings.ReplaceAll(pattern, doubleStar, ".*")
 	pattern = strings.ReplaceAll(pattern, singleStar, "[^/]*")
 
+	// Add start anchor for absolute path patterns
+	if strings.HasPrefix(pattern, "/") {
+		pattern = "^" + pattern
+	}
+
 	// Add end anchor if not a directory pattern
 	if !strings.HasSuffix(pattern, ".*") && !strings.HasSuffix(pattern, "/)?") {
 		pattern += "$"
@@ -169,8 +172,8 @@ func globToSandboxRegex(glob string) string {
 	return pattern
 }
 
-// expandHomeDir expands ~ and $HOME in paths to the actual home directory.
-func expandHomeDir(path string) string {
+// ExpandHomeDir expands ~ and $HOME in paths to the actual home directory.
+func ExpandHomeDir(path string) string {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return path
@@ -189,51 +192,4 @@ func expandHomeDir(path string) string {
 	path = strings.ReplaceAll(path, "${HOME}", home)
 
 	return path
-}
-
-// GenerateSandboxProfile generates a complete sandbox profile from rules.
-// Note: In Seatbelt, rules are evaluated in order and first match wins.
-// Therefore, allow (exception) rules must come BEFORE deny rules.
-func GenerateSandboxProfile(pbRules []rules.Rule) string {
-	var sb strings.Builder
-
-	sb.WriteString("(version 1)\n")
-	sb.WriteString("(allow default)\n\n")
-	sb.WriteString("; Auto-generated from path-based rules\n\n")
-
-	for _, rule := range pbRules {
-		if !rule.IsEnabled() {
-			continue
-		}
-
-		sb.WriteString("; Rule: " + rule.Name + "\n")
-
-		directives := TranslateRule(rule)
-
-		// Separate allow (exceptions) and deny directives
-		var allowDirectives, denyDirectives []Directive
-		for _, d := range directives {
-			if d.Action == "allow" {
-				allowDirectives = append(allowDirectives, d)
-			} else {
-				denyDirectives = append(denyDirectives, d)
-			}
-		}
-
-		// Write allow (exception) rules first (Seatbelt uses first-match)
-		if len(allowDirectives) > 0 {
-			sb.WriteString("; Exceptions:\n")
-			for _, d := range allowDirectives {
-				sb.WriteString(d.String() + "\n")
-			}
-		}
-
-		// Then write deny rules
-		for _, d := range denyDirectives {
-			sb.WriteString(d.String() + "\n")
-		}
-		sb.WriteString("\n")
-	}
-
-	return sb.String()
 }

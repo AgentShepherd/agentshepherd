@@ -140,15 +140,15 @@ scenarios:
     expect: BLOCKED
     description: "Chrome login data access"
 
-  # AgentShepherd self-protection
+  # Crust self-protection
   - tool: Read
     args:
-      file_path: "/home/user/.agentshepherd/config.yaml"
+      file_path: "/home/user/.crust/config.yaml"
     expect: BLOCKED
-    description: "AgentShepherd config access"
+    description: "Crust config access"
 
   - tool: Read
     args:
-      file_path: "/home/user/agentshepherd.db"
+      file_path: "/home/user/crust.db"
     expect: BLOCKED
-    description: "AgentShepherd database access"
+    description: "Crust database access"

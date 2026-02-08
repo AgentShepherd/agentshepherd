@@ -2,6 +2,7 @@ package rules
 
 import (
 	"embed"
+	"encoding/hex"
 	"fmt"
 	"io/fs"
 	"os"
@@ -9,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"golang.org/x/crypto/sha3"
 	"gopkg.in/yaml.v3"
 )
 
@@ -17,13 +19,15 @@ var builtinFS embed.FS
 
 // Loader handles loading rules from embedded files and user directory
 type Loader struct {
-	userDir string
+	userDir       string
+	fileChecksums map[string]string // path -> SHA3-256 hex digest
 }
 
 // NewLoader creates a new rule loader
 func NewLoader(userDir string) *Loader {
 	return &Loader{
-		userDir: userDir,
+		userDir:       userDir,
+		fileChecksums: make(map[string]string),
 	}
 }
 
@@ -31,9 +35,9 @@ func NewLoader(userDir string) *Loader {
 func DefaultUserRulesDir() string {
 	home, err := os.UserHomeDir()
 	if err != nil {
-		return ".agentshepherd/rules.d"
+		return ".crust/rules.d"
 	}
-	return filepath.Join(home, ".agentshepherd", "rules.d")
+	return filepath.Join(home, ".crust", "rules.d")
 }
 
 // LoadBuiltin loads all embedded builtin path-based rules
@@ -79,7 +83,11 @@ func (l *Loader) LoadBuiltin() ([]Rule, error) {
 	return allRules, nil
 }
 
-// LoadUser loads path-based rules from the user rules directory
+// LoadUser loads path-based rules from the user rules directory.
+// Each file is read exactly once; the same bytes are used for integrity
+// verification (SHA3-256 checksum comparison) and YAML parsing, eliminating
+// the TOCTOU gap that would exist if the two operations used separate reads.
+// Files modified outside the API since the last load are rejected.
 func (l *Loader) LoadUser() ([]Rule, error) {
 	if l.userDir == "" {
 		log.Trace("User rules directory not configured, skipping")
@@ -89,7 +97,7 @@ func (l *Loader) LoadUser() ([]Rule, error) {
 	log.Trace("Loading user path-based rules from: %s", l.userDir)
 
 	// Create directory if it doesn't exist
-	if err := os.MkdirAll(l.userDir, 0755); err != nil {
+	if err := os.MkdirAll(l.userDir, 0700); err != nil {
 		return nil, fmt.Errorf("failed to create rules directory: %w", err)
 	}
 
@@ -106,6 +114,11 @@ func (l *Loader) LoadUser() ([]Rule, error) {
 
 	log.Trace("  Found %d entries in user rules directory", len(entries))
 
+	// Track which previously-known files are still present
+	seenPaths := make(map[string]bool)
+	newChecksums := make(map[string]string)
+	var tampered []string
+
 	for _, entry := range entries {
 		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".yaml") {
 			log.Trace("  Skipping non-YAML: %s", entry.Name())
@@ -115,12 +128,30 @@ func (l *Loader) LoadUser() ([]Rule, error) {
 		path := filepath.Join(l.userDir, entry.Name())
 		log.Trace("  Loading user file: %s", path)
 
+		// Single read: same bytes used for integrity check AND parsing
 		data, err := os.ReadFile(path)
 		if err != nil {
 			log.Warn("Failed to read rule file %s: %v", path, err)
 			log.Trace("    FAILED to read: %v", err)
 			continue
 		}
+
+		// Compute SHA3-256 checksum from the bytes we just read
+		hash := sha3.Sum256(data)
+		checksum := hex.EncodeToString(hash[:])
+
+		// If we have a previous checksum for this file, verify it matches.
+		// A mismatch means the file was modified outside the API.
+		if prevHash, known := l.fileChecksums[path]; known {
+			seenPaths[path] = true
+			if checksum != prevHash {
+				log.Warn("SECURITY: rule file modified outside API: %s", path)
+				tampered = append(tampered, path+" (modified)")
+				continue // skip tampered file
+			}
+		}
+
+		newChecksums[path] = checksum
 
 		rules, err := l.parseRuleSet(data, path, SourceUser)
 		if err != nil {
@@ -132,6 +163,23 @@ func (l *Loader) LoadUser() ([]Rule, error) {
 		log.Trace("    Loaded %d rules from %s", len(rules), entry.Name())
 		allRules = append(allRules, rules...)
 	}
+
+	// Detect deleted files (present in previous checksums but not on disk)
+	for path := range l.fileChecksums {
+		if !seenPaths[path] {
+			if _, exists := newChecksums[path]; !exists {
+				log.Warn("SECURITY: rule file deleted outside API: %s", path)
+				tampered = append(tampered, path+" (missing)")
+			}
+		}
+	}
+
+	if len(tampered) > 0 {
+		return nil, fmt.Errorf("rule file integrity check failed: %v", tampered)
+	}
+
+	// Update stored checksums atomically after successful load
+	l.fileChecksums = newChecksums
 
 	log.Trace("Total user path-based rules loaded: %d", len(allRules))
 	return allRules, nil
@@ -162,7 +210,7 @@ func (l *Loader) AddRuleFile(srcPath string) (string, error) {
 	}
 
 	// Create directory if needed
-	if err := os.MkdirAll(l.userDir, 0755); err != nil {
+	if err := os.MkdirAll(l.userDir, 0700); err != nil {
 		return "", fmt.Errorf("failed to create rules directory: %w", err)
 	}
 
@@ -296,6 +344,26 @@ func (l *Loader) ListUserRuleFiles() ([]string, error) {
 	return files, nil
 }
 
+// VerifyIntegrity re-reads all tracked user rule files and compares their
+// SHA3-256 checksums against the values stored at load time. Returns a list
+// of files that have been modified or deleted since the last successful load.
+// An empty slice means all files are intact.
+func (l *Loader) VerifyIntegrity() []string {
+	var tampered []string
+	for path, expectedHash := range l.fileChecksums {
+		content, err := os.ReadFile(path)
+		if err != nil {
+			tampered = append(tampered, path+" (missing)")
+			continue
+		}
+		hash := sha3.Sum256(content)
+		if hex.EncodeToString(hash[:]) != expectedHash {
+			tampered = append(tampered, path+" (modified)")
+		}
+	}
+	return tampered
+}
+
 // GetUserDir returns the user rules directory
 func (l *Loader) GetUserDir() string {
 	return l.userDir
@@ -329,8 +397,8 @@ func (l *Loader) parseRuleSet(data []byte, path string, source string) ([]Rule, 
 		if !rule.IsEnabled() {
 			status = "DISABLED"
 		}
-		log.Trace("        Rule %s: %s (priority=%d, severity=%s, ops=%v)",
-			rule.Name, status, rule.GetPriority(), rule.GetSeverity(), rule.Operations)
+		log.Trace("        Rule %s: %s (priority=%d, severity=%s, actions=%v)",
+			rule.Name, status, rule.GetPriority(), rule.GetSeverity(), rule.Actions)
 	}
 
 	return rules, nil
