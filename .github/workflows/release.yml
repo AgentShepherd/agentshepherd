@@ -12,19 +12,17 @@ jobs:
   release:
     name: GoReleaser Cross
     runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/goreleaser/goreleaser-cross:v1.24
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - uses: actions/setup-go@v5
-        with:
-          go-version: "1.24.13"
+      - name: Fix git safe directory
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
 
       - name: Release
-        uses: goreleaser/goreleaser-cross-action@v5
-        with:
-          version: latest
-          args: release --clean
+        run: goreleaser release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
