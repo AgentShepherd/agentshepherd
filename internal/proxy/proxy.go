@@ -8,6 +8,7 @@ import (
 	"crypto/tls"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -16,11 +17,13 @@ import (
 	"strings"
 	"time"
 
-	"github.com/AgentShepherd/agentshepherd/internal/logger"
-	"github.com/AgentShepherd/agentshepherd/internal/rules"
-	"github.com/AgentShepherd/agentshepherd/internal/security"
-	"github.com/AgentShepherd/agentshepherd/internal/telemetry"
-	"github.com/AgentShepherd/agentshepherd/internal/types"
+	"github.com/klauspost/compress/zstd"
+
+	"github.com/BakeLens/crust/internal/logger"
+	"github.com/BakeLens/crust/internal/rules"
+	"github.com/BakeLens/crust/internal/security"
+	"github.com/BakeLens/crust/internal/telemetry"
+	"github.com/BakeLens/crust/internal/types"
 )
 
 var log = logger.New("proxy")
@@ -31,6 +34,7 @@ type RequestBody struct {
 	Stream   bool             `json:"stream"`
 	Messages []RequestMessage `json:"messages"`
 	Tools    []ToolDefinition `json:"tools,omitempty"`
+	Input    json.RawMessage  `json:"input,omitempty"` // Responses API: input items
 }
 
 // ToolDefinition represents a tool definition in the request
@@ -44,8 +48,24 @@ type ToolDefinition struct {
 // RequestMessage represents a message in the request
 type RequestMessage struct {
 	Role      string            `json:"role"`
-	Content   string            `json:"content"`
+	Content   json.RawMessage   `json:"content"`
 	ToolCalls []RequestToolCall `json:"tool_calls,omitempty"` // Tool calls in message history
+}
+
+// ContentString returns the message content as a plain string.
+// If Content is a JSON string, it returns the unquoted string.
+// If Content is an array or other type, it returns the raw JSON text.
+func (m RequestMessage) ContentString() string {
+	if len(m.Content) == 0 {
+		return ""
+	}
+	// Try to unmarshal as a plain string first
+	var s string
+	if err := json.Unmarshal(m.Content, &s); err == nil {
+		return s
+	}
+	// Fallback: return raw JSON (for array content parts, etc.)
+	return string(m.Content)
 }
 
 // RequestToolCall represents a tool call in message history (OpenAI format)
@@ -75,21 +95,23 @@ type ResponseWithUsage struct {
 
 // Proxy is the transparent proxy that captures telemetry
 type Proxy struct {
-	upstreamURL *url.URL
-	apiKey      string
-	client      *http.Client
+	upstreamURL   *url.URL
+	apiKey        string
+	client        *http.Client
+	userProviders map[string]string // user-defined keyword → base URL
 }
 
 // NewProxy creates a new proxy
-func NewProxy(upstreamURL string, apiKey string, timeout time.Duration) (*Proxy, error) {
+func NewProxy(upstreamURL string, apiKey string, timeout time.Duration, userProviders map[string]string) (*Proxy, error) {
 	u, err := url.Parse(upstreamURL)
 	if err != nil {
 		return nil, err
 	}
 
 	return &Proxy{
-		upstreamURL: u,
-		apiKey:      apiKey,
+		upstreamURL:   u,
+		apiKey:        apiKey,
+		userProviders: userProviders,
 		client: &http.Client{
 			Timeout: timeout,
 			// SECURITY: Enforce TLS 1.2+ for upstream connections
@@ -97,6 +119,7 @@ func NewProxy(upstreamURL string, apiKey string, timeout time.Duration) (*Proxy,
 				TLSClientConfig: &tls.Config{
 					MinVersion: tls.VersionTLS12,
 				},
+				DisableCompression: true, // Preserve client's original Accept-Encoding
 			},
 			// Don't follow redirects automatically
 			CheckRedirect: func(req *http.Request, via []*http.Request) error {
@@ -108,9 +131,10 @@ func NewProxy(upstreamURL string, apiKey string, timeout time.Duration) (*Proxy,
 
 // Header length limits for security
 const (
-	maxTraceIDLen  = 128
-	maxSpanNameLen = 256
-	maxSpanKindLen = 32
+	maxTraceIDLen      = 128
+	maxSpanNameLen     = 256
+	maxSpanKindLen     = 32
+	maxRequestBodySize = 100 * 1024 * 1024 // 100MB - generous limit for LLM API requests
 )
 
 // sanitizeHeader truncates and sanitizes header values
@@ -145,22 +169,61 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Read request body
+	// Read request body with size limit to prevent DoS
+	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodySize)
 	bodyBytes, err := io.ReadAll(r.Body)
 	if err != nil {
+		var maxBytesErr *http.MaxBytesError
+		if errors.As(err, &maxBytesErr) {
+			log.Warn("Request body too large (limit: %dMB)", maxRequestBodySize/(1024*1024))
+			http.Error(w, "Request body too large", http.StatusRequestEntityTooLarge)
+			return
+		}
 		log.Error("Failed to read request body: %v", err)
 		http.Error(w, "Failed to read request body", http.StatusBadRequest)
 		return
 	}
 	r.Body.Close()
 
-	// Save original request body for telemetry
-	requestBody := make([]byte, len(bodyBytes))
-	copy(requestBody, bodyBytes)
+	// Decompress request body for local parsing only (model extraction, security scanning).
+	// The original compressed body is forwarded to upstream untouched for full transparency.
+	parseBytes := bodyBytes
+	if len(bodyBytes) > 4 {
+		contentEncoding := r.Header.Get("Content-Encoding")
+		if contentEncoding == "" {
+			// Auto-detect by magic bytes
+			if bodyBytes[0] == 0x1f && bodyBytes[1] == 0x8b {
+				contentEncoding = "gzip"
+			} else if bodyBytes[0] == 0x28 && bodyBytes[1] == 0xb5 && bodyBytes[2] == 0x2f && bodyBytes[3] == 0xfd {
+				contentEncoding = "zstd"
+			}
+		}
+		if contentEncoding == "gzip" {
+			if gr, err := gzip.NewReader(bytes.NewReader(bodyBytes)); err == nil {
+				if decompressed, err := io.ReadAll(gr); err == nil {
+					parseBytes = decompressed
+				}
+				gr.Close()
+			}
+		} else if contentEncoding == "zstd" {
+			if decoder, err := zstd.NewReader(nil); err == nil {
+				if decompressed, err := decoder.DecodeAll(bodyBytes, nil); err == nil {
+					parseBytes = decompressed
+				}
+				decoder.Close()
+			}
+		}
+	}
 
-	// Parse model name and messages (ignore errors - body may not match struct)
+	// Save decompressed request body for telemetry (human-readable JSON)
+	requestBody := make([]byte, len(parseBytes))
+	copy(requestBody, parseBytes)
+
+	// Parse model name and messages (from decompressed bytes)
 	var reqBody RequestBody
-	_ = json.Unmarshal(bodyBytes, &reqBody) //nolint:errcheck // intentional - partial parsing OK
+	if err := json.Unmarshal(parseBytes, &reqBody); err != nil && len(parseBytes) > 0 {
+		log.Debug("Request body parse error: %v", err)
+	}
 
 	// Compute session ID from messages (system prompt + first user message)
 	sessionID := computeSessionID(reqBody.Messages)
@@ -174,6 +237,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// [Layer0] Scan tool_calls in request message history
 	interceptor := security.GetGlobalInterceptor()
 	if interceptor != nil && interceptor.IsEnabled() && interceptor.GetEngine() != nil {
+		// OpenAI Chat Completions format: tool_calls in messages
 		for _, msg := range reqBody.Messages {
 			for _, tc := range msg.ToolCalls {
 				result := interceptor.GetEngine().Evaluate(rules.ToolCall{
@@ -183,12 +247,43 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				if result.Matched && result.Action == rules.ActionBlock {
 					log.Warn("[Layer0] Request blocked: %s in history (rule: %s)", tc.Function.Name, result.RuleName)
 					security.RecordLayer0Block()
-					msg := fmt.Sprintf("[AgentShepherd] Request blocked: %s", result.Message)
+					msg := fmt.Sprintf("[Crust] Request blocked: %s", result.Message)
 					if result.Message == "" {
-						msg = fmt.Sprintf("[AgentShepherd] Request blocked by rule: %s", result.RuleName)
+						msg = fmt.Sprintf("[Crust] Request blocked by rule: %s", result.RuleName)
 					}
 					http.Error(w, msg, http.StatusForbidden)
 					return
+				}
+			}
+		}
+
+		// OpenAI Responses API format: function_call items in input array
+		if apiType.IsOpenAIResponses() && len(reqBody.Input) > 0 {
+			var inputItems []struct {
+				Type      string `json:"type"`
+				CallID    string `json:"call_id"`
+				Name      string `json:"name"`
+				Arguments string `json:"arguments"`
+			}
+			if json.Unmarshal(reqBody.Input, &inputItems) == nil {
+				for _, item := range inputItems {
+					if item.Type != "function_call" {
+						continue
+					}
+					result := interceptor.GetEngine().Evaluate(rules.ToolCall{
+						Name:      item.Name,
+						Arguments: json.RawMessage(item.Arguments),
+					})
+					if result.Matched && result.Action == rules.ActionBlock {
+						log.Warn("[Layer0] Request blocked: %s in input (rule: %s)", item.Name, result.RuleName)
+						security.RecordLayer0Block()
+						msg := fmt.Sprintf("[Crust] Request blocked: %s", result.Message)
+						if result.Message == "" {
+							msg = fmt.Sprintf("[Crust] Request blocked by rule: %s", result.RuleName)
+						}
+						http.Error(w, msg, http.StatusForbidden)
+						return
+					}
 				}
 			}
 		}
@@ -206,30 +301,70 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Build upstream URL
-	// Always append the request path to upstream path (e.g., /anthropic + /v1/messages)
 	upstreamURL := *p.upstreamURL
-	upstreamURL.Path = singleJoiningSlash(upstreamURL.Path, r.URL.Path)
+
+	reqPath := r.URL.Path
+
+	// Auto mode: resolve provider from model name
+	if resolvedBaseURL, ok := ResolveProvider(reqBody.Model, p.userProviders); ok {
+		resolvedURL, parseErr := url.Parse(resolvedBaseURL)
+		if parseErr == nil {
+			// Normalize /responses → /v1/responses only when the provider
+			// has no meaningful path (e.g. "https://api.openai.com").
+			// Providers with a path (e.g. "chatgpt.com/backend-api/codex")
+			// get the request path appended directly.
+			if reqPath == "/responses" && (resolvedURL.Path == "" || resolvedURL.Path == "/") {
+				reqPath = "/v1/responses"
+			}
+			upstreamURL.Scheme = resolvedURL.Scheme
+			upstreamURL.Host = resolvedURL.Host
+			upstreamURL.Path = singleJoiningSlash(resolvedURL.Path, reqPath)
+		} else {
+			// Parse error on resolved URL — fall back to configured upstream
+			if reqPath == "/responses" {
+				reqPath = "/v1/responses"
+			}
+			upstreamURL.Path = singleJoiningSlash(upstreamURL.Path, reqPath)
+		}
+	} else {
+		// Fallback: configured upstream (existing behavior)
+		if reqPath == "/responses" {
+			reqPath = "/v1/responses"
+		}
+		upstreamURL.Path = singleJoiningSlash(upstreamURL.Path, reqPath)
+	}
 	upstreamURL.RawQuery = r.URL.RawQuery
 
 	targetURLStr := upstreamURL.String()
 
 	log.Debug("Forwarding %s %s model=%s → %s", r.Method, r.URL.Path, reqBody.Model, targetURLStr)
 
-	// Create upstream request
-	upstreamReq, err := http.NewRequestWithContext(ctx, r.Method, targetURLStr, bytes.NewReader(bodyBytes))
+	// Clone original request for maximum transparency — preserves all headers,
+	// trailers, and internal state exactly as the client sent them.
+	targetURL, err := url.Parse(targetURLStr)
 	if err != nil {
-		log.Error("Failed to create upstream request: %v", err)
-		http.Error(w, "Internal server error", http.StatusInternalServerError)
+		http.Error(w, "invalid upstream URL", http.StatusBadGateway)
 		return
 	}
-
-	// Copy headers (except hop-by-hop)
-	copyHeaders(upstreamReq.Header, r.Header)
+	upstreamReq := r.Clone(ctx)
+	upstreamReq.URL = targetURL
+	upstreamReq.Host = targetURL.Host
+	upstreamReq.RequestURI = "" // required for http.Client.Do()
+	upstreamReq.Body = io.NopCloser(bytes.NewReader(bodyBytes))
 	upstreamReq.ContentLength = int64(len(bodyBytes))
 
-	// Inject API key if configured
-	if p.apiKey != "" {
-		upstreamReq.Header.Set("Authorization", "Bearer "+p.apiKey)
+	// Remove hop-by-hop headers
+	for k := range HopByHopHeaders {
+		upstreamReq.Header.Del(k)
+	}
+
+	// Auth passthrough: only inject gateway key if client didn't provide auth
+	if !hasClientAuth(upstreamReq.Header) && p.apiKey != "" {
+		if apiType.IsAnthropic() {
+			upstreamReq.Header.Set("x-api-key", p.apiKey)
+		} else {
+			upstreamReq.Header.Set("Authorization", "Bearer "+p.apiKey)
+		}
 	}
 
 	// For streaming requests, use reverse proxy for better streaming support
@@ -275,6 +410,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Bad Gateway", http.StatusBadGateway)
 		return
 	}
+
 	defer resp.Body.Close()
 
 	// Read response body
@@ -353,15 +489,19 @@ func (p *Proxy) handleStreamingRequest(ctx *RequestContext) {
 
 	// Use reverse proxy for non-buffered streaming
 	proxy := &httputil.ReverseProxy{
-		Director: func(req *http.Request) {
-			req.URL = ctx.UpstreamReq.URL
-			req.Host = ctx.UpstreamReq.URL.Host
-			copyHeaders(req.Header, ctx.Request.Header)
-			req.Body = io.NopCloser(bytes.NewReader(ctx.BodyBytes))
-			req.ContentLength = int64(len(ctx.BodyBytes))
-			// Inject API key if configured
-			if p.apiKey != "" {
-				req.Header.Set("Authorization", "Bearer "+p.apiKey)
+		Rewrite: func(pr *httputil.ProxyRequest) {
+			pr.Out.URL = ctx.UpstreamReq.URL
+			pr.Out.Host = ctx.UpstreamReq.URL.Host
+			copyHeaders(pr.Out.Header, ctx.Request.Header)
+			pr.Out.Body = io.NopCloser(bytes.NewReader(ctx.BodyBytes))
+			pr.Out.ContentLength = int64(len(ctx.BodyBytes))
+			// Auth passthrough: only inject gateway key if client didn't provide auth
+			if !hasClientAuth(pr.Out.Header) && p.apiKey != "" {
+				if ctx.APIType.IsAnthropic() {
+					pr.Out.Header.Set("x-api-key", p.apiKey)
+				} else {
+					pr.Out.Header.Set("Authorization", "Bearer "+p.apiKey)
+				}
 			}
 		},
 		ModifyResponse: func(resp *http.Response) error {
@@ -436,8 +576,10 @@ func (p *Proxy) handleBufferedStreamingRequest(ctx *RequestContext, secCfg secur
 	}
 	defer resp.Body.Close()
 
-	// For non-2xx responses, just proxy through
+	// For non-2xx responses, log and proxy through
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		log.Info("%s %s model=%s → %s status=%d duration=%v [stream-error]",
+			ctx.Request.Method, ctx.Request.URL.Path, ctx.Model, ctx.TargetURL, resp.StatusCode, time.Since(ctx.StartTime))
 		copyHeaders(ctx.Writer.Header(), resp.Header)
 		ctx.Writer.WriteHeader(resp.StatusCode)
 		_, _ = io.Copy(ctx.Writer, resp.Body)
@@ -533,6 +675,28 @@ readLoop:
 		}
 	}
 
+	// Flush any remaining data in the reader buffer that wasn't terminated
+	// by \n\n. This handles the case where the server closes the connection
+	// right after the last event (e.g., response.completed) without a
+	// trailing blank line — the event would otherwise be silently dropped.
+	if !bufferOverflowed && reader.Len() > 0 {
+		remaining := reader.Bytes()
+		remaining = bytes.TrimRight(remaining, "\r\n")
+		if len(remaining) > 0 {
+			eventType, jsonData := parseSSEEventData(remaining)
+			raw := reader.Bytes() // include original whitespace
+			// Ensure raw ends with \n\n for proper SSE formatting
+			if !bytes.HasSuffix(raw, []byte("\n\n")) {
+				raw = append(raw, '\n', '\n')
+			}
+			if err := buffer.BufferEvent(eventType, jsonData, raw); err != nil {
+				log.Debug("Failed to buffer trailing event: %v", err)
+			} else {
+				log.Debug("Buffered trailing SSE event: %s", eventType)
+			}
+		}
+	}
+
 	// Evaluate and flush if we didn't overflow
 	if !bufferOverflowed {
 		if err := buffer.FlushModified(interceptor, secCfg.BlockMode); err != nil {
@@ -586,7 +750,10 @@ func detectAPIType(path string) types.APIType {
 	if strings.Contains(path, "/anthropic") || strings.Contains(path, "/v1/messages") {
 		return types.APITypeAnthropic
 	}
-	return types.APITypeOpenAI
+	if strings.Contains(path, "/v1/responses") || strings.HasSuffix(path, "/responses") {
+		return types.APITypeOpenAIResponses
+	}
+	return types.APITypeOpenAICompletion
 }
 
 // copyHeaders copies headers, excluding hop-by-hop headers and Host
@@ -599,6 +766,11 @@ func copyHeaders(dst, src http.Header) {
 			dst.Add(key, value)
 		}
 	}
+}
+
+// hasClientAuth returns true if the request already carries an auth header.
+func hasClientAuth(h http.Header) bool {
+	return h.Get("Authorization") != "" || h.Get("x-api-key") != ""
 }
 
 func singleJoiningSlash(a, b string) string {
@@ -649,10 +821,10 @@ func extractUsageAndBody(resp *http.Response, apiType types.APIType) (inputToken
 	}
 
 	switch apiType {
-	case types.APITypeAnthropic:
+	case types.APITypeAnthropic, types.APITypeOpenAIResponses:
 		inputTokens = respData.Usage.InputTokens
 		outputTokens = respData.Usage.OutputTokens
-	case types.APITypeOpenAI:
+	case types.APITypeOpenAICompletion:
 		inputTokens = respData.Usage.PromptTokens
 		outputTokens = respData.Usage.CompletionTokens
 	}
@@ -675,7 +847,7 @@ func extractToolCalls(bodyBytes []byte, apiType types.APIType) []telemetry.ToolC
 	}
 
 	switch apiType {
-	case types.APITypeOpenAI:
+	case types.APITypeOpenAICompletion:
 		var resp struct {
 			Choices []struct {
 				Message struct {
@@ -719,6 +891,27 @@ func extractToolCalls(bodyBytes []byte, apiType types.APIType) []telemetry.ToolC
 				}
 			}
 		}
+
+	case types.APITypeOpenAIResponses:
+		var resp struct {
+			Output []struct {
+				Type      string `json:"type"`
+				CallID    string `json:"call_id"`
+				Name      string `json:"name"`
+				Arguments string `json:"arguments"`
+			} `json:"output"`
+		}
+		if err := json.Unmarshal(bodyBytes, &resp); err == nil {
+			for _, item := range resp.Output {
+				if item.Type == "function_call" {
+					toolCalls = append(toolCalls, telemetry.ToolCall{
+						ID:        item.CallID,
+						Name:      item.Name,
+						Arguments: json.RawMessage(item.Arguments),
+					})
+				}
+			}
+		}
 	}
 
 	return toolCalls
@@ -740,7 +933,7 @@ func computeSessionID(messages []RequestMessage) string {
 	// Extract system prompt
 	for _, msg := range messages {
 		if msg.Role == "system" {
-			sessionKey += msg.Content
+			sessionKey += msg.ContentString()
 			break
 		}
 	}
@@ -748,7 +941,7 @@ func computeSessionID(messages []RequestMessage) string {
 	// Extract first user message
 	for _, msg := range messages {
 		if msg.Role == "user" {
-			sessionKey += msg.Content
+			sessionKey += msg.ContentString()
 			break
 		}
 	}

@@ -10,7 +10,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/AgentShepherd/agentshepherd/internal/rules"
+	"github.com/BakeLens/crust/internal/rules"
 )
 
 // getTestDataDir returns the test data directory for ALLOWED files.
@@ -37,8 +37,8 @@ func getBlockedDataDir() string {
 func setupTestSandbox(t *testing.T) *Sandbox {
 	t.Helper()
 
-	// Ensure sandbox-exec helper is found
-	setupSandboxExecPath(t)
+	// Ensure bakelens-sandbox helper is found
+	setupBakelensSandboxPath(t)
 
 	profilePath := filepath.Join(t.TempDir(), "sandbox.sb")
 	mapper := NewMapper(profilePath)
@@ -51,9 +51,9 @@ func setupTestSandbox(t *testing.T) *Sandbox {
 	}
 
 	// Add rules to mapper (all path-based rules are blocking rules)
-	for _, rule := range builtinRules {
-		if rule.IsEnabled() {
-			_ = mapper.AddRule(rule)
+	for i := range builtinRules {
+		if builtinRules[i].IsEnabled() {
+			_ = mapper.AddRule(&builtinRules[i])
 		}
 	}
 
@@ -359,6 +359,178 @@ func TestSandbox_AllowsBasicCommands(t *testing.T) {
 			assertAllowed(t, tt.name, exitCode, stderr)
 		})
 	}
+}
+
+// TestSandbox_BlocksExecuteFromTmp tests that executing binaries from /tmp is blocked.
+// This is the core security property of the rw/rx split: /tmp is rw (no execute).
+func TestSandbox_BlocksExecuteFromTmp(t *testing.T) {
+	if !IsSupported() {
+		t.Skip("Sandbox not supported")
+	}
+	if !isLandlockSupported() {
+		t.Skip("Requires Landlock for execute enforcement")
+	}
+
+	sb := setupTestSandbox(t)
+
+	// Copy a binary to /tmp and try to execute it directly
+	tmpBin := "/tmp/test-exec-blocked-" + t.Name()
+	defer os.Remove(tmpBin)
+
+	// Copy /usr/bin/true to /tmp
+	exitCode, _, stderr := runInSandbox(t, sb, "cp", "/usr/bin/true", tmpBin)
+	if exitCode != 0 {
+		t.Skipf("Cannot copy binary to /tmp (exit=%d stderr=%s)", exitCode, stderr)
+	}
+
+	// Make it executable (chmod works at filesystem level)
+	exitCode, _, stderr = runInSandbox(t, sb, "chmod", "+x", tmpBin)
+	if exitCode != 0 {
+		t.Skipf("Cannot chmod (exit=%d stderr=%s)", exitCode, stderr)
+	}
+
+	// Try to execute it — should fail because /tmp has rw mode (no execute)
+	exitCode, _, stderr = runInSandbox(t, sb, tmpBin)
+	assertBlocked(t, "execute from /tmp", exitCode, stderr)
+}
+
+// TestSandbox_AllowsExecuteFromUsr tests that executing binaries from /usr works.
+// /usr has rx mode — execute is allowed.
+func TestSandbox_AllowsExecuteFromUsr(t *testing.T) {
+	if !IsSupported() {
+		t.Skip("Sandbox not supported")
+	}
+
+	sb := setupTestSandbox(t)
+
+	exitCode, _, stderr := runInSandbox(t, sb, "/usr/bin/ls", "/tmp")
+	assertAllowed(t, "execute from /usr", exitCode, stderr)
+}
+
+// TestSandbox_BlocksWriteToUsr tests that writing to /usr is blocked.
+// /usr has rx mode — write is denied.
+func TestSandbox_BlocksWriteToUsr(t *testing.T) {
+	if !IsSupported() {
+		t.Skip("Sandbox not supported")
+	}
+	if !isLandlockSupported() {
+		t.Skip("Requires Landlock for write enforcement")
+	}
+
+	sb := setupTestSandbox(t)
+
+	exitCode, _, stderr := runInSandbox(t, sb, "touch", "/usr/bin/evil-test-file")
+	assertBlocked(t, "write to /usr", exitCode, stderr)
+}
+
+// TestSandbox_AllowsWriteToTmp tests that writing to /tmp works.
+// /tmp has rw mode — write is allowed.
+func TestSandbox_AllowsWriteToTmp(t *testing.T) {
+	if !IsSupported() {
+		t.Skip("Sandbox not supported")
+	}
+
+	sb := setupTestSandbox(t)
+
+	tmpFile := "/tmp/test-write-" + t.Name()
+	defer os.Remove(tmpFile)
+
+	exitCode, _, stderr := runInSandbox(t, sb, "touch", tmpFile)
+	assertAllowed(t, "write to /tmp", exitCode, stderr)
+}
+
+// TestSandbox_BlocksWriteToEtc tests that writing to /etc is blocked.
+// /etc has ro mode — write is denied.
+func TestSandbox_BlocksWriteToEtc(t *testing.T) {
+	if !IsSupported() {
+		t.Skip("Sandbox not supported")
+	}
+	if !isLandlockSupported() {
+		t.Skip("Requires Landlock for write enforcement")
+	}
+
+	sb := setupTestSandbox(t)
+
+	exitCode, _, stderr := runInSandbox(t, sb, "touch", "/etc/evil-test-file")
+	assertBlocked(t, "write to /etc", exitCode, stderr)
+}
+
+// TestSandbox_AllowsReadFromEtc tests that reading from /etc works.
+// /etc has ro mode — read is allowed.
+func TestSandbox_AllowsReadFromEtc(t *testing.T) {
+	if !IsSupported() {
+		t.Skip("Sandbox not supported")
+	}
+
+	sb := setupTestSandbox(t)
+
+	exitCode, _, stderr := runInSandbox(t, sb, "cat", "/etc/hostname")
+	assertAllowed(t, "read from /etc", exitCode, stderr)
+}
+
+// TestSandbox_BinaryPlantingBlocked tests the binary planting attack scenario.
+// Agent writes a binary to /tmp and tries to execute it — must fail.
+func TestSandbox_BinaryPlantingBlocked(t *testing.T) {
+	if !IsSupported() {
+		t.Skip("Sandbox not supported")
+	}
+	if !isLandlockSupported() {
+		t.Skip("Requires Landlock for execute enforcement")
+	}
+
+	sb := setupTestSandbox(t)
+
+	// Simulate: agent copies echo to /tmp and tries to run it
+	tmpBin := "/tmp/test-planted-" + t.Name()
+	defer os.Remove(tmpBin)
+
+	exitCode, _, stderr := runInSandbox(t, sb, "sh", "-c",
+		"cp /usr/bin/echo "+tmpBin+" && chmod +x "+tmpBin+" && "+tmpBin+" pwned")
+	if exitCode == 0 {
+		t.Error("binary planting attack succeeded — /tmp execute should be blocked")
+	} else {
+		t.Logf("binary planting correctly blocked (exit=%d)", exitCode)
+	}
+	_ = stderr
+}
+
+// TestSandbox_InterpreterFromRXDir tests that interpreted scripts work.
+// The interpreter (e.g., sh) runs from /usr (rx), reading a script from /tmp (rw).
+func TestSandbox_InterpreterFromRXDir(t *testing.T) {
+	if !IsSupported() {
+		t.Skip("Sandbox not supported")
+	}
+
+	sb := setupTestSandbox(t)
+
+	// Write a script to /tmp, run it via sh (from /usr/bin)
+	tmpScript := "/tmp/test-script-" + t.Name() + ".sh"
+	defer os.Remove(tmpScript)
+
+	if err := os.WriteFile(tmpScript, []byte("#!/bin/sh\necho hello\n"), 0644); err != nil {
+		t.Fatalf("Cannot write test script: %v", err)
+	}
+
+	// Run via interpreter (sh reads the script as data from /tmp rw)
+	exitCode, stdout, stderr := runInSandbox(t, sb, "sh", tmpScript)
+	assertAllowed(t, "interpreter from rx dir", exitCode, stderr)
+	if !strings.Contains(stdout, "hello") {
+		t.Errorf("expected 'hello' in stdout, got: %s", stdout)
+	}
+}
+
+// TestSandbox_SharedLibsLoadWithRO tests that dynamically linked binaries work.
+// /lib is ro — shared libraries are loaded via mmap (not execve), so ro is sufficient.
+func TestSandbox_SharedLibsLoadWithRO(t *testing.T) {
+	if !IsSupported() {
+		t.Skip("Sandbox not supported")
+	}
+
+	sb := setupTestSandbox(t)
+
+	// ls is dynamically linked and needs /lib for libc.so
+	exitCode, _, stderr := runInSandbox(t, sb, "ls", "/tmp")
+	assertAllowed(t, "shared libs load with ro on /lib", exitCode, stderr)
 }
 
 // TestSandbox_BlocksProcAccess tests that /proc access is blocked.

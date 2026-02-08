@@ -7,7 +7,7 @@ import (
 	"testing"
 	"unicode/utf8"
 
-	"github.com/AgentShepherd/agentshepherd/internal/types"
+	"github.com/BakeLens/crust/internal/types"
 )
 
 // =============================================================================
@@ -303,20 +303,20 @@ func TestParseEvent_APITypeRouting(t *testing.T) {
 
 	// Anthropic event
 	anthropicData := `{"type":"message_start","message":{"usage":{"input_tokens":100,"output_tokens":0}}}`
-	result := parser.ParseEvent([]byte(anthropicData), types.APITypeAnthropic)
+	result := parser.ParseEvent("", []byte(anthropicData), types.APITypeAnthropic)
 	if result.InputTokens != 100 {
 		t.Errorf("Anthropic routing failed: InputTokens = %d, want 100", result.InputTokens)
 	}
 
 	// OpenAI event
 	openaiData := `{"choices":[],"usage":{"prompt_tokens":200,"completion_tokens":50}}`
-	result = parser.ParseEvent([]byte(openaiData), types.APITypeOpenAI)
+	result = parser.ParseEvent("", []byte(openaiData), types.APITypeOpenAICompletion)
 	if result.InputTokens != 200 {
 		t.Errorf("OpenAI routing failed: InputTokens = %d, want 200", result.InputTokens)
 	}
 
 	// Unknown API type
-	result = parser.ParseEvent([]byte(anthropicData), types.APIType("unknown"))
+	result = parser.ParseEvent("", []byte(anthropicData), types.APIType("unknown"))
 	if result.InputTokens != 0 || result.OutputTokens != 0 {
 		t.Error("Unknown API type should return empty result")
 	}
@@ -875,12 +875,12 @@ func FuzzParseEvent(f *testing.F) {
 		case 0:
 			apiType = types.APITypeAnthropic
 		case 1:
-			apiType = types.APITypeOpenAI
+			apiType = types.APITypeOpenAICompletion
 		default:
 			apiType = types.APIType("unknown")
 		}
 
-		result := parser.ParseEvent(data, apiType)
+		result := parser.ParseEvent("", data, apiType)
 
 		if result.InputTokens < 0 || result.OutputTokens < 0 {
 			t.Error("Negative token count")

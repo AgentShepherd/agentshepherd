@@ -10,9 +10,9 @@ import (
 	"os"
 	"time"
 
-	"github.com/AgentShepherd/agentshepherd/internal/logger"
-	"github.com/AgentShepherd/agentshepherd/internal/telemetry/db"
-	"github.com/AgentShepherd/agentshepherd/internal/types"
+	"github.com/BakeLens/crust/internal/logger"
+	"github.com/BakeLens/crust/internal/telemetry/db"
+	"github.com/BakeLens/crust/internal/types"
 	_ "github.com/mutecomm/go-sqlcipher/v4" // SQLCipher driver for encrypted SQLite
 )
 

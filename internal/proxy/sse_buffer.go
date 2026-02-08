@@ -5,13 +5,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
-	"github.com/AgentShepherd/agentshepherd/internal/rules"
-	"github.com/AgentShepherd/agentshepherd/internal/security"
-	"github.com/AgentShepherd/agentshepherd/internal/telemetry"
-	"github.com/AgentShepherd/agentshepherd/internal/types"
+	"github.com/BakeLens/crust/internal/rules"
+	"github.com/BakeLens/crust/internal/security"
+	"github.com/BakeLens/crust/internal/telemetry"
+	"github.com/BakeLens/crust/internal/types"
 )
 
 // SSEEvent represents a buffered SSE event
@@ -88,6 +89,11 @@ func NewBufferedSSEWriter(w http.ResponseWriter, maxSize int, timeout time.Durat
 // shellToolNames lists tool names that can execute shell commands (in priority order)
 var shellToolNames = []string{"Bash", "bash", "Shell", "shell", "Execute", "execute", "Exec", "exec", "RunCommand", "run_command", "Terminal", "terminal", "Cmd", "cmd"}
 
+// shellQuote wraps s in single quotes with proper escaping for shell.
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
+}
+
 // findShellTool finds a shell/command execution tool from available tools
 // Returns the tool name and whether one was found
 func (b *BufferedSSEWriter) findShellTool() (string, bool) {
@@ -137,7 +143,7 @@ func (b *BufferedSSEWriter) BufferEvent(eventType string, data, raw []byte) erro
 
 // parseEvent extracts tool call information from SSE events using the unified parser
 func (b *BufferedSSEWriter) parseEvent(eventType string, data []byte) {
-	result := b.parser.ParseEvent(data, b.apiType)
+	result := b.parser.ParseEvent(eventType, data, b.apiType)
 
 	// Apply text content
 	if result.TextContent != "" {
@@ -302,8 +308,10 @@ func (b *BufferedSSEWriter) flushFilteredEvents(blockedIndices, replacedIndices 
 	switch b.apiType {
 	case types.APITypeAnthropic:
 		return b.flushFilteredAnthropicEvents(blockedIndices, replacedIndices, blockedCalls)
-	case types.APITypeOpenAI:
+	case types.APITypeOpenAICompletion:
 		return b.flushFilteredOpenAIEvents(blockedIndices, replacedIndices, blockedCalls)
+	case types.APITypeOpenAIResponses:
+		return b.flushFilteredOpenAIResponsesEvents(blockedIndices, replacedIndices, blockedCalls)
 	default:
 		return b.flushEventsUnlocked()
 	}
@@ -414,14 +422,23 @@ func (b *BufferedSSEWriter) flushFilteredAnthropicEvents(blockedIndices, replace
 				replacedDeltaSent[eventIndex] = true
 
 				// Build message
-				msg := fmt.Sprintf("[AgentShepherd] Tool %s blocked.", tc.Name)
+				msg := fmt.Sprintf("[Crust] Tool '%s' blocked.", tc.Name)
 				if matchResult.Message != "" {
-					msg = fmt.Sprintf("[AgentShepherd] Tool %s blocked: %s", tc.Name, matchResult.Message)
+					msg = fmt.Sprintf("[Crust] Tool '%s' blocked: %s.", tc.Name, matchResult.Message)
 				}
+				msg += " Please inform the user and try a different approach."
 
-				// Escape special chars for shell and JSON
-				escapedMsg := security.EscapeForShellEcho(msg)
-				inputJSON := fmt.Sprintf(`{"command":"echo '%s'","description":"Security: blocked tool call"}`, escapedMsg)
+				// Build input as a proper Go object, then marshal to ensure valid JSON
+				input := map[string]string{
+					"command":     fmt.Sprintf("echo %s", shellQuote(msg)),
+					"description": "Security: blocked tool call",
+				}
+				inputJSONBytes, err := json.Marshal(input)
+				if err != nil {
+					log.Debug("Failed to marshal replacement input: %v", err)
+					continue
+				}
+				inputJSON := string(inputJSONBytes)
 				replacedEvent := map[string]interface{}{
 					"type":  "content_block_delta",
 					"index": eventIndex,
@@ -474,14 +491,7 @@ func (b *BufferedSSEWriter) flushFilteredAnthropicEvents(blockedIndices, replace
 
 // injectAnthropicWarning injects a text content block with security warning
 func (b *BufferedSSEWriter) injectAnthropicWarning(blockedCalls []security.BlockedToolCall) error {
-	warning := "[SECURITY] The following tool calls were blocked:\n"
-	for _, bc := range blockedCalls {
-		warning += "- " + bc.ToolCall.Name
-		if bc.MatchResult.Message != "" {
-			warning += ": " + bc.MatchResult.Message
-		}
-		warning += "\n"
-	}
+	warning := security.BuildWarningContent(blockedCalls)
 
 	// Inject content_block_start for text
 	startEvent := anthropicContentBlockStartEvent{
@@ -656,14 +666,7 @@ func (b *BufferedSSEWriter) flushFilteredOpenAIEvents(blockedIndices, replacedIn
 
 // injectOpenAIWarning injects a content delta with security warning
 func (b *BufferedSSEWriter) injectOpenAIWarning(blockedCalls []security.BlockedToolCall) error {
-	warning := "[SECURITY] The following tool calls were blocked:\n"
-	for _, bc := range blockedCalls {
-		warning += "- " + bc.ToolCall.Name
-		if bc.MatchResult.Message != "" {
-			warning += ": " + bc.MatchResult.Message
-		}
-		warning += "\n"
-	}
+	warning := security.BuildWarningContent(blockedCalls)
 
 	chunk := openAIWarningChunk{
 		ID:      "security-warning",
@@ -688,6 +691,83 @@ func (b *BufferedSSEWriter) injectOpenAIWarning(blockedCalls []security.BlockedT
 	}
 	formatted := fmt.Sprintf("data: %s\n\n", data)
 
+	if _, err := b.underlying.Write([]byte(formatted)); err != nil {
+		return err
+	}
+	if b.flusher != nil {
+		b.flusher.Flush()
+	}
+
+	return nil
+}
+
+func (b *BufferedSSEWriter) flushFilteredOpenAIResponsesEvents(blockedIndices, replacedIndices map[int]rules.MatchResult, blockedCalls []security.BlockedToolCall) error {
+	// Track which output_index values to skip entirely
+	skipIndices := make(map[int]bool)
+	for idx := range blockedIndices {
+		skipIndices[idx] = true
+	}
+	for idx := range replacedIndices {
+		skipIndices[idx] = true
+	}
+
+	warningInjected := false
+
+	for _, event := range b.events {
+		// Determine if this event belongs to a blocked output_index
+		shouldSkip := false
+
+		// Check output_index in the event JSON
+		var indexProbe struct {
+			OutputIndex int `json:"output_index"`
+		}
+		if json.Unmarshal(event.Data, &indexProbe) == nil {
+			if skipIndices[indexProbe.OutputIndex] {
+				shouldSkip = true
+			}
+		}
+
+		if shouldSkip {
+			continue
+		}
+
+		// Inject warning before response.completed
+		if !warningInjected && event.EventType == "response.completed" {
+			if err := b.injectOpenAIResponsesWarning(blockedCalls); err != nil {
+				log.Warn("Failed to inject Responses API warning: %v", err)
+			}
+			warningInjected = true
+		}
+
+		// Write the event using Raw (preserves event: lines)
+		if _, err := b.underlying.Write(event.Raw); err != nil {
+			return err
+		}
+		if b.flusher != nil {
+			b.flusher.Flush()
+		}
+	}
+
+	return nil
+}
+
+// injectOpenAIResponsesWarning injects a text delta event with security warning
+func (b *BufferedSSEWriter) injectOpenAIResponsesWarning(blockedCalls []security.BlockedToolCall) error {
+	warning := security.BuildWarningContent(blockedCalls)
+
+	// Emit as a response.output_text.delta event
+	deltaData := map[string]interface{}{
+		"type":          "response.output_text.delta",
+		"output_index":  WarningBlockIndex,
+		"content_index": 0,
+		"delta":         warning,
+	}
+	data, err := json.Marshal(deltaData)
+	if err != nil {
+		log.Debug("Failed to marshal Responses API warning: %v", err)
+		return nil
+	}
+	formatted := fmt.Sprintf("event: response.output_text.delta\ndata: %s\n\n", data)
 	if _, err := b.underlying.Write([]byte(formatted)); err != nil {
 		return err
 	}

@@ -7,7 +7,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
-	"github.com/AgentShepherd/agentshepherd/internal/api"
+	"github.com/BakeLens/crust/internal/api"
 )
 
 // APIHandler provides HTTP handlers for rules management
@@ -22,7 +22,7 @@ func NewAPIHandler(engine *Engine) *APIHandler {
 
 // RegisterRoutes registers API routes on the given router
 func (h *APIHandler) RegisterRoutes(router *gin.Engine) {
-	rules := router.Group("/api/agentshepherd/rules")
+	rules := router.Group("/api/crust/rules")
 	{
 		rules.GET("", h.HandleRules)
 		rules.GET("/builtin", h.HandleBuiltinRules)
@@ -62,7 +62,7 @@ func (h *APIHandler) HandleUserRules(c *gin.Context) {
 	})
 }
 
-// HandleDeleteUserRuleFile handles DELETE /api/agentshepherd/rules/user/:filename
+// HandleDeleteUserRuleFile handles DELETE /api/crust/rules/user/:filename
 func (h *APIHandler) HandleDeleteUserRuleFile(c *gin.Context) {
 	filename := c.Param("filename")
 	if filename == "" {
@@ -100,7 +100,8 @@ func (h *APIHandler) HandleReload(c *gin.Context) {
 	})
 }
 
-// HandleValidate validates rule YAML without loading
+// HandleValidate validates rule YAML without loading.
+// Performs full validation including pattern compilation (regex, glob, sanitization).
 func (h *APIHandler) HandleValidate(c *gin.Context) {
 	body, err := c.GetRawData()
 	if err != nil {
@@ -108,7 +109,9 @@ func (h *APIHandler) HandleValidate(c *gin.Context) {
 		return
 	}
 
-	if err := h.engine.GetLoader().ValidateYAML(body); err != nil {
+	results, err := h.engine.ValidateYAMLFull(body)
+	if err != nil {
+		// YAML parse or structural validation error
 		api.Success(c, gin.H{
 			"valid": false,
 			"error": err.Error(),
@@ -116,7 +119,18 @@ func (h *APIHandler) HandleValidate(c *gin.Context) {
 		return
 	}
 
-	api.Success(c, gin.H{"valid": true})
+	allValid := true
+	for _, r := range results {
+		if !r.Valid {
+			allValid = false
+			break
+		}
+	}
+
+	api.Success(c, gin.H{
+		"valid": allValid,
+		"rules": results,
+	})
 }
 
 // HandleListFiles returns list of user rule files

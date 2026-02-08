@@ -5,15 +5,17 @@ package types
 type APIType string
 
 const (
-	// APITypeOpenAI is the OpenAI-compatible API format.
-	APITypeOpenAI APIType = "openai"
+	// APITypeOpenAICompletion is the OpenAI-compatible API format (Chat Completions).
+	APITypeOpenAICompletion APIType = "openai"
 	// APITypeAnthropic is the Anthropic API format.
 	APITypeAnthropic APIType = "anthropic"
+	// APITypeOpenAIResponses is the OpenAI Responses API format (/v1/responses).
+	APITypeOpenAIResponses APIType = "openai_responses"
 )
 
 // Valid returns true if the APIType is a known valid value.
 func (t APIType) Valid() bool {
-	return t == APITypeOpenAI || t == APITypeAnthropic
+	return t == APITypeOpenAICompletion || t == APITypeAnthropic || t == APITypeOpenAIResponses
 }
 
 // IsAnthropic returns true if this is the Anthropic API format.
@@ -21,9 +23,14 @@ func (t APIType) IsAnthropic() bool {
 	return t == APITypeAnthropic
 }
 
-// IsOpenAI returns true if this is the OpenAI API format.
-func (t APIType) IsOpenAI() bool {
-	return t == APITypeOpenAI
+// IsOpenAICompletion returns true if this is the OpenAI Chat Completions API format.
+func (t APIType) IsOpenAICompletion() bool {
+	return t == APITypeOpenAICompletion
+}
+
+// IsOpenAIResponses returns true if this is the OpenAI Responses API format.
+func (t APIType) IsOpenAIResponses() bool {
+	return t == APITypeOpenAIResponses
 }
 
 // BlockMode represents how blocked tool calls are handled in responses.

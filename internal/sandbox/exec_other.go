@@ -7,10 +7,15 @@ import (
 	"runtime"
 )
 
+// findBakelensSandbox is not available on unsupported platforms.
+func findBakelensSandbox() (string, error) {
+	return "", fmt.Errorf("bakelens-sandbox not available on %s", runtime.GOOS)
+}
+
 // execute panics on unsupported platforms.
-// AgentShepherd requires Linux 5.13+ (Landlock) or macOS (sandbox-exec).
-func (s *Sandbox) execute(profilePath string, command []string) (int, error) {
-	panic(fmt.Sprintf("FATAL: Sandbox not supported on %s. AgentShepherd requires Linux 5.13+ or macOS", runtime.GOOS))
+// Crust requires Linux 5.13+ (Landlock) or macOS (Seatbelt).
+func (s *Sandbox) execute(command []string) (int, error) {
+	panic(fmt.Sprintf("FATAL: Sandbox not supported on %s. Crust requires Linux 5.13+ or macOS", runtime.GOOS))
 }
 
 // isLandlockSupported returns false on unsupported platforms.

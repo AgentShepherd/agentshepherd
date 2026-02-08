@@ -7,7 +7,7 @@ import (
 // TestBuiltinRulesLoad verifies builtin security rules can be loaded.
 // Tests rule: protect-env-files
 // Tests rule: protect-ssh-keys
-// Tests rule: protect-agentshepherd
+// Tests rule: protect-crust
 // Tests rule: protect-shell-history
 // Tests rule: protect-cloud-credentials
 // Tests rule: protect-gpg-keys
@@ -17,6 +17,8 @@ import (
 // Tests rule: protect-shell-rc
 // Tests rule: protect-ssh-authorized-keys
 // Tests rule: detect-private-key-write
+// Tests rule: block-eval-exec
+// NOTE: protect-crust-api is hardcoded in engine.go (not a YAML rule)
 func TestBuiltinRulesLoad(t *testing.T) {
 	loader := NewLoader("")
 	rules, err := loader.LoadBuiltin()
@@ -32,7 +34,7 @@ func TestBuiltinRulesLoad(t *testing.T) {
 	expectedRules := []string{
 		"protect-env-files",
 		"protect-ssh-keys",
-		"protect-agentshepherd",
+		"protect-crust",
 		"protect-shell-history",
 		"protect-cloud-credentials",
 		"protect-gpg-keys",
@@ -42,6 +44,7 @@ func TestBuiltinRulesLoad(t *testing.T) {
 		"protect-shell-rc",
 		"protect-ssh-authorized-keys",
 		"detect-private-key-write",
+		"block-eval-exec",
 	}
 
 	ruleNames := make(map[string]bool)

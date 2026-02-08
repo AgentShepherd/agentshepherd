@@ -5,9 +5,37 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-
-	"github.com/AgentShepherd/agentshepherd/internal/rules"
 )
+
+var (
+	boolTrue  = true
+	boolFalse = false
+)
+
+// testRule implements SecurityRule for unit tests.
+type testRule struct {
+	name       string
+	enabled    *bool
+	paths      []string
+	except     []string
+	operations []string
+}
+
+func (r *testRule) IsEnabled() bool {
+	if r.enabled == nil {
+		return true
+	}
+	return *r.enabled
+}
+func (r *testRule) GetName() string          { return r.name }
+func (r *testRule) GetBlockPaths() []string  { return r.paths }
+func (r *testRule) GetBlockExcept() []string { return r.except }
+func (r *testRule) GetActions() []string     { return r.operations }
+
+func newTestMapper(t testing.TB) *Mapper {
+	t.Helper()
+	return NewMapper(filepath.Join(t.TempDir(), "sandbox.sb"))
+}
 
 func TestNewMapper(t *testing.T) {
 	mapper := NewMapper("/tmp/test.sb")
@@ -26,8 +54,8 @@ func TestNewMapper(t *testing.T) {
 func TestDefaultProfilePath(t *testing.T) {
 	path := DefaultProfilePath()
 
-	if !strings.HasSuffix(path, ".agentshepherd/sandbox.sb") {
-		t.Errorf("expected path ending with .agentshepherd/sandbox.sb, got %s", path)
+	if !strings.HasSuffix(path, ".crust/sandbox.sb") {
+		t.Errorf("expected path ending with .crust/sandbox.sb, got %s", path)
 	}
 }
 
@@ -36,13 +64,11 @@ func TestAddRule_PathBased(t *testing.T) {
 	profilePath := filepath.Join(tmpDir, "sandbox.sb")
 	mapper := NewMapper(profilePath)
 
-	enabled := true
-	rule := rules.Rule{
-		Name:       "block-env-access",
-		Enabled:    &enabled,
-		Block:      rules.Block{Paths: []string{"**/.env"}},
-		Operations: []rules.Operation{rules.OpRead, rules.OpWrite},
-		Message:    "test",
+	rule := &testRule{
+		name:       "block-env-access",
+		enabled:    &boolTrue,
+		paths:      []string{"**/.env"},
+		operations: []string{"read", "write"},
 	}
 
 	err := mapper.AddRule(rule)
@@ -86,17 +112,13 @@ func TestAddRule_PathBased(t *testing.T) {
 }
 
 func TestAddRule_DisabledRule(t *testing.T) {
-	tmpDir := t.TempDir()
-	profilePath := filepath.Join(tmpDir, "sandbox.sb")
-	mapper := NewMapper(profilePath)
+	mapper := newTestMapper(t)
 
-	disabled := false
-	rule := rules.Rule{
-		Name:       "disabled-rule",
-		Enabled:    &disabled,
-		Block:      rules.Block{Paths: []string{"**/.env"}},
-		Operations: []rules.Operation{rules.OpRead},
-		Message:    "test",
+	rule := &testRule{
+		name:       "disabled-rule",
+		enabled:    &boolFalse,
+		paths:      []string{"**/.env"},
+		operations: []string{"read"},
 	}
 
 	err := mapper.AddRule(rule)
@@ -115,20 +137,17 @@ func TestRemoveRule(t *testing.T) {
 	profilePath := filepath.Join(tmpDir, "sandbox.sb")
 	mapper := NewMapper(profilePath)
 
-	enabled := true
-	rule1 := rules.Rule{
-		Name:       "rule-one",
-		Enabled:    &enabled,
-		Block:      rules.Block{Paths: []string{"**/.env"}},
-		Operations: []rules.Operation{rules.OpRead},
-		Message:    "test",
+	rule1 := &testRule{
+		name:       "rule-one",
+		enabled:    &boolTrue,
+		paths:      []string{"**/.env"},
+		operations: []string{"read"},
 	}
-	rule2 := rules.Rule{
-		Name:       "rule-two",
-		Enabled:    &enabled,
-		Block:      rules.Block{Paths: []string{"**/.ssh/*"}},
-		Operations: []rules.Operation{rules.OpRead},
-		Message:    "test",
+	rule2 := &testRule{
+		name:       "rule-two",
+		enabled:    &boolTrue,
+		paths:      []string{"**/.ssh/*"},
+		operations: []string{"read"},
 	}
 
 	_ = mapper.AddRule(rule1)
@@ -170,9 +189,7 @@ func TestRemoveRule(t *testing.T) {
 }
 
 func TestRemoveRule_NonExistent(t *testing.T) {
-	tmpDir := t.TempDir()
-	profilePath := filepath.Join(tmpDir, "sandbox.sb")
-	mapper := NewMapper(profilePath)
+	mapper := newTestMapper(t)
 
 	// Remove non-existent rule - should not error
 	err := mapper.RemoveRule("does-not-exist")
@@ -185,15 +202,13 @@ func TestLoadFromFile(t *testing.T) {
 	tmpDir := t.TempDir()
 	profilePath := filepath.Join(tmpDir, "sandbox.sb")
 
-	enabled := true
 	// Create a profile with rules
 	mapper1 := NewMapper(profilePath)
-	rule := rules.Rule{
-		Name:       "test-rule",
-		Enabled:    &enabled,
-		Block:      rules.Block{Paths: []string{"**/.env"}},
-		Operations: []rules.Operation{rules.OpRead},
-		Message:    "test",
+	rule := &testRule{
+		name:       "test-rule",
+		enabled:    &boolTrue,
+		paths:      []string{"**/.env"},
+		operations: []string{"read"},
 	}
 	_ = mapper1.AddRule(rule)
 
@@ -232,17 +247,13 @@ func TestLoadFromFile_NonExistent(t *testing.T) {
 }
 
 func TestGetMappings(t *testing.T) {
-	tmpDir := t.TempDir()
-	profilePath := filepath.Join(tmpDir, "sandbox.sb")
-	mapper := NewMapper(profilePath)
+	mapper := newTestMapper(t)
 
-	enabled := true
-	rule := rules.Rule{
-		Name:       "test-rule",
-		Enabled:    &enabled,
-		Block:      rules.Block{Paths: []string{"**/.env"}},
-		Operations: []rules.Operation{rules.OpRead},
-		Message:    "test",
+	rule := &testRule{
+		name:       "test-rule",
+		enabled:    &boolTrue,
+		paths:      []string{"**/.env"},
+		operations: []string{"read"},
 	}
 	_ = mapper.AddRule(rule)
 
@@ -267,13 +278,11 @@ func TestGetProfile(t *testing.T) {
 	profilePath := filepath.Join(tmpDir, "sandbox.sb")
 	mapper := NewMapper(profilePath)
 
-	enabled := true
-	rule := rules.Rule{
-		Name:       "test-rule",
-		Enabled:    &enabled,
-		Block:      rules.Block{Paths: []string{"**/.env"}},
-		Operations: []rules.Operation{rules.OpRead},
-		Message:    "test",
+	rule := &testRule{
+		name:       "test-rule",
+		enabled:    &boolTrue,
+		paths:      []string{"**/.env"},
+		operations: []string{"read"},
 	}
 	_ = mapper.AddRule(rule)
 
@@ -291,17 +300,13 @@ func TestGetProfile(t *testing.T) {
 }
 
 func TestGenerateProfileContent(t *testing.T) {
-	tmpDir := t.TempDir()
-	profilePath := filepath.Join(tmpDir, "sandbox.sb")
-	mapper := NewMapper(profilePath)
+	mapper := newTestMapper(t)
 
-	enabled := true
-	rule := rules.Rule{
-		Name:       "test-rule",
-		Enabled:    &enabled,
-		Block:      rules.Block{Paths: []string{"**/.env"}},
-		Operations: []rules.Operation{rules.OpRead},
-		Message:    "test",
+	rule := &testRule{
+		name:       "test-rule",
+		enabled:    &boolTrue,
+		paths:      []string{"**/.env"},
+		operations: []string{"read"},
 	}
 	_ = mapper.AddRule(rule)
 
@@ -320,16 +325,14 @@ func TestMultipleRulesOrdering(t *testing.T) {
 	profilePath := filepath.Join(tmpDir, "sandbox.sb")
 	mapper := NewMapper(profilePath)
 
-	enabled := true
 	// Add multiple rules
 	ruleNames := []string{"alpha-rule", "beta-rule", "gamma-rule"}
 	for _, name := range ruleNames {
-		rule := rules.Rule{
-			Name:       name,
-			Enabled:    &enabled,
-			Block:      rules.Block{Paths: []string{"**/" + name}},
-			Operations: []rules.Operation{rules.OpRead},
-			Message:    "test",
+		rule := &testRule{
+			name:       name,
+			enabled:    &boolTrue,
+			paths:      []string{"**/" + name},
+			operations: []string{"read"},
 		}
 		_ = mapper.AddRule(rule)
 	}
@@ -355,25 +358,21 @@ func TestMultipleRulesOrdering(t *testing.T) {
 }
 
 func TestAddRule_UpdateExisting(t *testing.T) {
-	tmpDir := t.TempDir()
-	profilePath := filepath.Join(tmpDir, "sandbox.sb")
-	mapper := NewMapper(profilePath)
+	mapper := newTestMapper(t)
 
-	enabled := true
 	// Add initial rule
-	rule := rules.Rule{
-		Name:       "test-rule",
-		Enabled:    &enabled,
-		Block:      rules.Block{Paths: []string{"**/.env"}},
-		Operations: []rules.Operation{rules.OpRead},
-		Message:    "test",
+	rule := &testRule{
+		name:       "test-rule",
+		enabled:    &boolTrue,
+		paths:      []string{"**/.env"},
+		operations: []string{"read"},
 	}
 	_ = mapper.AddRule(rule)
 
 	oldDirectives, _ := mapper.GetRuleDirectives("test-rule")
 
 	// Update with different pattern
-	rule.Block.Paths = []string{"**/.ssh/*"}
+	rule.paths = []string{"**/.ssh/*"}
 	_ = mapper.AddRule(rule)
 
 	newDirectives, _ := mapper.GetRuleDirectives("test-rule")
@@ -393,12 +392,10 @@ func TestAddRule_UpdateExisting(t *testing.T) {
 }
 
 func TestParseRuleSections(t *testing.T) {
-	tmpDir := t.TempDir()
-	profilePath := filepath.Join(tmpDir, "sandbox.sb")
-	mapper := NewMapper(profilePath)
+	mapper := newTestMapper(t)
 
 	// Manually create a profile with sections
-	profile := `; AgentShepherd Sandbox Profile
+	profile := `; Crust Sandbox Profile
 (version 1)
 (allow default)
 
@@ -439,24 +436,89 @@ func TestParseRuleSections(t *testing.T) {
 	}
 }
 
-func TestConcurrentAccess(t *testing.T) {
+func TestAddRule_EmptyDirectives(t *testing.T) {
+	mapper := newTestMapper(t)
+
+	// A rule with no block paths generates no directives
+	rule := &testRule{
+		name:    "content-only-rule",
+		enabled: &boolTrue,
+		// No paths, no operations → TranslateRule returns empty
+	}
+
+	err := mapper.AddRule(rule)
+	if err != nil {
+		t.Fatalf("AddRule failed: %v", err)
+	}
+
+	// Should not be mapped (0 directives → early return)
+	if mapper.HasRule("content-only-rule") {
+		t.Error("content-only rule should not be mapped (no directives)")
+	}
+}
+
+func TestDefaultProfilePath_NoHome(t *testing.T) {
+	// Set HOME to a non-existent directory
+	t.Setenv("HOME", "/nonexistent-home-dir-for-test")
+
+	path := DefaultProfilePath()
+	// On Linux, os.UserHomeDir may fall back to /etc/passwd.
+	// Either way, the path should end with .crust/sandbox.sb
+	if !strings.HasSuffix(path, filepath.Join(".crust", "sandbox.sb")) {
+		t.Errorf("DefaultProfilePath() = %q, expected to end with .crust/sandbox.sb", path)
+	}
+}
+
+func TestWriteProfile_BadDir(t *testing.T) {
+	// /proc/nonexistent is not writable — MkdirAll should fail
+	mapper := NewMapper("/proc/nonexistent/subdir/sandbox.sb")
+	rule := &testRule{
+		name:       "test",
+		enabled:    &boolTrue,
+		paths:      []string{"**/.env"},
+		operations: []string{"read"},
+	}
+
+	err := mapper.AddRule(rule)
+	if err == nil {
+		t.Error("expected error when profile directory can't be created")
+	}
+}
+
+func TestLoadFromFile_Unreadable(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("cannot test permission errors as root")
+	}
+
 	tmpDir := t.TempDir()
 	profilePath := filepath.Join(tmpDir, "sandbox.sb")
-	mapper := NewMapper(profilePath)
 
-	enabled := true
+	// Create file with no read permissions
+	if err := os.WriteFile(profilePath, []byte("data"), 0000); err != nil {
+		t.Fatalf("create file: %v", err)
+	}
+
+	mapper := NewMapper(profilePath)
+	err := mapper.LoadFromFile()
+	if err == nil {
+		t.Error("expected error reading unreadable file")
+	}
+}
+
+func TestConcurrentAccess(t *testing.T) {
+	mapper := newTestMapper(t)
+
 	// Run concurrent add/remove operations
 	done := make(chan bool)
 
 	// Writer goroutine - add rules
 	go func() {
 		for i := 0; i < 100; i++ {
-			rule := rules.Rule{
-				Name:       "concurrent-rule",
-				Enabled:    &enabled,
-				Block:      rules.Block{Paths: []string{"**/.test"}},
-				Operations: []rules.Operation{rules.OpRead},
-				Message:    "test",
+			rule := &testRule{
+				name:       "concurrent-rule",
+				enabled:    &boolTrue,
+				paths:      []string{"**/.test"},
+				operations: []string{"read"},
 			}
 			_ = mapper.AddRule(rule)
 		}
@@ -487,4 +549,61 @@ func TestConcurrentAccess(t *testing.T) {
 	}
 
 	// If we get here without deadlock or panic, test passes
+}
+
+func TestMapperProfileDirPermissions(t *testing.T) {
+	tmpDir := t.TempDir()
+	profileDir := filepath.Join(tmpDir, "subdir")
+	profilePath := filepath.Join(profileDir, "sandbox.sb")
+	mapper := NewMapper(profilePath)
+
+	rule := &testRule{
+		name:       "test-rule",
+		enabled:    &boolTrue,
+		paths:      []string{"**/.env"},
+		operations: []string{"read"},
+	}
+
+	if err := mapper.AddRule(rule); err != nil {
+		t.Fatalf("AddRule: %v", err)
+	}
+
+	fi, err := os.Stat(profileDir)
+	if err != nil {
+		t.Fatalf("stat profile dir: %v", err)
+	}
+
+	perm := fi.Mode().Perm()
+	if perm != 0700 {
+		t.Errorf("profile directory permissions = %o, want 0700", perm)
+	}
+}
+
+func TestSanitizeRuleName(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{"clean name", "my-rule", "my-rule"},
+		{"strips newline", "rule\ninjected", "ruleinjected"},
+		{"strips carriage return", "rule\rinjected", "ruleinjected"},
+		{"strips semicolons", "rule;injected", "ruleinjected"},
+		{"strips parens", "rule(injected)", "ruleinjected"},
+		{"strips quotes", `rule"injected`, "ruleinjected"},
+		{"strips hash", "rule#comment", "rulecomment"},
+		{"combined injection", "rule\n;(allow default)\n", "ruleallow default"},
+		{"empty string", "", ""},
+		{"unicode preserved", "rule-日本語", "rule-日本語"},
+		{"strips invalid utf8", "rule\x94name", "rulename"},
+		{"strips replacement char", "rule\xef\xbf\xbdname", "rulename"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := sanitizeRuleName(tt.input)
+			if got != tt.want {
+				t.Errorf("sanitizeRuleName(%q) = %q, want %q", tt.input, got, tt.want)
+			}
+		})
+	}
 }

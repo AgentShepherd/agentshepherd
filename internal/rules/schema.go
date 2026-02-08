@@ -20,7 +20,7 @@ type Rule struct {
 	Enabled     *bool       `yaml:"enabled,omitempty" json:"enabled,omitempty"`   // default true
 	Priority    int         `yaml:"priority,omitempty" json:"priority,omitempty"` // lower = higher priority, default 50
 	Block       Block       `yaml:"block" json:"block"`
-	Operations  []Operation `yaml:"operations" json:"operations"`
+	Actions     []Operation `yaml:"actions" json:"actions"`
 	Message     string      `yaml:"message" json:"message"`
 	Severity    string      `yaml:"severity,omitempty" json:"severity,omitempty"`
 
@@ -66,8 +66,8 @@ const (
 	OpNetwork Operation = "network"
 )
 
-// ValidOperations is the set of all valid operations
-var ValidOperations = map[Operation]bool{
+// ValidActions is the set of all valid actions
+var ValidActions = map[Operation]bool{
 	OpRead:    true,
 	OpWrite:   true,
 	OpDelete:  true,
@@ -117,13 +117,13 @@ func (r *Rule) Validate() error {
 		return errors.New("rule message is required")
 	}
 
-	if len(r.Operations) == 0 {
-		return errors.New("at least one operation is required")
+	if len(r.Actions) == 0 {
+		return errors.New("at least one action is required")
 	}
 
-	for _, op := range r.Operations {
-		if !ValidOperations[op] {
-			return fmt.Errorf("invalid operation: %s", op)
+	for _, op := range r.Actions {
+		if !ValidActions[op] {
+			return fmt.Errorf("invalid action: %s", op)
 		}
 	}
 
@@ -141,7 +141,7 @@ func (r *Rule) Validate() error {
 	// Validate that hosts are only used with network operation (for simple block format)
 	if hasBlockHosts {
 		hasNetwork := false
-		for _, op := range r.Operations {
+		for _, op := range r.Actions {
 			if op == OpNetwork {
 				hasNetwork = true
 				break
@@ -202,14 +202,32 @@ func ValidateRuleSet(rs *RuleSet) error {
 	return nil
 }
 
-// HasOperation checks if the rule applies to the given operation
-func (r *Rule) HasOperation(op Operation) bool {
-	for _, o := range r.Operations {
+// HasAction checks if the rule applies to the given action
+func (r *Rule) HasAction(op Operation) bool {
+	for _, o := range r.Actions {
 		if o == op {
 			return true
 		}
 	}
 	return false
+}
+
+// GetName returns the rule name.
+func (r *Rule) GetName() string { return r.Name }
+
+// GetBlockPaths returns the blocked path patterns.
+func (r *Rule) GetBlockPaths() []string { return r.Block.Paths }
+
+// GetBlockExcept returns the exception path patterns.
+func (r *Rule) GetBlockExcept() []string { return r.Block.Except }
+
+// GetActions returns the rule actions as strings.
+func (r *Rule) GetActions() []string {
+	out := make([]string, len(r.Actions))
+	for i, op := range r.Actions {
+		out[i] = string(op)
+	}
+	return out
 }
 
 // IsContentOnly returns true if this rule only matches on content (raw JSON)

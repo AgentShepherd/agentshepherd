@@ -11,21 +11,22 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"syscall"
 	"time"
 
-	"github.com/AgentShepherd/agentshepherd/internal/config"
-	"github.com/AgentShepherd/agentshepherd/internal/daemon"
-	"github.com/AgentShepherd/agentshepherd/internal/logger"
-	"github.com/AgentShepherd/agentshepherd/internal/proxy"
-	"github.com/AgentShepherd/agentshepherd/internal/rules"
-	"github.com/AgentShepherd/agentshepherd/internal/sandbox"
-	"github.com/AgentShepherd/agentshepherd/internal/security"
-	"github.com/AgentShepherd/agentshepherd/internal/telemetry"
-	"github.com/AgentShepherd/agentshepherd/internal/tui"
-	"github.com/AgentShepherd/agentshepherd/internal/types"
+	"github.com/BakeLens/crust/internal/config"
+	"github.com/BakeLens/crust/internal/daemon"
+	"github.com/BakeLens/crust/internal/logger"
+	"github.com/BakeLens/crust/internal/proxy"
+	"github.com/BakeLens/crust/internal/rules"
+	"github.com/BakeLens/crust/internal/sandbox"
+	"github.com/BakeLens/crust/internal/security"
+	"github.com/BakeLens/crust/internal/telemetry"
+	"github.com/BakeLens/crust/internal/tui"
+	"github.com/BakeLens/crust/internal/types"
 )
 
 // Version is set at build time via ldflags: -X main.Version=x.y.z
@@ -69,9 +70,9 @@ func (c *apiClient) checkHealth() (bool, error) {
 	return resp.StatusCode == http.StatusOK, nil
 }
 
-// isServerRunning checks if the AgentShepherd server is running
+// isServerRunning checks if the Crust server is running
 func (c *apiClient) isServerRunning() bool {
-	url := fmt.Sprintf("%s/api/agentshepherd/rules/reload", c.baseURL)
+	url := fmt.Sprintf("%s/api/crust/rules/reload", c.baseURL)
 	resp, err := http.Post(url, "application/json", nil) //nolint:gosec,noctx // URL is from trusted config
 	if err != nil {
 		return false
@@ -82,7 +83,7 @@ func (c *apiClient) isServerRunning() bool {
 
 // reloadRules triggers a hot reload of rules
 func (c *apiClient) reloadRules() ([]byte, error) {
-	url := fmt.Sprintf("%s/api/agentshepherd/rules/reload", c.baseURL)
+	url := fmt.Sprintf("%s/api/crust/rules/reload", c.baseURL)
 	resp, err := http.Post(url, "application/json", nil) //nolint:gosec,noctx // URL is from trusted config
 	if err != nil {
 		return nil, fmt.Errorf("server not running")
@@ -93,7 +94,7 @@ func (c *apiClient) reloadRules() ([]byte, error) {
 
 // getRules fetches all rules from the server
 func (c *apiClient) getRules() ([]byte, error) {
-	url := fmt.Sprintf("%s/api/agentshepherd/rules", c.baseURL)
+	url := fmt.Sprintf("%s/api/crust/rules", c.baseURL)
 	resp, err := http.Get(url) //nolint:gosec,noctx // URL is from trusted config
 	if err != nil {
 		return nil, fmt.Errorf("server not running")
@@ -104,48 +105,12 @@ func (c *apiClient) getRules() ([]byte, error) {
 
 // rulesResponse represents the API response for rules listing
 type rulesResponse struct {
-	Rules []ruleInfo `json:"rules"`
-	Total int        `json:"total"`
+	Rules []rules.Rule `json:"rules"`
+	Total int          `json:"total"`
 }
 
-// ruleInfo represents a single rule in the response (matches rules.Rule schema)
-type ruleInfo struct {
-	Name        string   `json:"name"`
-	Description string   `json:"description,omitempty"`
-	Enabled     *bool    `json:"enabled,omitempty"`
-	Severity    string   `json:"severity,omitempty"`
-	Operations  []string `json:"operations"`
-	Message     string   `json:"message"`
-	Source      string   `json:"source,omitempty"`
-	FilePath    string   `json:"file_path,omitempty"`
-	HitCount    int      `json:"hit_count,omitempty"`
-
-	// Block patterns (simple rules)
-	Block ruleBlock `json:"block"`
-
-	// Advanced match (Level 4)
-	Match *ruleMatch `json:"match,omitempty"`
-
-	// Composite conditions (Level 5)
-	AllConditions []ruleMatch `json:"all_conditions,omitempty"`
-	AnyConditions []ruleMatch `json:"any_conditions,omitempty"`
-}
-
-// ruleBlock defines what paths/hosts to block
-type ruleBlock struct {
-	Paths  []string `json:"paths,omitempty"`
-	Except []string `json:"except,omitempty"`
-	Hosts  []string `json:"hosts,omitempty"`
-}
-
-// ruleMatch represents a single match condition
-type ruleMatch struct {
-	Path    string   `json:"path,omitempty"`
-	Command string   `json:"command,omitempty"`
-	Host    string   `json:"host,omitempty"`
-	Content string   `json:"content,omitempty"`
-	Tools   []string `json:"tools,omitempty"`
-}
+// rulesResponse uses rules.Rule directly — no mirrored structs needed
+// since the daemon API already serializes rules.Rule as JSON.
 
 // getRulesParsed fetches and parses rules from the server
 func (c *apiClient) getRulesParsed() (*rulesResponse, error) {
@@ -159,6 +124,17 @@ func (c *apiClient) getRulesParsed() (*rulesResponse, error) {
 		return nil, err
 	}
 	return &rulesResp, nil
+}
+
+// toSecurityRules converts []rules.Rule to []sandbox.SecurityRule.
+// This adapter allows main.go to bridge the rules engine and sandbox packages
+// without the sandbox package importing internal/rules.
+func toSecurityRules(rr []rules.Rule) []sandbox.SecurityRule {
+	out := make([]sandbox.SecurityRule, len(rr))
+	for i := range rr {
+		out[i] = &rr[i]
+	}
+	return out
 }
 
 var log = logger.New("main")
@@ -210,7 +186,7 @@ func main() {
 			printUsage()
 			return
 		case "version", "-v", "--version":
-			fmt.Printf("agentshepherd version %s\n", Version)
+			fmt.Printf("crust version %s\n", Version)
 			return
 		}
 	}
@@ -223,7 +199,7 @@ func main() {
 func runStart(args []string) {
 	// Check if already running
 	if running, pid := daemon.IsRunning(); running {
-		fmt.Printf("AgentShepherd is already running [PID %d]\n", pid)
+		fmt.Printf("Crust is already running [PID %d]\n", pid)
 		os.Exit(1)
 	}
 
@@ -240,6 +216,7 @@ func runStart(args []string) {
 	endpoint := startFlags.String("endpoint", "", "LLM API endpoint URL")
 	apiKey := startFlags.String("api-key", "", "API key for the endpoint (prefer LLM_API_KEY env var)")
 	dbKey := startFlags.String("db-key", "", "Database encryption key (prefer DB_KEY env var)")
+	autoMode := startFlags.Bool("auto", false, "Auto mode: resolve providers from model names, clients bring their own auth")
 
 	// Advanced options
 	proxyPort := startFlags.Int("proxy-port", 0, "Proxy server port (default from config)")
@@ -277,16 +254,17 @@ func runStart(args []string) {
 	if *daemonMode || daemon.IsDaemonMode() {
 		// We're the daemon process - run the server
 		runDaemon(cfg, *logLevel, *noColor, *disableBuiltin, *endpoint, *apiKey, *dbKey,
-			*proxyPort, *apiPort, *telemetryEnabled, *retentionDays, *blockMode)
+			*proxyPort, *apiPort, *telemetryEnabled, *retentionDays, *blockMode, *autoMode)
 		return
 	}
 
 	// Interactive mode - collect configuration via TUI
 	var startupCfg tui.StartupConfig
 
-	if *endpoint != "" && *apiKey != "" {
-		// All required params provided via flags - skip TUI
+	if *autoMode || (*endpoint != "" && *apiKey != "") {
+		// Flags provided — skip interactive prompts
 		startupCfg = tui.StartupConfig{
+			AutoMode:            *autoMode,
 			EndpointURL:         *endpoint,
 			APIKey:              *apiKey,
 			EncryptionKey:       *dbKey,
@@ -297,10 +275,10 @@ func runStart(args []string) {
 			APIPort:             *apiPort,
 		}
 	} else {
-		// Run TUI for configuration
+		// Run interactive prompts (asks auto vs manual mode first)
 		startupCfg, err = tui.RunStartupWithPorts(cfg.Upstream.URL, cfg.Server.Port, cfg.API.Port)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "TUI error: %v\n", err)
+			fmt.Fprintf(os.Stderr, "Startup error: %v\n", err)
 			os.Exit(1)
 		}
 
@@ -311,14 +289,17 @@ func runStart(args []string) {
 	}
 
 	// Build args for daemon process
+	// SECURITY: Secrets (API key, DB key) are passed via environment variables only,
+	// not CLI args, to avoid exposure in ps/proc. See Daemonize() for env propagation.
 	daemonArgs := []string{
 		"start",
 		"--config", *configPath,
-		"--endpoint", startupCfg.EndpointURL,
-		"--api-key", startupCfg.APIKey,
 	}
-	if startupCfg.EncryptionKey != "" {
-		daemonArgs = append(daemonArgs, "--db-key", startupCfg.EncryptionKey)
+	if startupCfg.EndpointURL != "" {
+		daemonArgs = append(daemonArgs, "--endpoint", startupCfg.EndpointURL)
+	}
+	if startupCfg.AutoMode {
+		daemonArgs = append(daemonArgs, "--auto")
 	}
 	if *logLevel != "" {
 		daemonArgs = append(daemonArgs, "--log-level", *logLevel)
@@ -346,6 +327,15 @@ func runStart(args []string) {
 		daemonArgs = append(daemonArgs, "--block-mode", *blockMode)
 	}
 
+	// SECURITY: Set secrets as env vars so Daemonize() can propagate them
+	// This handles the case where secrets came from CLI flags rather than env vars
+	if startupCfg.APIKey != "" {
+		os.Setenv("LLM_API_KEY", startupCfg.APIKey)
+	}
+	if startupCfg.EncryptionKey != "" {
+		os.Setenv("DB_KEY", startupCfg.EncryptionKey)
+	}
+
 	// Daemonize
 	pid, err := daemon.Daemonize(daemonArgs)
 	if err != nil {
@@ -358,30 +348,30 @@ func runStart(args []string) {
 
 	// Verify it started
 	if running, _ := daemon.IsRunning(); !running {
-		fmt.Fprintln(os.Stderr, "Failed to start agentshepherd. Check logs:")
+		fmt.Fprintln(os.Stderr, "Failed to start crust. Check logs:")
 		fmt.Fprintf(os.Stderr, "  %s\n", daemon.LogFile())
 		os.Exit(1)
 	}
 
 	fmt.Println()
-	fmt.Printf("✓ AgentShepherd started [PID %d]\n", pid)
+	fmt.Printf("✓ Crust started [PID %d]\n", pid)
 	fmt.Printf("  Logs: %s\n", daemon.LogFile())
 	fmt.Println()
 	fmt.Println("Commands:")
-	fmt.Println("  agentshepherd status  - Check status")
-	fmt.Println("  agentshepherd logs    - View logs")
-	fmt.Println("  agentshepherd stop    - Stop agentshepherd")
+	fmt.Println("  crust status  - Check status")
+	fmt.Println("  crust logs    - View logs")
+	fmt.Println("  crust stop    - Stop crust")
 }
 
 // runDaemon runs the actual server (called in daemon process)
 func runDaemon(cfg *config.Config, logLevel string, noColor, disableBuiltin bool, endpoint, apiKey, dbKey string,
-	proxyPort, apiPort int, telemetryEnabled bool, retentionDays int, blockMode string) {
+	proxyPort, apiPort int, telemetryEnabled bool, retentionDays int, blockMode string, autoMode bool) {
 	// Write PID file
 	if err := daemon.WritePID(); err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to write PID file: %v\n", err)
 		os.Exit(1)
 	}
-	defer func() { _ = daemon.RemovePID() }()
+	defer daemon.CleanupPID()
 
 	// Configure logger
 	if logLevel != "" {
@@ -420,7 +410,7 @@ func runDaemon(cfg *config.Config, logLevel string, noColor, disableBuiltin bool
 		cfg.Security.BlockMode = types.BlockMode(blockMode)
 	}
 
-	log.Info("Starting AgentShepherd daemon...")
+	log.Info("Starting Crust daemon...")
 
 	// Initialize rules engine
 	var ruleWatcher *rules.Watcher
@@ -460,23 +450,60 @@ func runDaemon(cfg *config.Config, logLevel string, noColor, disableBuiltin bool
 		if cfg.Sandbox.Enabled {
 			if !sandbox.IsSupported() {
 				log.Warn("Sandbox enabled but not supported on this platform: %s", sandbox.Platform())
+			} else if !sandbox.IsHelperInstalled() {
+				log.Info("Sandbox helper not installed (Layer 2 disabled). Visit https://getcrust.io for installation options.")
 			} else {
 				sandboxMapper := sandbox.NewMapper(sandbox.DefaultProfilePath())
 				allRules := ruleEngine.GetAllRules()
-				if err := sandboxMapper.Sync(allRules); err != nil {
+				secRules := toSecurityRules(allRules)
+				if err := sandboxMapper.Sync(secRules); err != nil {
 					log.Warn("Failed to sync sandbox profile: %v", err)
 				} else {
 					log.Info("Sandbox profile synced: %d rules mapped", sandboxMapper.RuleCount())
 				}
 
+				// Set rules for intent-aware Landlock mode derivation
+				sandbox.SetRules(secRules)
+
 				// Register callback to sync sandbox on rule reload
 				ruleEngine.OnReload(func(reloadedRules []rules.Rule) {
-					if err := sandboxMapper.Sync(reloadedRules); err != nil {
+					secReloaded := toSecurityRules(reloadedRules)
+					if err := sandboxMapper.Sync(secReloaded); err != nil {
 						log.Warn("Failed to sync sandbox profile on reload: %v", err)
 					} else {
 						log.Debug("Sandbox profile synced after reload: %d rules", sandboxMapper.RuleCount())
 					}
+					// Update rules for intent-aware Landlock mode derivation.
+					// Each command spawn uses the latest rules (no restart needed).
+					sandbox.SetRules(secReloaded)
 				})
+			}
+
+			// Layer 2b: BPF deny-list (Linux-only, optional)
+			if runtime.GOOS == "linux" && cfg.Sandbox.BPFHelper != "" {
+				socketPath := cfg.Sandbox.BPFHelper
+				if socketPath == "" {
+					socketPath = filepath.Join(daemon.DataDir(), "bpf.sock")
+				}
+				bpfClient, err := sandbox.NewBPFClient(socketPath)
+				if err != nil {
+					log.Warn("BPF helper not available (Layer 2b disabled): %v", err)
+				} else {
+					allBPFRules := ruleEngine.GetAllRules()
+					if err := bpfClient.SyncRules(toSecurityRules(allBPFRules)); err != nil {
+						log.Warn("Failed to sync BPF rules: %v", err)
+					} else {
+						log.Info("BPF deny rules synced (Layer 2b active)")
+					}
+
+					ruleEngine.OnReload(func(reloadedRules []rules.Rule) {
+						if err := bpfClient.SyncRules(toSecurityRules(reloadedRules)); err != nil {
+							log.Warn("Failed to sync BPF rules on reload: %v", err)
+						} else {
+							log.Debug("BPF deny rules synced after reload")
+						}
+					})
+				}
 			}
 		} else {
 			log.Debug("Sandbox disabled (set sandbox.enabled=true to enable)")
@@ -530,7 +557,7 @@ func runDaemon(cfg *config.Config, logLevel string, noColor, disableBuiltin bool
 	}
 
 	// Create proxy
-	proxyHandler, err := proxy.NewProxy(cfg.Upstream.URL, cfg.Upstream.APIKey, time.Duration(cfg.Upstream.Timeout)*time.Second)
+	proxyHandler, err := proxy.NewProxy(cfg.Upstream.URL, cfg.Upstream.APIKey, time.Duration(cfg.Upstream.Timeout)*time.Second, cfg.Upstream.Providers)
 	if err != nil {
 		log.Error("Failed to create proxy: %v", err)
 		os.Exit(1)
@@ -550,11 +577,18 @@ func runDaemon(cfg *config.Config, logLevel string, noColor, disableBuiltin bool
 		// SECURITY FIX: Add ReadHeaderTimeout to prevent Slowloris attacks
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       time.Duration(cfg.Upstream.Timeout) * time.Second,
-		WriteTimeout:      time.Duration(cfg.Upstream.Timeout) * time.Second,
+		WriteTimeout:      0, // Must be 0 for SSE streaming (it's a deadline, not idle timeout)
 	}
 
-	log.Info("AgentShepherd listening on :%d", cfg.Server.Port)
-	log.Info("  Upstream: %s", cfg.Upstream.URL)
+	log.Info("Crust listening on :%d", cfg.Server.Port)
+	if autoMode {
+		log.Info("  Mode: auto (provider resolved from model name)")
+		if cfg.Upstream.URL != "" {
+			log.Info("  Fallback upstream: %s", cfg.Upstream.URL)
+		}
+	} else {
+		log.Info("  Upstream: %s", cfg.Upstream.URL)
+	}
 	log.Info("  API: :%d", cfg.API.Port)
 
 	// Start server
@@ -580,36 +614,36 @@ func runDaemon(cfg *config.Config, logLevel string, noColor, disableBuiltin bool
 		os.Exit(1)
 	}
 
-	log.Info("AgentShepherd stopped")
+	log.Info("Crust stopped")
 }
 
 // runStop handles the stop subcommand
 func runStop() {
 	running, pid := daemon.IsRunning()
 	if !running {
-		fmt.Println("AgentShepherd is not running")
+		fmt.Println("Crust is not running")
 		return
 	}
 
-	fmt.Printf("Stopping agentshepherd [PID %d]...\n", pid)
+	fmt.Printf("Stopping crust [PID %d]...\n", pid)
 
 	if err := daemon.Stop(); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
 
-	fmt.Println("AgentShepherd stopped")
+	fmt.Println("Crust stopped")
 }
 
 // runStatus handles the status subcommand
 func runStatus() {
 	running, pid := daemon.IsRunning()
 	if !running {
-		fmt.Println("AgentShepherd is not running")
+		fmt.Println("Crust is not running")
 		return
 	}
 
-	fmt.Printf("AgentShepherd is running [PID %d]\n", pid)
+	fmt.Printf("Crust is running [PID %d]\n", pid)
 
 	// Try to get health from API
 	client := newAPIClient("config.yaml")
@@ -650,7 +684,7 @@ func runLogs(args []string) {
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
 		if err := cmd.Run(); err != nil {
-			fmt.Fprintf(os.Stderr, "No logs found. Is agentshepherd running?\n")
+			fmt.Fprintf(os.Stderr, "No logs found. Is crust running?\n")
 		}
 	}
 }
@@ -670,32 +704,33 @@ func loggingMiddleware(next http.Handler) http.Handler {
 }
 
 func printUsage() {
-	fmt.Println(`AgentShepherd - Secure gateway for AI agents
+	fmt.Println(`Crust - Secure gateway for AI agents
 
 Usage:
-  agentshepherd start [flags]        Start agentshepherd (interactive or with flags)
-  agentshepherd stop                 Stop agentshepherd
-  agentshepherd status               Check if agentshepherd is running
-  agentshepherd logs [-f] [-n N]     View logs (-f to follow, -n for line count)
+  crust start [flags]        Start crust (interactive or with flags)
+  crust stop                 Stop crust
+  crust status               Check if crust is running
+  crust logs [-f] [-n N]     View logs (-f to follow, -n for line count)
 
-  agentshepherd add-rule <file.yaml>    Add a rule file to user rules
-  agentshepherd remove-rule <filename>  Remove a user rule file
-  agentshepherd list-rules [--json]     List all active rules
-  agentshepherd reload-rules            Trigger hot reload of rules
-  agentshepherd lint-rules [file.yaml]  Validate rule syntax and patterns
+  crust add-rule <file.yaml>    Add a rule file to user rules
+  crust remove-rule <filename>  Remove a user rule file
+  crust list-rules [--json]     List all active rules
+  crust reload-rules            Trigger hot reload of rules
+  crust lint-rules [file.yaml]  Validate rule syntax and patterns
 
-  agentshepherd wrap [--dry-run] <cmd>  Run command in OS sandbox
-  agentshepherd check-sandbox           Verify rule-sandbox consistency
-  agentshepherd repair-sandbox          Regenerate sandbox profile from rules
+  crust wrap [--dry-run] <cmd>  Run command in OS sandbox
+  crust check-sandbox           Verify rule-sandbox consistency
+  crust repair-sandbox          Regenerate sandbox profile from rules
 
-  agentshepherd uninstall            Uninstall agentshepherd completely
-  agentshepherd help                 Show this help message
-  agentshepherd version              Show version
+  crust uninstall            Uninstall crust completely
+  crust help                 Show this help message
+  crust version              Show version
 
 Start Flags:
   --config string       Path to configuration file (default "config.yaml")
   --endpoint string     LLM API endpoint URL (skip interactive prompt)
   --api-key string      API key for the endpoint (skip interactive prompt)
+  --auto                Auto mode: resolve providers from model names, clients bring their own auth
   --db-key string       Database encryption key (optional)
   --log-level string    Log level: trace, debug, info, warn, error
   --no-color            Disable colored log output
@@ -710,16 +745,17 @@ Environment Variables (preferred for secrets):
   DB_KEY         Database encryption key
 
 Examples:
-  agentshepherd start                              Interactive setup
-  LLM_API_KEY=sk-xxx agentshepherd start --endpoint https://openrouter.ai/api/v1
-  agentshepherd logs -f                            Follow logs
-  agentshepherd stop                               Stop agentshepherd`)
+  crust start                              Interactive setup
+  LLM_API_KEY=sk-xxx crust start --endpoint https://openrouter.ai/api/v1
+  crust start --auto                       Auto mode (clients bring their own auth)
+  crust logs -f                            Follow logs
+  crust stop                               Stop crust`)
 }
 
 // runAddRule handles the add-rule subcommand
 func runAddRule(args []string) {
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "Usage: agentshepherd add-rule <file.yaml>")
+		fmt.Fprintln(os.Stderr, "Usage: crust add-rule <file.yaml>")
 		os.Exit(1)
 	}
 
@@ -753,17 +789,17 @@ func runAddRule(args []string) {
 			fmt.Println("Hot reload triggered successfully")
 		}
 	} else {
-		fmt.Println("Note: AgentShepherd is not running. Rules will be loaded on next start.")
+		fmt.Println("Note: Crust is not running. Rules will be loaded on next start.")
 	}
 }
 
 // runRemoveRule handles the remove-rule subcommand
 func runRemoveRule(args []string) {
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "Usage: agentshepherd remove-rule <filename>")
+		fmt.Fprintln(os.Stderr, "Usage: crust remove-rule <filename>")
 		fmt.Fprintln(os.Stderr, "")
-		fmt.Fprintln(os.Stderr, "Remove a user rule file from ~/.agentshepherd/rules.d/")
-		fmt.Fprintln(os.Stderr, "Use 'agentshepherd list-rules' to see available rules.")
+		fmt.Fprintln(os.Stderr, "Remove a user rule file from ~/.crust/rules.d/")
+		fmt.Fprintln(os.Stderr, "Use 'crust list-rules' to see available rules.")
 		os.Exit(1)
 	}
 
@@ -784,7 +820,7 @@ func runRemoveRule(args []string) {
 			fmt.Println("Hot reload triggered successfully")
 		}
 	} else {
-		fmt.Println("Note: AgentShepherd is not running. Rules will be updated on next start.")
+		fmt.Println("Note: Crust is not running. Rules will be updated on next start.")
 	}
 }
 
@@ -797,8 +833,8 @@ func runListRules(args []string) {
 	client := newAPIClient("config.yaml")
 	body, err := client.getRules()
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "Error: AgentShepherd is not running")
-		fmt.Fprintln(os.Stderr, "Start it first with: agentshepherd start")
+		fmt.Fprintln(os.Stderr, "Error: Crust is not running")
+		fmt.Fprintln(os.Stderr, "Start it first with: crust start")
 		os.Exit(1)
 	}
 
@@ -823,11 +859,11 @@ func runListRules(args []string) {
 	bold := "\033[1m"
 	reset := "\033[0m"
 
-	fmt.Printf("%s%sAgentShepherd Rules%s (%d total)\n\n", bold, cyan, reset, rulesResp.Total)
+	fmt.Printf("%s%sCrust Rules%s (%d total)\n\n", bold, cyan, reset, rulesResp.Total)
 
 	// Group by source
-	builtinRules := []ruleInfo{}
-	userRulesByFile := make(map[string][]ruleInfo)
+	builtinRules := []rules.Rule{}
+	userRulesByFile := make(map[string][]rules.Rule)
 	for _, r := range rulesResp.Rules {
 		if r.Source == "builtin" {
 			builtinRules = append(builtinRules, r)
@@ -840,7 +876,7 @@ func runListRules(args []string) {
 		}
 	}
 
-	printRule := func(r ruleInfo, prefix string) {
+	printRule := func(r rules.Rule, prefix string) {
 		// Severity color
 		sevColor := gray
 		sev := r.Severity
@@ -864,7 +900,7 @@ func runListRules(args []string) {
 		}
 
 		// Format operations
-		ops := strings.Join(r.Operations, ",")
+		ops := strings.Join(r.GetActions(), ",")
 		if ops == "" {
 			ops = "all"
 		}
@@ -942,7 +978,7 @@ func runListRules(args []string) {
 	fmt.Printf("%sUser Rules:%s\n", bold, reset)
 	if len(userRulesByFile) == 0 {
 		fmt.Printf("  %s(none)%s\n", gray, reset)
-		fmt.Printf("  Add rules with: agentshepherd add-rule <file.yaml>\n")
+		fmt.Printf("  Add rules with: crust add-rule <file.yaml>\n")
 	} else {
 		// Sort filenames for consistent output
 		filenames := make([]string, 0, len(userRulesByFile))
@@ -971,8 +1007,8 @@ func runReloadRules(_ []string) {
 	client := newAPIClient("config.yaml")
 	body, err := client.reloadRules()
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "Error: AgentShepherd is not running")
-		fmt.Fprintln(os.Stderr, "Start it first with: agentshepherd start")
+		fmt.Fprintln(os.Stderr, "Error: Crust is not running")
+		fmt.Fprintln(os.Stderr, "Start it first with: crust start")
 		os.Exit(1)
 	}
 	fmt.Println(string(body))
@@ -980,7 +1016,7 @@ func runReloadRules(_ []string) {
 
 // runUninstall handles the uninstall subcommand
 func runUninstall() {
-	binaryPath := "/usr/local/bin/agentshepherd"
+	binaryPath := "/usr/local/bin/crust"
 	dataDir := daemon.DataDir()
 
 	fmt.Println("This will remove:")
@@ -998,11 +1034,11 @@ func runUninstall() {
 		return
 	}
 
-	// Stop agentshepherd if running
+	// Stop crust if running
 	if running, pid := daemon.IsRunning(); running {
-		fmt.Printf("Stopping agentshepherd [PID %d]...\n", pid)
+		fmt.Printf("Stopping crust [PID %d]...\n", pid)
 		if err := daemon.Stop(); err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: failed to stop agentshepherd: %v\n", err)
+			fmt.Fprintf(os.Stderr, "Warning: failed to stop crust: %v\n", err)
 		}
 	}
 
@@ -1030,7 +1066,7 @@ func runUninstall() {
 	}
 
 	fmt.Println()
-	fmt.Println("AgentShepherd uninstalled.")
+	fmt.Println("Crust uninstalled.")
 }
 
 // runWrap handles the wrap subcommand - runs a command in OS sandbox
@@ -1041,15 +1077,22 @@ func runWrap(args []string) {
 
 	remainingArgs := wrapFlags.Args()
 	if len(remainingArgs) == 0 {
-		fmt.Fprintln(os.Stderr, "Usage: agentshepherd wrap [--dry-run] <command> [args...]")
+		fmt.Fprintln(os.Stderr, "Usage: crust wrap [--dry-run] <command> [args...]")
 		os.Exit(1)
 	}
 
-	// Check platform support - AgentShepherd requires Linux 5.13+ (Landlock) or macOS
+	// Check platform support - Crust requires Linux 5.13+ (Landlock) or macOS
 	if !sandbox.IsSupported() {
 		fmt.Fprintf(os.Stderr, "FATAL: Sandbox not supported on this platform\n")
 		fmt.Fprintf(os.Stderr, "Platform info: %s\n", sandbox.Platform())
-		fmt.Fprintf(os.Stderr, "AgentShepherd requires Linux 5.13+ with Landlock or macOS.\n")
+		fmt.Fprintf(os.Stderr, "Crust requires Linux 5.13+ with Landlock or macOS.\n")
+		os.Exit(1)
+	}
+
+	if !sandbox.IsHelperInstalled() {
+		fmt.Fprintf(os.Stderr, "bakelens-sandbox binary not installed.\n")
+		fmt.Fprintf(os.Stderr, "The OS-level sandbox requires the bakelens-sandbox binary.\n")
+		fmt.Fprintf(os.Stderr, "Visit https://getcrust.io for installation options.\n")
 		os.Exit(1)
 	}
 
@@ -1083,10 +1126,10 @@ func runWrap(args []string) {
 	allRules := append(builtinRules, userRules...)
 
 	// Add rules to mapper
-	for _, rule := range allRules {
-		if rule.IsEnabled() {
-			if err := mapper.AddRule(rule); err != nil {
-				fmt.Fprintf(os.Stderr, "Warning: Failed to map rule %s: %v\n", rule.Name, err)
+	for i := range allRules {
+		if allRules[i].IsEnabled() {
+			if err := mapper.AddRule(&allRules[i]); err != nil {
+				fmt.Fprintf(os.Stderr, "Warning: Failed to map rule %s: %v\n", allRules[i].Name, err)
 			}
 		}
 	}
@@ -1136,6 +1179,13 @@ func runCheckSandbox() {
 		os.Exit(1)
 	}
 
+	if !sandbox.IsHelperInstalled() {
+		fmt.Fprintf(os.Stderr, "bakelens-sandbox binary not installed.\n")
+		fmt.Fprintf(os.Stderr, "The OS-level sandbox requires the bakelens-sandbox binary.\n")
+		fmt.Fprintf(os.Stderr, "Visit https://getcrust.io for installation options.\n")
+		os.Exit(1)
+	}
+
 	fmt.Printf("Checking sandbox consistency...\n")
 	fmt.Printf("Platform: %s\n\n", sandbox.Platform())
 
@@ -1164,14 +1214,14 @@ func runCheckSandbox() {
 	if err := mapper.LoadFromFile(); err != nil {
 		// Profile doesn't exist - that's OK, we'll create it
 		fmt.Printf("Note: No sandbox profile found at %s\n", profilePath)
-		fmt.Printf("Run 'agentshepherd repair-sandbox' to generate one.\n")
+		fmt.Printf("Run 'crust repair-sandbox' to generate one.\n")
 		return
 	}
 
 	// Check consistency
-	if err := mapper.CheckConsistency(allRules); err != nil {
+	if err := mapper.CheckConsistency(toSecurityRules(allRules)); err != nil {
 		fmt.Fprintf(os.Stderr, "Inconsistency detected: %v\n\n", err)
-		fmt.Println("Run 'agentshepherd repair-sandbox' to fix")
+		fmt.Println("Run 'crust repair-sandbox' to fix")
 		os.Exit(1)
 	}
 
@@ -1194,6 +1244,13 @@ func runRepairSandbox() {
 
 	if !sandbox.IsSupported() {
 		fmt.Fprintf(os.Stderr, "FATAL: Sandbox not supported (%s). Requires Linux 5.13+ or macOS.\n", sandbox.Platform())
+		os.Exit(1)
+	}
+
+	if !sandbox.IsHelperInstalled() {
+		fmt.Fprintf(os.Stderr, "bakelens-sandbox binary not installed.\n")
+		fmt.Fprintf(os.Stderr, "The OS-level sandbox requires the bakelens-sandbox binary.\n")
+		fmt.Fprintf(os.Stderr, "Visit https://getcrust.io for installation options.\n")
 		os.Exit(1)
 	}
 
@@ -1223,7 +1280,7 @@ func runRepairSandbox() {
 	profilePath := sandbox.DefaultProfilePath()
 	mapper := sandbox.NewMapper(profilePath)
 
-	if err := mapper.Repair(allRules); err != nil {
+	if err := mapper.Repair(toSecurityRules(allRules)); err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to repair sandbox: %v\n", err)
 		os.Exit(1)
 	}

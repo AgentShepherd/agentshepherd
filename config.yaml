@@ -1,4 +1,4 @@
-# AgentShepherd Configuration
+# Crust Configuration
 
 server:
   port: 9090
@@ -12,7 +12,7 @@ upstream:
 
 # Unified storage (SQLCipher encrypted SQLite)
 storage:
-  db_path: "./agentshepherd.db"
+  db_path: "./crust.db"
   encryption_key: ""        # SQLCipher key (empty = no encryption)
 
 # Management API
@@ -22,7 +22,7 @@ api:
 # Telemetry (writes to SQLite via storage)
 telemetry:
   enabled: false
-  service_name: "agentshepherd"
+  service_name: "crust"
   sample_rate: 1.0
 
 # Security (Tool Call Interception)
@@ -36,6 +36,11 @@ security:
 # Rules Engine
 rules:
   enabled: true
-  user_dir: ""              # default: ~/.agentshepherd/rules.d
+  user_dir: ""              # default: ~/.crust/rules.d
   disable_builtin: false    # set true to disable embedded security rules
   watch: true               # enable hot reload via file watching
+
+# OS Sandbox (Layer 2)
+sandbox:
+  enabled: false            # Enable OS-level sandbox (Landlock on Linux, Seatbelt on macOS)
+  bpf_helper: ""            # Path to BPF helper socket (Linux-only, requires bpf-helper daemon)

@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/AgentShepherd/agentshepherd/internal/rules"
+	"github.com/BakeLens/crust/internal/rules"
 )
 
 // commandTiming holds timing results for a command.
@@ -36,9 +36,9 @@ func TestSandboxCostReport(t *testing.T) {
 		t.Fatal("FATAL: Sandbox not supported on this platform. Requires Linux 5.13+ or macOS")
 	}
 
-	// Ensure sandbox-exec helper is found
-	helperPath := setupSandboxExecPath(t)
-	t.Logf("Using sandbox-exec helper: %s", helperPath)
+	// Ensure bakelens-sandbox helper is found
+	helperPath := setupBakelensSandboxPath(t)
+	t.Logf("Using bakelens-sandbox helper: %s", helperPath)
 
 	// Suppress sandbox stderr output during command execution
 	restore := suppressOutput()
@@ -61,9 +61,9 @@ func TestSandboxCostReport(t *testing.T) {
 	// Create sandbox with all rules
 	profilePath := filepath.Join(t.TempDir(), "sandbox.sb")
 	mapper := NewMapper(profilePath)
-	for _, rule := range builtinRules {
-		if rule.IsEnabled() {
-			_ = mapper.AddRule(rule)
+	for i := range builtinRules {
+		if builtinRules[i].IsEnabled() {
+			_ = mapper.AddRule(&builtinRules[i])
 		}
 	}
 	sb := New(mapper)
@@ -223,7 +223,6 @@ func TestSandboxCostReport(t *testing.T) {
 	fmt.Println("╟──────────────────────────────────────────────────────────────────────────────╢")
 	fmt.Println("║ NOTE: Layer 1 (rules engine) adds ~30μs and blocks malicious commands       ║")
 	fmt.Println("║       Layer 2 (sandbox) adds ~300-500μs kernel-level protection             ║")
-	fmt.Println("║       Persistent mode reduces sandbox overhead by ~40-65%                   ║")
 	fmt.Println("╚══════════════════════════════════════════════════════════════════════════════╝")
 	fmt.Println()
 }
@@ -250,16 +249,9 @@ func suppressOutput() func() {
 	}
 }
 
-// setupSandboxExecPath finds the sandbox-exec helper and sets SANDBOX_EXEC_PATH.
-// Returns the path to the helper or fails the test.
-func setupSandboxExecPath(t testing.TB) string {
-	// Check if already set
-	if path := os.Getenv("SANDBOX_EXEC_PATH"); path != "" {
-		if _, err := os.Stat(path); err == nil {
-			return path
-		}
-	}
-
+// setupBakelensSandboxPath finds the bakelens-sandbox helper binary.
+// Returns the path to the helper or skips the test.
+func setupBakelensSandboxPath(t testing.TB) string {
 	// Find project root by looking for go.mod
 	dir, err := os.Getwd()
 	if err != nil {
@@ -278,14 +270,14 @@ func setupSandboxExecPath(t testing.TB) string {
 		dir = parent
 	}
 
-	// Check for sandbox-exec in cmd/sandbox-exec/
-	helperPath := filepath.Join(dir, "cmd", "sandbox-exec", "sandbox-exec")
+	// Check for bakelens-sandbox Rust binary
+	helperPath := filepath.Join(dir, "cmd", "bakelens-sandbox", "target", "release", "bakelens-sandbox")
 	if _, err := os.Stat(helperPath); err != nil {
-		t.Fatalf("sandbox-exec helper not found at %s. Build it with: make -C cmd/sandbox-exec", helperPath)
+		t.Skipf("bakelens-sandbox not found at %s. Build it with: make build-sandbox", helperPath)
 	}
 
-	// Set environment variable so findSandboxExec() finds it
-	os.Setenv("SANDBOX_EXEC_PATH", helperPath)
+	// Inject into helperExecPaths so findBakelensSandbox() finds it
+	helperExecPaths = append([]string{helperPath}, helperExecPaths...)
 	return helperPath
 }
 
@@ -302,9 +294,9 @@ func BenchmarkSandboxProfileGeneration(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		profilePath := filepath.Join(b.TempDir(), "sandbox.sb")
 		mapper := NewMapper(profilePath)
-		for _, rule := range builtinRules {
-			if rule.IsEnabled() {
-				_ = mapper.AddRule(rule)
+		for j := range builtinRules {
+			if builtinRules[j].IsEnabled() {
+				_ = mapper.AddRule(&builtinRules[j])
 			}
 		}
 	}
@@ -315,7 +307,7 @@ func BenchmarkGlobToRegex(b *testing.B) {
 	b.ReportAllocs()
 	patterns := []string{
 		"**/.env",
-		"**/.ssh/id_*",
+		"**/.ssh/*",
 		"**/credentials*",
 		"/etc/**",
 		"*.txt",
@@ -339,8 +331,8 @@ func BenchmarkCommandExecution(b *testing.B) {
 		b.Fatal("Sandbox not supported: requires Linux 5.13+ with Landlock")
 	}
 
-	// Ensure sandbox-exec helper is found
-	setupSandboxExecPath(b)
+	// Ensure bakelens-sandbox helper is found
+	setupBakelensSandboxPath(b)
 
 	// Suppress sandbox stderr output during benchmarks
 	restore := suppressOutput()
@@ -352,9 +344,9 @@ func BenchmarkCommandExecution(b *testing.B) {
 
 	loader := rules.NewLoader("")
 	builtinRules, _ := loader.LoadBuiltin()
-	for _, rule := range builtinRules {
-		if rule.IsEnabled() {
-			_ = mapper.AddRule(rule)
+	for i := range builtinRules {
+		if builtinRules[i].IsEnabled() {
+			_ = mapper.AddRule(&builtinRules[i])
 		}
 	}
 
@@ -378,64 +370,6 @@ func BenchmarkCommandExecution(b *testing.B) {
 	})
 }
 
-// BenchmarkSandboxOverhead measures the pure overhead of sandbox.
-func BenchmarkSandboxOverhead(b *testing.B) {
-	b.ReportAllocs()
-	if !IsSupported() {
-		b.Fatal("Sandbox not supported: requires Linux 5.13+ with Landlock")
-	}
-
-	// Ensure sandbox-exec helper is found
-	setupSandboxExecPath(b)
-
-	// Suppress sandbox stderr output during benchmarks
-	restore := suppressOutput()
-	defer restore()
-
-	profilePath := filepath.Join(b.TempDir(), "sandbox.sb")
-	mapper := NewMapper(profilePath)
-
-	// Minimal rule (single rule)
-	enabled := true
-	rule := rules.Rule{
-		Name:       "test-rule",
-		Enabled:    &enabled,
-		Block:      rules.Block{Paths: []string{"**/.env"}},
-		Operations: []rules.Operation{rules.OpRead},
-		Message:    "test",
-	}
-	_ = mapper.AddRule(rule)
-
-	sb := New(mapper)
-
-	// Benchmark simple commands
-	commands := [][]string{
-		{"true"},
-		{"echo", "hello"},
-		{"ls", "/tmp"},
-	}
-
-	for _, cmd := range commands {
-		name := cmd[0]
-		b.Run("bare_"+name, func(b *testing.B) {
-			b.ReportAllocs()
-			for i := 0; i < b.N; i++ {
-				c := exec.Command(cmd[0], cmd[1:]...)
-				c.Stdout = io.Discard
-				c.Stderr = io.Discard
-				_ = c.Run()
-			}
-		})
-
-		b.Run("sandbox_"+name, func(b *testing.B) {
-			b.ReportAllocs()
-			for i := 0; i < b.N; i++ {
-				_, _ = sb.Wrap(cmd)
-			}
-		})
-	}
-}
-
 // BenchmarkAllBuiltinRules benchmarks sandbox with all builtin rules loaded.
 // Includes both valid (safe) and malicious commands to verify behavior.
 func BenchmarkAllBuiltinRules(b *testing.B) {
@@ -444,8 +378,8 @@ func BenchmarkAllBuiltinRules(b *testing.B) {
 		b.Fatal("Sandbox not supported: requires Linux 5.13+ with Landlock")
 	}
 
-	// Ensure sandbox-exec helper is found
-	setupSandboxExecPath(b)
+	// Ensure bakelens-sandbox helper is found
+	setupBakelensSandboxPath(b)
 
 	restore := suppressOutput()
 	defer restore()
@@ -467,9 +401,9 @@ func BenchmarkAllBuiltinRules(b *testing.B) {
 
 	profilePath := filepath.Join(b.TempDir(), "sandbox.sb")
 	mapper := NewMapper(profilePath)
-	for _, rule := range builtinRules {
-		if rule.IsEnabled() {
-			_ = mapper.AddRule(rule)
+	for i := range builtinRules {
+		if builtinRules[i].IsEnabled() {
+			_ = mapper.AddRule(&builtinRules[i])
 		}
 	}
 	sb := New(mapper)
@@ -517,143 +451,40 @@ func BenchmarkAllBuiltinRules(b *testing.B) {
 	}
 }
 
-// BenchmarkMapperOperations benchmarks mapper add/remove.
-func BenchmarkMapperOperations(b *testing.B) {
-	b.ReportAllocs()
-	enabled := true
-	b.Run("add_rule", func(b *testing.B) {
-		b.ReportAllocs()
-		for i := 0; i < b.N; i++ {
-			profilePath := filepath.Join(b.TempDir(), "sandbox.sb")
-			mapper := NewMapper(profilePath)
-
-			rule := rules.Rule{
-				Name:       "test-rule",
-				Enabled:    &enabled,
-				Block:      rules.Block{Paths: []string{"**/.env"}},
-				Operations: []rules.Operation{rules.OpRead},
-				Message:    "test",
-			}
-			_ = mapper.AddRule(rule)
-		}
-	})
-
-	b.Run("remove_rule", func(b *testing.B) {
-		b.ReportAllocs()
-		profilePath := filepath.Join(b.TempDir(), "sandbox.sb")
-		mapper := NewMapper(profilePath)
-
-		rule := rules.Rule{
-			Name:       "test-rule",
-			Enabled:    &enabled,
-			Block:      rules.Block{Paths: []string{"**/.env"}},
-			Operations: []rules.Operation{rules.OpRead},
-			Message:    "test",
-		}
-
-		b.ResetTimer()
-		for i := 0; i < b.N; i++ {
-			_ = mapper.AddRule(rule)
-			_ = mapper.RemoveRule("test-rule")
-		}
-	})
-}
-
-// BenchmarkConsistencyCheck benchmarks consistency checking.
-func BenchmarkConsistencyCheck(b *testing.B) {
-	b.ReportAllocs()
-	profilePath := filepath.Join(b.TempDir(), "sandbox.sb")
-	mapper := NewMapper(profilePath)
-
-	loader := rules.NewLoader("")
-	builtinRules, _ := loader.LoadBuiltin()
-
-	for _, rule := range builtinRules {
-		if rule.IsEnabled() {
-			_ = mapper.AddRule(rule)
-		}
-	}
-
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		_ = mapper.CheckConsistency(builtinRules)
-	}
-}
-
-// BenchmarkProfileParsing benchmarks profile file parsing.
-func BenchmarkProfileParsing(b *testing.B) {
-	b.ReportAllocs()
-	// Create a realistic profile
-	profile := `; AgentShepherd Sandbox Profile
-(version 1)
-(allow default)
-
-; --- RULE: block-env-file-access ---
-(deny file-read* (regex #"\.env$"))
-(deny file-write* (regex #"\.env$"))
-; --- END RULE: block-env-file-access ---
-
-; --- RULE: block-ssh-key-access ---
-(deny file-read* (regex #"\.ssh/(id_rsa|id_ed25519)$"))
-; --- END RULE: block-ssh-key-access ---
-
-; --- RULE: block-credentials ---
-(deny file-read* (regex #"credentials\.json$"))
-(deny file-read* (regex #"secrets\.yaml$"))
-; --- END RULE: block-credentials ---
-`
-
-	profilePath := filepath.Join(b.TempDir(), "sandbox.sb")
-	_ = os.WriteFile(profilePath, []byte(profile), 0644)
-
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		mapper := NewMapper(profilePath)
-		_ = mapper.LoadFromFile()
-	}
-}
-
 // BenchmarkTranslateRule benchmarks rule translation.
 func BenchmarkTranslateRule(b *testing.B) {
 	b.ReportAllocs()
-	enabled := true
-	testRules := []struct {
+	translateBenchRules := []struct {
 		name string
-		rule rules.Rule
+		rule SecurityRule
 	}{
 		{
 			name: "single_path",
-			rule: rules.Rule{
-				Name:       "test",
-				Enabled:    &enabled,
-				Block:      rules.Block{Paths: []string{"**/.env"}},
-				Operations: []rules.Operation{rules.OpRead},
-				Message:    "test",
+			rule: &testRule{
+				name:       "test",
+				paths:      []string{"**/.env"},
+				operations: []string{"read"},
 			},
 		},
 		{
 			name: "multiple_paths",
-			rule: rules.Rule{
-				Name:       "test",
-				Enabled:    &enabled,
-				Block:      rules.Block{Paths: []string{"**/.env", "**/.ssh/*", "**/credentials*"}},
-				Operations: []rules.Operation{rules.OpRead, rules.OpWrite},
-				Message:    "test",
+			rule: &testRule{
+				name:       "test",
+				paths:      []string{"**/.env", "**/.ssh/*", "**/credentials*"},
+				operations: []string{"read", "write"},
 			},
 		},
 		{
 			name: "all_operations",
-			rule: rules.Rule{
-				Name:       "test",
-				Enabled:    &enabled,
-				Block:      rules.Block{Paths: []string{"/etc"}},
-				Operations: []rules.Operation{rules.OpRead, rules.OpWrite, rules.OpDelete, rules.OpCopy, rules.OpMove},
-				Message:    "test",
+			rule: &testRule{
+				name:       "test",
+				paths:      []string{"/etc"},
+				operations: []string{"read", "write", "delete", "copy", "move"},
 			},
 		},
 	}
 
-	for _, tc := range testRules {
+	for _, tc := range translateBenchRules {
 		b.Run(tc.name, func(b *testing.B) {
 			b.ReportAllocs()
 			for i := 0; i < b.N; i++ {
@@ -663,16 +494,44 @@ func BenchmarkTranslateRule(b *testing.B) {
 	}
 }
 
+// BenchmarkTranslateToBPF benchmarks BPF rule translation (uses full normalizer).
+func BenchmarkTranslateToBPF(b *testing.B) {
+	b.ReportAllocs()
+	allRules := []SecurityRule{
+		&testRule{
+			name:       "env-files",
+			paths:      []string{"**/.env", "**/.env.*"},
+			except:     []string{"**/.env.example"},
+			operations: []string{"read"},
+		},
+		&testRule{
+			name:       "ssh-keys",
+			paths:      []string{"~/.ssh/id_*", "~/.ssh/authorized_keys"},
+			operations: []string{"read", "write"},
+		},
+		&testRule{
+			name:       "system-files",
+			paths:      []string{"/etc/shadow", "/etc/passwd"},
+			operations: []string{"read", "write", "delete"},
+		},
+	}
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = TranslateToBPF(allRules)
+	}
+}
+
 // TestParentProcessNotRestricted verifies that the parent (Go test process)
 // is not restricted by Landlock after running sandbox commands.
-// This is the critical fix from the C helper approach.
+// This is the critical fix from the helper approach.
 func TestParentProcessNotRestricted(t *testing.T) {
 	if !IsSupported() {
 		t.Fatal("Sandbox not supported: requires Linux 5.13+ with Landlock")
 	}
 
-	// Ensure sandbox-exec helper is found
-	setupSandboxExecPath(t)
+	// Ensure bakelens-sandbox helper is found
+	setupBakelensSandboxPath(t)
 
 	// Create sandbox
 	profilePath := filepath.Join(t.TempDir(), "sandbox.sb")

@@ -6,10 +6,10 @@ import (
 	"io"
 	"sync"
 
-	"github.com/AgentShepherd/agentshepherd/internal/rules"
-	"github.com/AgentShepherd/agentshepherd/internal/security"
-	"github.com/AgentShepherd/agentshepherd/internal/telemetry"
-	"github.com/AgentShepherd/agentshepherd/internal/types"
+	"github.com/BakeLens/crust/internal/rules"
+	"github.com/BakeLens/crust/internal/security"
+	"github.com/BakeLens/crust/internal/telemetry"
+	"github.com/BakeLens/crust/internal/types"
 )
 
 // SSEReader wraps a response body to extract token usage from SSE streams.
@@ -169,11 +169,14 @@ func (r *SSEReader) processBuffer() {
 func (r *SSEReader) parseSSEEvent(event []byte) {
 	lines := bytes.Split(event, []byte("\n"))
 
+	var eventType string
 	var dataLine []byte
 	for _, line := range lines {
 		line = bytes.TrimSuffix(line, []byte("\r"))
 
-		if bytes.HasPrefix(line, []byte("data:")) {
+		if bytes.HasPrefix(line, []byte("event:")) {
+			eventType = string(bytes.TrimSpace(bytes.TrimPrefix(line, []byte("event:"))))
+		} else if bytes.HasPrefix(line, []byte("data:")) {
 			dataLine = bytes.TrimPrefix(line, []byte("data:"))
 			dataLine = bytes.TrimPrefix(dataLine, []byte(" "))
 		}
@@ -188,7 +191,7 @@ func (r *SSEReader) parseSSEEvent(event []byte) {
 	}
 
 	// Use unified parser
-	result := r.parser.ParseEvent(dataLine, r.apiType)
+	result := r.parser.ParseEvent(eventType, dataLine, r.apiType)
 
 	r.mu.Lock()
 	defer r.mu.Unlock()

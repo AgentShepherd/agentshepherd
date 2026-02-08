@@ -7,9 +7,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/AgentShepherd/agentshepherd/internal/rules"
-	"github.com/AgentShepherd/agentshepherd/internal/telemetry"
-	"github.com/AgentShepherd/agentshepherd/internal/types"
+	"github.com/BakeLens/crust/internal/rules"
+	"github.com/BakeLens/crust/internal/telemetry"
+	"github.com/BakeLens/crust/internal/types"
 )
 
 // Manager manages the security and telemetry module components
@@ -30,7 +30,10 @@ type Manager struct {
 	wg            sync.WaitGroup
 }
 
-var globalManager *Manager
+var (
+	globalManager   *Manager
+	globalManagerMu sync.RWMutex
+)
 
 // Config holds manager configuration
 type Config struct {
@@ -112,7 +115,9 @@ func Init(cfg Config) (*Manager, error) {
 		go m.cleanupLoop()
 	}
 
+	globalManagerMu.Lock()
 	globalManager = m
+	globalManagerMu.Unlock()
 	return m, nil
 }
 
@@ -181,15 +186,20 @@ func (m *Manager) GetStorage() *telemetry.Storage {
 
 // GetGlobalManager returns the global manager
 func GetGlobalManager() *Manager {
+	globalManagerMu.RLock()
+	defer globalManagerMu.RUnlock()
 	return globalManager
 }
 
 // GetGlobalInterceptor returns the global interceptor (convenience function)
 func GetGlobalInterceptor() *Interceptor {
-	if globalManager == nil {
+	globalManagerMu.RLock()
+	m := globalManager
+	globalManagerMu.RUnlock()
+	if m == nil {
 		return nil
 	}
-	return globalManager.interceptor
+	return m.interceptor
 }
 
 // InterceptionConfig holds configuration for security interception

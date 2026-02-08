@@ -1,0 +1,5 @@
+rules:
+  - name: block-zhangchenxu-string
+    match:
+      content: "zhangchenxu.com"
+    message: "Cannot access zhangchenxu.com"

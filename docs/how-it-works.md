@@ -5,11 +5,11 @@
 ```
                     REQUEST SIDE                         RESPONSE SIDE
                          │                                    │
-Agent Request ──▶ [Layer 0: History Scan] ──▶ LLM ──▶ [Layer 1: Rules] ──▶ [Layer 2: Sandbox] ──▶ Execute
-                         │                                    │                   │
-                      ↓ BLOCK                              ↓ BLOCK            ↓ BLOCK
-                   (14-30μs)                             (14-30μs)          (kernel)
-               "Bad agent detected"                   "Action blocked"    Kernel EACCES
+Agent Request ──▶ [Layer 0: History Scan] ──▶ LLM ──▶ [Layer 1: Rules] ──▶ Execute
+                         │                                    │
+                      ↓ BLOCK                              ↓ BLOCK
+                   (14-30μs)                             (14-30μs)
+               "Bad agent detected"                   "Action blocked"
 
 Layer 1 Rule Evaluation Order:
   1. Operation-based Rules → path/command/host matching for known tools
@@ -19,8 +19,6 @@ Layer 1 Rule Evaluation Order:
 **Layer 0 (Request History):** Scans tool_calls in conversation history. Catches "bad agent" patterns where malicious actions already occurred in past turns.
 
 **Layer 1 (Response Rules):** Scans LLM-generated tool_calls in responses. Fast pattern matching with friendly error messages.
-
-**Layer 2 (Sandbox):** Kernel-level enforcement via Landlock/Seatbelt. Catches bypasses that slip through rules.
 
 ---
 
@@ -62,17 +60,15 @@ Layer 1 Rule Evaluation Order:
 
 ## When Each Layer Blocks
 
-| Attack | Layer 0 | Layer 1 | Layer 2 |
-|--------|---------|---------|---------|
-| Bad agent with secrets in history | ✅ Blocked | - | - |
-| Poisoned conversation replay | ✅ Blocked | - | - |
-| LLM generates `cat .env` | - | ✅ Blocked | - |
-| LLM generates `rm -rf /etc` | - | ✅ Blocked | - |
-| `$(cat .env)` obfuscation | - | ✅ Blocked | - |
-| `sh -c "cat .env"` | - | ⚠️ May miss | ✅ Blocked |
-| Symlink bypass | - | ✅ Blocked (composite) | - |
-| MCP plugin (e.g. Playwright) | - | ✅ Blocked (content-only) | - |
-| Direct syscall | - | ❌ Can't see | ✅ Blocked |
+| Attack | Layer 0 | Layer 1 |
+|--------|---------|---------|
+| Bad agent with secrets in history | ✅ Blocked | - |
+| Poisoned conversation replay | ✅ Blocked | - |
+| LLM generates `cat .env` | - | ✅ Blocked |
+| LLM generates `rm -rf /etc` | - | ✅ Blocked |
+| `$(cat .env)` obfuscation | - | ✅ Blocked |
+| Symlink bypass | - | ✅ Blocked (composite) |
+| MCP plugin (e.g. Playwright) | - | ✅ Blocked (content-only) |
 
 ---
 
@@ -101,8 +97,3 @@ The rule engine can protect against various attack vectors:
 
 See `internal/rules/builtin/security.yaml` for actual built-in rules.
 
----
-
-## Goal
-
-Layer 2 blocks → 0 (all caught by rules with friendly messages)
