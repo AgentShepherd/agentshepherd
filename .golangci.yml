@@ -52,15 +52,15 @@ linters-settings:
       # HTTP response body (often in defer)
       - (*net/http.Response).Body.Close
       # Daemon PID file cleanup (best effort)
-      - github.com/AgentShepherd/agentshepherd/internal/daemon.RemovePID
+      - github.com/BakeLens/crust/internal/daemon.RemovePID
       # Telemetry stats (best effort, non-critical)
       - (database/sql.Result).RowsAffected
       # TUI user input (best effort)
       - (*bufio.Reader).ReadString
       # Shutdown operations (best effort cleanup)
-      - (*github.com/AgentShepherd/agentshepherd/internal/security.Manager).Shutdown
-      - (*github.com/AgentShepherd/agentshepherd/internal/telemetry.Provider).Shutdown
-      - (*github.com/AgentShepherd/agentshepherd/internal/rules.Watcher).Stop
+      - (*github.com/BakeLens/crust/internal/security.Manager).Shutdown
+      - (*github.com/BakeLens/crust/internal/telemetry.Provider).Shutdown
+      - (*github.com/BakeLens/crust/internal/rules.Watcher).Stop
       # HTTP write to client (can't recover if client disconnects)
       - (net/http.ResponseWriter).Write
       - io.Copy

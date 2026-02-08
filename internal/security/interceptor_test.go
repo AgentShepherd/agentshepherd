@@ -7,9 +7,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/AgentShepherd/agentshepherd/internal/rules"
-	"github.com/AgentShepherd/agentshepherd/internal/telemetry"
-	"github.com/AgentShepherd/agentshepherd/internal/types"
+	"github.com/BakeLens/crust/internal/rules"
+	"github.com/BakeLens/crust/internal/telemetry"
+	"github.com/BakeLens/crust/internal/types"
 )
 
 // createOpenAIResponse creates a test OpenAI response JSON
@@ -209,7 +209,7 @@ rules:
 				"trace-1",
 				"session-1",
 				"gpt-4",
-				types.APITypeOpenAI,
+				types.APITypeOpenAICompletion,
 				tt.blockMode,
 			)
 
@@ -312,7 +312,7 @@ rules:
 		"trace-1",
 		"session-1",
 		"gpt-4",
-		types.APITypeOpenAI,
+		types.APITypeOpenAICompletion,
 		types.BlockModeRemove,
 	)
 
@@ -386,7 +386,7 @@ func TestInterceptOpenAIResponse_EmptyResponse(t *testing.T) {
 				"trace-1",
 				"session-1",
 				"gpt-4",
-				types.APITypeOpenAI,
+				types.APITypeOpenAICompletion,
 				types.BlockModeRemove,
 			)
 
@@ -440,7 +440,7 @@ rules:
 		"trace-1",
 		"session-1",
 		"gpt-4",
-		types.APITypeOpenAI,
+		types.APITypeOpenAICompletion,
 		types.BlockModeRemove,
 	)
 
@@ -735,7 +735,7 @@ func TestInterceptToolCalls_RoutesToCorrectHandler(t *testing.T) {
 	}{
 		{
 			name:    "routes to OpenAI handler",
-			apiType: types.APITypeOpenAI,
+			apiType: types.APITypeOpenAICompletion,
 		},
 		{
 			name:    "routes to Anthropic handler",
@@ -787,8 +787,8 @@ func TestInterceptOpenAIResponse_NilEngine(t *testing.T) {
 	interceptor := &Interceptor{
 		engine:  nil,
 		storage: nil,
-		enabled: true,
 	}
+	interceptor.enabled.Store(true)
 
 	toolCalls := []openAIToolCall{
 		{
@@ -810,7 +810,7 @@ func TestInterceptOpenAIResponse_NilEngine(t *testing.T) {
 		"trace-1",
 		"session-1",
 		"gpt-4",
-		types.APITypeOpenAI,
+		types.APITypeOpenAICompletion,
 		types.BlockModeRemove,
 	)
 
@@ -843,7 +843,7 @@ func TestBuildWarningContent(t *testing.T) {
 					},
 				},
 			},
-			wantContains: []string{"[SECURITY]", "Bash", "Dangerous command"},
+			wantContains: []string{"[Crust]", "Bash", "Dangerous command"},
 		},
 		{
 			name: "multiple blocked calls",
@@ -865,7 +865,7 @@ func TestBuildWarningContent(t *testing.T) {
 					},
 				},
 			},
-			wantContains: []string{"[SECURITY]", "Bash", "Read", "Blocked rm", "Blocked credential read"},
+			wantContains: []string{"[Crust]", "Bash", "Read", "Blocked rm", "Blocked credential read"},
 		},
 		{
 			name: "blocked call without message",
@@ -877,17 +877,17 @@ func TestBuildWarningContent(t *testing.T) {
 					MatchResult: rules.MatchResult{},
 				},
 			},
-			wantContains: []string{"[SECURITY]", "Write"},
+			wantContains: []string{"[Crust]", "Write"},
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := buildWarningContent(tt.blockedCalls)
+			result := BuildWarningContent(tt.blockedCalls)
 
 			for _, want := range tt.wantContains {
 				if !strings.Contains(result, want) {
-					t.Errorf("buildWarningContent() = %q, want to contain %q", result, want)
+					t.Errorf("BuildWarningContent() = %q, want to contain %q", result, want)
 				}
 			}
 		})
@@ -945,7 +945,7 @@ func TestBuildReplaceWarning(t *testing.T) {
 	result := buildReplaceWarning(blockedCalls)
 
 	wantContains := []string{
-		"[AgentShepherd]",
+		"[Crust]",
 		"blocked",
 		"Bash",
 		"Dangerous",
@@ -1032,7 +1032,7 @@ rules:
 		"trace-1",
 		"session-1",
 		"gpt-4",
-		types.APITypeOpenAI,
+		types.APITypeOpenAICompletion,
 		types.BlockModeRemove,
 	)
 
@@ -1050,7 +1050,7 @@ rules:
 	if !strings.Contains(content, existingContent) {
 		t.Errorf("Original content should be preserved, got: %s", content)
 	}
-	if !strings.Contains(content, "[SECURITY]") {
+	if !strings.Contains(content, "[Crust]") {
 		t.Errorf("Warning should be appended, got: %s", content)
 	}
 }
@@ -1089,7 +1089,7 @@ rules:
 		"trace-1",
 		"session-1",
 		"gpt-4",
-		types.APITypeOpenAI,
+		types.APITypeOpenAICompletion,
 		types.BlockModeRemove,
 	)
 
@@ -1157,8 +1157,8 @@ func TestInterceptAnthropicResponse_NilEngine(t *testing.T) {
 	interceptor := &Interceptor{
 		engine:  nil,
 		storage: nil,
-		enabled: true,
 	}
+	interceptor.enabled.Store(true)
 
 	content := []anthropicContentBlock{
 		{
@@ -1271,7 +1271,7 @@ rules:
 		"trace-1",
 		"session-1",
 		"gpt-4",
-		types.APITypeOpenAI,
+		types.APITypeOpenAICompletion,
 		types.BlockModeReplace,
 	)
 
@@ -1285,9 +1285,9 @@ rules:
 	}
 
 	content := parsedResp.Choices[0].Message.Content
-	// In replace mode, should contain AgentShepherd message
-	if !strings.Contains(content, "[AgentShepherd]") {
-		t.Errorf("Replace mode content should contain [AgentShepherd], got: %s", content)
+	// In replace mode, should contain Crust message
+	if !strings.Contains(content, "[Crust]") {
+		t.Errorf("Replace mode content should contain [Crust], got: %s", content)
 	}
 	if !strings.Contains(content, "Security violation detected") {
 		t.Errorf("Replace mode content should contain rule message, got: %s", content)
@@ -1340,7 +1340,7 @@ rules:
 	// In replace mode, should have a text block with the replacement message
 	hasReplacementText := false
 	for _, block := range parsedResp.Content {
-		if block.Type == "text" && strings.Contains(block.Text, "[AgentShepherd]") {
+		if block.Type == "text" && strings.Contains(block.Text, "[Crust]") {
 			hasReplacementText = true
 			if !strings.Contains(block.Text, "Security violation detected") {
 				t.Errorf("Replacement text should contain rule message, got: %s", block.Text)
@@ -1349,7 +1349,7 @@ rules:
 	}
 
 	if !hasReplacementText {
-		t.Error("Replace mode should add text block with AgentShepherd message")
+		t.Error("Replace mode should add text block with Crust message")
 	}
 
 	// Should have no tool_use blocks (was replaced)
@@ -1406,7 +1406,7 @@ rules:
 		"trace-1",
 		"session-1",
 		"gpt-4",
-		types.APITypeOpenAI,
+		types.APITypeOpenAICompletion,
 		types.BlockModeRemove,
 	)
 

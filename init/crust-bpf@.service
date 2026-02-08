@@ -1,0 +1,33 @@
+[Unit]
+Description=Crust BPF Helper for %i
+Documentation=https://getcrust.io
+After=local-fs.target
+ConditionPathExists=/usr/libexec/crust/bpf-helper
+
+[Service]
+Type=simple
+ExecStart=/usr/libexec/crust/bpf-helper --socket /home/%i/.crust/bpf.sock --uid %U
+ExecStartPre=/bin/mkdir -p /home/%i/.crust
+
+User=root
+
+# Security hardening
+ProtectSystem=strict
+ProtectHome=no
+ReadWritePaths=/home/%i/.crust
+PrivateTmp=yes
+NoNewPrivileges=no
+CapabilityBoundingSet=CAP_BPF CAP_SYS_ADMIN CAP_DAC_OVERRIDE
+AmbientCapabilities=CAP_BPF CAP_SYS_ADMIN
+
+# Restart policy
+Restart=on-failure
+RestartSec=5
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=crust-bpf
+
+[Install]
+WantedBy=multi-user.target

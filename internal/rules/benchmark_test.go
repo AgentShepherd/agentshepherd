@@ -102,31 +102,6 @@ func BenchmarkRuleMatchingParallel(b *testing.B) {
 	})
 }
 
-// BenchmarkJSONParsing benchmarks JSON argument extraction.
-func BenchmarkJSONParsing(b *testing.B) {
-	b.ReportAllocs()
-	testCases := []struct {
-		name string
-		json string
-		path string
-	}{
-		{"simple", `{"command": "ls"}`, "command"},
-		{"nested", `{"options": {"path": "/etc"}}`, "options.path"},
-		{"large", `{"command": "very long command with lots of text and arguments that might slow things down"}`, "command"},
-	}
-
-	for _, tc := range testCases {
-		b.Run(tc.name, func(b *testing.B) {
-			b.ReportAllocs()
-			data := json.RawMessage(tc.json)
-			b.ResetTimer()
-			for i := 0; i < b.N; i++ {
-				_ = extractJSONField(data, tc.path)
-			}
-		})
-	}
-}
-
 // BenchmarkRegexMatching benchmarks regex pattern matching.
 func BenchmarkRegexMatching(b *testing.B) {
 	b.ReportAllocs()
@@ -192,34 +167,6 @@ func BenchmarkEngineCreation(b *testing.B) {
 	})
 }
 
-// BenchmarkContainsRegex benchmarks regex detection.
-func BenchmarkContainsRegex(b *testing.B) {
-	b.ReportAllocs()
-	patterns := []string{
-		"simple",
-		`\.env$`,
-		`[a-zA-Z0-9]+`,
-		`^/proc/[0-9]+/cmdline$`,
-		"no-metacharacters-here",
-	}
-
-	for _, p := range patterns {
-		b.Run(p[:min(15, len(p))], func(b *testing.B) {
-			b.ReportAllocs()
-			for i := 0; i < b.N; i++ {
-				_ = containsRegex(p)
-			}
-		})
-	}
-}
-
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}
-
 // BenchmarkNormalizePathsInCommand benchmarks path normalization.
 func BenchmarkNormalizePathsInCommand(b *testing.B) {
 	b.ReportAllocs()
@@ -244,29 +191,6 @@ func BenchmarkNormalizePathsInCommand(b *testing.B) {
 			b.ReportAllocs()
 			for i := 0; i < b.N; i++ {
 				_ = sanitizer.SanitizeCommand(tc.cmd)
-			}
-		})
-	}
-}
-
-// BenchmarkNormalizePathsRegexOnly benchmarks regex-only approach for comparison.
-func BenchmarkNormalizePathsRegexOnly(b *testing.B) {
-	b.ReportAllocs()
-	commands := []struct {
-		name string
-		cmd  string
-	}{
-		{"simple", "ls -la /tmp"},
-		{"multiple_paths", "cp /etc/passwd /tmp/backup"},
-		{"path_traversal", "cat /etc/../etc/./passwd"},
-		{"no_path", "echo hello world"},
-	}
-
-	for _, tc := range commands {
-		b.Run(tc.name, func(b *testing.B) {
-			b.ReportAllocs()
-			for i := 0; i < b.N; i++ {
-				_ = normalizePathsRegex(tc.cmd)
 			}
 		})
 	}
@@ -363,86 +287,32 @@ func BenchmarkNormalizer_Combined(b *testing.B) {
 	}
 }
 
-// =============================================================================
-// Matcher Benchmarks
-// =============================================================================
-
-// BenchmarkMatcher_ExactPath benchmarks exact path matching.
-func BenchmarkMatcher_ExactPath(b *testing.B) {
+// BenchmarkNormalizer_Pattern benchmarks NormalizePattern (glob-safe normalization for sandbox).
+func BenchmarkNormalizer_Pattern(b *testing.B) {
 	b.ReportAllocs()
-	pattern := "/home/user/.env"
-	paths := []string{"/home/user/.env"}
+	normalizer := NewNormalizerWithEnv("/home/user", "/home/user/project", map[string]string{
+		"HOME":   "/home/user",
+		"TMPDIR": "/tmp/user-tmp",
+	})
 
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		_ = matchPath(pattern, paths)
-	}
-}
-
-// BenchmarkMatcher_SimpleGlob benchmarks simple glob pattern matching.
-func BenchmarkMatcher_SimpleGlob(b *testing.B) {
-	b.ReportAllocs()
-	pattern := "**/.env"
-	paths := []string{"/home/user/project/.env"}
-
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		_ = matchPath(pattern, paths)
-	}
-}
-
-// BenchmarkMatcher_RecursiveGlob benchmarks recursive glob matching.
-func BenchmarkMatcher_RecursiveGlob(b *testing.B) {
-	b.ReportAllocs()
-	pattern := "/home/**/.ssh/id_*"
-	paths := []string{"/home/user/.ssh/id_rsa"}
-
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		_ = matchPath(pattern, paths)
-	}
-}
-
-// BenchmarkMatcher_Regex benchmarks regex pattern matching.
-func BenchmarkMatcher_Regex(b *testing.B) {
-	b.ReportAllocs()
-	pattern := `re:^/proc/[0-9]+/cmdline$`
-	paths := []string{"/proc/12345/cmdline"}
-
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		_ = matchPath(pattern, paths)
-	}
-}
-
-// BenchmarkMatcher_NoMatch benchmarks when pattern doesn't match.
-func BenchmarkMatcher_NoMatch(b *testing.B) {
-	b.ReportAllocs()
-	pattern := "**/.env"
-	paths := []string{"/home/user/project/main.go", "/tmp/data.txt"}
-
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		_ = matchPath(pattern, paths)
-	}
-}
-
-// BenchmarkMatcher_ManyPaths benchmarks matching against many paths.
-func BenchmarkMatcher_ManyPaths(b *testing.B) {
-	b.ReportAllocs()
-	pattern := "**/.env*"
-	paths := []string{
-		"/home/user/project/main.go",
-		"/home/user/project/README.md",
-		"/tmp/data.txt",
-		"/var/log/syslog",
-		"/etc/passwd",
-		"/home/user/.bashrc",
-		"/home/user/project/.env.local", // match
+	patterns := []struct {
+		name    string
+		pattern string
+	}{
+		{"glob_simple", "**/.env"},
+		{"glob_with_tilde", "~/.ssh/id_*"},
+		{"glob_with_envvar", "$TMPDIR/cache/**"},
+		{"glob_recursive", "**/.aws/credentials"},
+		{"absolute", "/etc/shadow"},
 	}
 
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		_ = matchPath(pattern, paths)
+	for _, tc := range patterns {
+		b.Run(tc.name, func(b *testing.B) {
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				_ = normalizer.NormalizePattern(tc.pattern)
+			}
+		})
 	}
 }

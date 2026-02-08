@@ -143,10 +143,10 @@ func isValidAction(action string) bool {
 // ToRule converts RuleConfig to the internal Rule type
 func (r *RuleConfig) ToRule() *Rule {
 	rule := &Rule{
-		Name:       r.Name,
-		Message:    r.Message,
-		Severity:   r.Severity,
-		Operations: parseOperations(r.Actions),
+		Name:     r.Name,
+		Message:  r.Message,
+		Severity: r.Severity,
+		Actions:  parseActions(r.Actions),
 	}
 
 	// Simple block format
@@ -226,7 +226,7 @@ func generateName(pattern string) string {
 	return "block-" + name
 }
 
-func parseOperations(ops []string) []Operation {
+func parseActions(ops []string) []Operation {
 	if len(ops) == 0 {
 		return []Operation{OpRead, OpWrite, OpDelete, OpCopy, OpMove, OpExecute, OpNetwork}
 	}

@@ -5,8 +5,8 @@ import (
 	"bytes"
 	"encoding/json"
 
-	"github.com/AgentShepherd/agentshepherd/internal/rules"
-	"github.com/AgentShepherd/agentshepherd/internal/types"
+	"github.com/BakeLens/crust/internal/rules"
+	"github.com/BakeLens/crust/internal/types"
 )
 
 // StreamingToolCall represents a tool call being accumulated from SSE events.
@@ -99,6 +99,43 @@ type OpenAIUsage struct {
 	PromptTokens     int64 `json:"prompt_tokens"`
 	CompletionTokens int64 `json:"completion_tokens"`
 	TotalTokens      int64 `json:"total_tokens"`
+}
+
+// OpenAI Responses API SSE event structures
+
+// OpenAIResponsesOutputItemAdded represents the response.output_item.added event.
+type OpenAIResponsesOutputItemAdded struct {
+	Item struct {
+		Type   string `json:"type"`    // "function_call"
+		CallID string `json:"call_id"` // Tool call ID
+		Name   string `json:"name"`    // Function name
+		ID     string `json:"id"`      // Output item ID
+		Index  int    `json:"index"`   // Output index (not present in all events, but included when available)
+	} `json:"item"`
+	OutputIndex int `json:"output_index"`
+}
+
+// OpenAIResponsesFunctionCallArgsDelta represents the response.function_call_arguments.delta event.
+type OpenAIResponsesFunctionCallArgsDelta struct {
+	Delta       string `json:"delta"`
+	OutputIndex int    `json:"output_index"`
+	ItemID      string `json:"item_id"`
+}
+
+// OpenAIResponsesOutputTextDelta represents the response.output_text.delta event.
+type OpenAIResponsesOutputTextDelta struct {
+	Delta       string `json:"delta"`
+	OutputIndex int    `json:"output_index"`
+}
+
+// OpenAIResponsesCompleted represents the response.completed event.
+type OpenAIResponsesCompleted struct {
+	Response struct {
+		Usage struct {
+			InputTokens  int64 `json:"input_tokens"`
+			OutputTokens int64 `json:"output_tokens"`
+		} `json:"usage"`
+	} `json:"response"`
 }
 
 // SSEParser provides unified SSE parsing with optional sanitization.
@@ -239,15 +276,69 @@ func (p *SSEParser) ParseOpenAIEvent(data []byte) ParseResult {
 }
 
 // ParseEvent parses an SSE event based on API type.
-func (p *SSEParser) ParseEvent(data []byte, apiType types.APIType) ParseResult {
+// eventType is the SSE "event:" field; used by the Responses API for dispatch.
+// Anthropic and OpenAI Chat Completions callers may pass "" (they ignore it).
+func (p *SSEParser) ParseEvent(eventType string, data []byte, apiType types.APIType) ParseResult {
 	switch apiType {
 	case types.APITypeAnthropic:
 		return p.ParseAnthropicEvent(data)
-	case types.APITypeOpenAI:
+	case types.APITypeOpenAICompletion:
 		return p.ParseOpenAIEvent(data)
+	case types.APITypeOpenAIResponses:
+		return p.ParseOpenAIResponsesEvent(eventType, data)
 	default:
 		return ParseResult{}
 	}
+}
+
+// ParseOpenAIResponsesEvent parses an OpenAI Responses API SSE event.
+// Dispatches on the eventType string (from the SSE "event:" line).
+func (p *SSEParser) ParseOpenAIResponsesEvent(eventType string, data []byte) ParseResult {
+	var result ParseResult
+
+	switch eventType {
+	case "response.output_item.added":
+		var event OpenAIResponsesOutputItemAdded
+		if err := json.Unmarshal(data, &event); err == nil {
+			if event.Item.Type == "function_call" {
+				name := event.Item.Name
+				if p.sanitizer != nil && name != "" {
+					name = p.sanitizer.SanitizeToolName(name)
+				}
+				result.ToolCallStart = &ToolCallStartEvent{
+					Index: event.OutputIndex,
+					ID:    event.Item.CallID,
+					Name:  name,
+				}
+			}
+		}
+
+	case "response.function_call_arguments.delta":
+		var event OpenAIResponsesFunctionCallArgsDelta
+		if err := json.Unmarshal(data, &event); err == nil {
+			result.ToolCallDelta = &ToolCallDeltaEvent{
+				Index:       event.OutputIndex,
+				PartialJSON: event.Delta,
+			}
+		}
+
+	case "response.output_text.delta":
+		var event OpenAIResponsesOutputTextDelta
+		if err := json.Unmarshal(data, &event); err == nil {
+			if event.Delta != "" {
+				result.TextContent = event.Delta
+			}
+		}
+
+	case "response.completed":
+		var event OpenAIResponsesCompleted
+		if err := json.Unmarshal(data, &event); err == nil {
+			result.InputTokens = event.Response.Usage.InputTokens
+			result.OutputTokens = event.Response.Usage.OutputTokens
+		}
+	}
+
+	return result
 }
 
 // ApplyResultToToolCalls updates a tool call map with the parse result.

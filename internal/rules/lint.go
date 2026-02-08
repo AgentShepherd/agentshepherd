@@ -115,23 +115,23 @@ func (l *Linter) lintRule(rule Rule) []LintIssue {
 		})
 	}
 
-	if len(rule.Operations) == 0 {
+	if len(rule.Actions) == 0 {
 		issues = append(issues, LintIssue{
 			RuleName: rule.Name,
-			Field:    "operations",
+			Field:    "actions",
 			Severity: "error",
-			Message:  "at least one operation is required",
+			Message:  "at least one action is required",
 		})
 	}
 
-	// Check for valid operations
-	for i, op := range rule.Operations {
-		if !ValidOperations[op] {
+	// Check for valid actions
+	for i, op := range rule.Actions {
+		if !ValidActions[op] {
 			issues = append(issues, LintIssue{
 				RuleName: rule.Name,
-				Field:    fmt.Sprintf("operations[%d]", i),
+				Field:    fmt.Sprintf("actions[%d]", i),
 				Severity: "error",
-				Message:  fmt.Sprintf("invalid operation: %s", op),
+				Message:  fmt.Sprintf("invalid action: %s", op),
 			})
 		}
 	}
@@ -179,6 +179,9 @@ func (l *Linter) lintRule(rule Rule) []LintIssue {
 		matchIssues := l.lintMatch(rule.Name, fmt.Sprintf("any[%d]", i), cond)
 		issues = append(issues, matchIssues...)
 	}
+
+	// Try full pattern compilation (catches invalid regex, malformed globs, null bytes, etc.)
+	issues = append(issues, l.lintCompilation(rule)...)
 
 	return issues
 }
@@ -242,6 +245,21 @@ func (l *Linter) lintPathPattern(ruleName, fieldName, pattern string) []LintIssu
 	}
 
 	return issues
+}
+
+// lintCompilation tries to compile the rule's patterns and reports any errors.
+// This catches: null bytes, control characters, invalid regex, malformed globs, regex length limits.
+func (l *Linter) lintCompilation(rule Rule) []LintIssue {
+	_, err := compileOneRule(rule)
+	if err != nil {
+		return []LintIssue{{
+			RuleName: rule.Name,
+			Field:    "patterns",
+			Severity: "error",
+			Message:  err.Error(),
+		}}
+	}
+	return nil
 }
 
 // LintFile loads and lints rules from a YAML file.

@@ -7,6 +7,7 @@ import (
 	"strings"
 	"unicode"
 
+	"golang.org/x/text/unicode/norm"
 	"mvdan.cc/sh/v3/syntax"
 )
 
@@ -334,12 +335,18 @@ func stripControlChars(s string) string {
 }
 
 // normalizeWhitespace collapses multiple whitespace chars to single space.
+// Handles all characters that unicode.IsSpace/strings.TrimSpace considers whitespace,
+// ensuring SanitizeCommand is idempotent.
 func normalizeWhitespace(s string) string {
-	// Replace tabs with spaces
+	// Replace all whitespace variants with regular space
 	s = strings.ReplaceAll(s, "\t", " ")
+	s = strings.ReplaceAll(s, "\n", " ")
+	s = strings.ReplaceAll(s, "\r", " ")
+	s = strings.ReplaceAll(s, "\v", " ")
+	s = strings.ReplaceAll(s, "\f", " ")
 
 	// Collapse multiple spaces
-	spaceRe := regexp.MustCompile(`\s+`)
+	spaceRe := regexp.MustCompile(` {2,}`)
 	return spaceRe.ReplaceAllString(s, " ")
 }
 
@@ -368,19 +375,12 @@ func normalizePath(path string) string {
 	return cleaned
 }
 
-// NormalizeUnicode converts fullwidth characters to ASCII equivalents.
+// NormalizeUnicode applies NFKC normalization and cross-script confusable stripping.
+// NFKC handles fullwidth→ASCII, compatibility decomposition, etc.
+// stripConfusables handles Cyrillic/Greek homoglyphs (а→a, е→e, etc.).
 func NormalizeUnicode(s string) string {
-	return strings.Map(func(r rune) rune {
-		// Fullwidth ASCII variants (U+FF01 to U+FF5E) → ASCII (U+0021 to U+007E)
-		if r >= 0xFF01 && r <= 0xFF5E {
-			return r - 0xFF01 + 0x21
-		}
-		// Fullwidth space
-		if r == 0x3000 {
-			return ' '
-		}
-		return r
-	}, s)
+	s = norm.NFKC.String(s)
+	return stripConfusables(s)
 }
 
 // IsSuspiciousInput checks for common evasion patterns.
@@ -396,6 +396,15 @@ func IsSuspiciousInput(s string) (suspicious bool, reasons []string) {
 		if r >= 0xFF01 && r <= 0xFF5E {
 			suspicious = true
 			reasons = append(reasons, "contains fullwidth characters")
+			break
+		}
+	}
+
+	// Check for cross-script confusable characters
+	for _, r := range s {
+		if _, ok := confusableMap[r]; ok {
+			suspicious = true
+			reasons = append(reasons, "contains cross-script confusable characters")
 			break
 		}
 	}

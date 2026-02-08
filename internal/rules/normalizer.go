@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+
+	"golang.org/x/text/unicode/norm"
 )
 
 // Pre-compiled regexes for environment variable expansion (performance)
@@ -75,6 +77,24 @@ func (n *Normalizer) Normalize(path string) string {
 		return ""
 	}
 
+	// SECURITY: Strip null bytes — C-level syscalls truncate at \x00,
+	// so "/etc/passwd\x00.txt" would access "/etc/passwd" while bypassing
+	// pattern matching on the full string.
+	path = strings.ReplaceAll(path, "\x00", "")
+	if path == "" {
+		return ""
+	}
+
+	// SECURITY: NFKC normalization — maps fullwidth, compatibility, and
+	// decomposed forms to their canonical equivalents. Prevents bypass via
+	// Unicode encoding tricks like fullwidth "/ｅｔｃ/ｐａｓｓｗｄ".
+	path = norm.NFKC.String(path)
+
+	// SECURITY: Strip cross-script confusables — maps Cyrillic/Greek
+	// lookalikes to ASCII. Prevents bypass via homoglyph substitution
+	// like "/etc/pаsswd" (Cyrillic а U+0430).
+	path = stripConfusables(path)
+
 	// Step 1: Expand tilde (~)
 	path = n.expandTilde(path)
 
@@ -105,6 +125,26 @@ func (n *Normalizer) NormalizeAll(paths []string) []string {
 	return result
 }
 
+// NormalizePattern normalizes a glob pattern for sandbox profile generation.
+// Unlike Normalize(), it does NOT convert relative paths to absolute or run
+// filepath.Clean, which would destroy glob syntax like ** and *.
+// It applies: null byte removal, NFKC, confusable stripping, tilde expansion,
+// and environment variable expansion.
+func (n *Normalizer) NormalizePattern(pattern string) string {
+	if pattern == "" {
+		return ""
+	}
+	pattern = strings.ReplaceAll(pattern, "\x00", "")
+	if pattern == "" {
+		return ""
+	}
+	pattern = norm.NFKC.String(pattern)
+	pattern = stripConfusables(pattern)
+	pattern = n.expandTilde(pattern)
+	pattern = n.expandEnvVars(pattern)
+	return pattern
+}
+
 // expandTilde expands ~ at the beginning of a path to the home directory.
 func (n *Normalizer) expandTilde(path string) string {
 	if n.homeDir == "" {
@@ -125,28 +165,35 @@ func (n *Normalizer) expandTilde(path string) string {
 // expandEnvVars expands environment variables in a path.
 // Supports both $VAR and ${VAR} syntax.
 // If a variable doesn't exist, it becomes empty (consistent with shell behavior).
+// SECURITY: Expansion is repeated until stable to prevent nested variable attacks
+// (e.g., "${${A$A}" creating new ${...} patterns after partial expansion).
 func (n *Normalizer) expandEnvVars(path string) string {
-	// Process ${VAR} first, then $VAR to avoid conflicts
-	path = bracedVarRe.ReplaceAllStringFunc(path, func(match string) string {
-		// Extract variable name from ${VAR}
-		varName := match[2 : len(match)-1]
-		if val, ok := n.env[varName]; ok {
-			return val
-		}
-		// Variable not found - return empty string to be consistent with shell behavior
-		return ""
-	})
+	const maxIterations = 5
+	for i := 0; i < maxIterations; i++ {
+		prev := path
 
-	// Pattern for $VAR syntax
-	path = simpleVarRe.ReplaceAllStringFunc(path, func(match string) string {
-		// Extract variable name from $VAR
-		varName := match[1:]
-		if val, ok := n.env[varName]; ok {
-			return val
+		// Process ${VAR} first, then $VAR to avoid conflicts
+		path = bracedVarRe.ReplaceAllStringFunc(path, func(match string) string {
+			varName := match[2 : len(match)-1]
+			if val, ok := n.env[varName]; ok {
+				return val
+			}
+			return ""
+		})
+
+		// Pattern for $VAR syntax
+		path = simpleVarRe.ReplaceAllStringFunc(path, func(match string) string {
+			varName := match[1:]
+			if val, ok := n.env[varName]; ok {
+				return val
+			}
+			return ""
+		})
+
+		if path == prev {
+			break
 		}
-		// Variable not found - return empty string to be consistent with shell behavior
-		return ""
-	})
+	}
 
 	return path
 }
@@ -247,4 +294,62 @@ func (n *Normalizer) NormalizeAllWithSymlinks(paths []string) []string {
 		result[i] = n.NormalizeWithSymlinks(p)
 	}
 	return result
+}
+
+// confusableMap maps the most common cross-script homoglyphs to ASCII.
+// Covers Cyrillic and Greek characters that visually resemble Latin letters.
+var confusableMap = map[rune]rune{
+	// Cyrillic → Latin
+	'\u0430': 'a', // а
+	'\u0435': 'e', // е
+	'\u0456': 'i', // і (Ukrainian)
+	'\u043e': 'o', // о
+	'\u0440': 'p', // р
+	'\u0441': 'c', // с
+	'\u0443': 'y', // у
+	'\u0445': 'x', // х
+	'\u044a': 'b', // ъ (looks like b in some fonts)
+	'\u0410': 'A', // А
+	'\u0412': 'B', // В
+	'\u0415': 'E', // Е
+	'\u041a': 'K', // К
+	'\u041c': 'M', // М
+	'\u041d': 'H', // Н
+	'\u041e': 'O', // О
+	'\u0420': 'P', // Р
+	'\u0421': 'C', // С
+	'\u0422': 'T', // Т
+	'\u0425': 'X', // Х
+	'\u0427': 'Y', // Ч (loose)
+	// Greek → Latin
+	'\u03b1': 'a', // α
+	'\u03b5': 'e', // ε
+	'\u03b9': 'i', // ι
+	'\u03bf': 'o', // ο
+	'\u03c1': 'p', // ρ
+	'\u03c4': 't', // τ (loose)
+	'\u0391': 'A', // Α
+	'\u0392': 'B', // Β
+	'\u0395': 'E', // Ε
+	'\u0397': 'H', // Η
+	'\u0399': 'I', // Ι
+	'\u039a': 'K', // Κ
+	'\u039c': 'M', // Μ
+	'\u039d': 'N', // Ν
+	'\u039f': 'O', // Ο
+	'\u03a1': 'P', // Ρ
+	'\u03a4': 'T', // Τ
+	'\u03a7': 'X', // Χ
+	'\u03a5': 'Y', // Υ
+	'\u0396': 'Z', // Ζ
+}
+
+// stripConfusables replaces cross-script homoglyphs with ASCII equivalents.
+func stripConfusables(s string) string {
+	return strings.Map(func(r rune) rune {
+		if ascii, ok := confusableMap[r]; ok {
+			return ascii
+		}
+		return r
+	}, s)
 }

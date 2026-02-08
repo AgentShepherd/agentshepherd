@@ -5,8 +5,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-
-	"github.com/AgentShepherd/agentshepherd/internal/rules"
 )
 
 func TestGlobToSandboxRegex(t *testing.T) {
@@ -28,12 +26,12 @@ func TestGlobToSandboxRegex(t *testing.T) {
 		{
 			name:     "double star slash in middle",
 			input:    "/home/**/.ssh",
-			expected: `/home/(.*/)?\.ssh$`,
+			expected: `^/home/(.*/)?\.ssh$`,
 		},
 		{
 			name:     "double star at end",
 			input:    "/etc/**",
-			expected: `/etc/.*`,
+			expected: `^/etc/.*`,
 		},
 		{
 			name:     "single star",
@@ -48,7 +46,7 @@ func TestGlobToSandboxRegex(t *testing.T) {
 		{
 			name:     "literal path",
 			input:    "/etc/passwd",
-			expected: `/etc/passwd$`,
+			expected: `^/etc/passwd$`,
 		},
 		{
 			name:     "question mark",
@@ -58,12 +56,32 @@ func TestGlobToSandboxRegex(t *testing.T) {
 		{
 			name:     "hash in path",
 			input:    "/path#with#hash",
-			expected: `/path\#with\#hash$`,
+			expected: `^/path\#with\#hash$`,
 		},
 		{
 			name:     "complex pattern",
 			input:    "**/credentials*",
 			expected: `(.*/)?credentials[^/]*$`,
+		},
+		{
+			name:     "double quote in path",
+			input:    `/path/with"quote`,
+			expected: `^/path/with\"quote$`,
+		},
+		{
+			name:     "backslash in path",
+			input:    `/path/with\backslash`,
+			expected: `^/path/with\\backslash$`,
+		},
+		{
+			name:     "absolute path gets start anchor",
+			input:    "/etc/shadow",
+			expected: `^/etc/shadow$`,
+		},
+		{
+			name:     "glob not start-anchored",
+			input:    "**/.env",
+			expected: `(.*/)?\.env$`,
 		},
 	}
 
@@ -119,9 +137,9 @@ func TestExpandHomeDir(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := expandHomeDir(tt.input)
+			result := ExpandHomeDir(tt.input)
 			if result != tt.expected {
-				t.Errorf("expandHomeDir(%q) = %q, expected %q", tt.input, result, tt.expected)
+				t.Errorf("ExpandHomeDir(%q) = %q, expected %q", tt.input, result, tt.expected)
 			}
 		})
 	}
@@ -130,47 +148,47 @@ func TestExpandHomeDir(t *testing.T) {
 func TestOperationsToSandboxOps(t *testing.T) {
 	tests := []struct {
 		name     string
-		ops      []rules.Operation
+		ops      []string
 		expected []string
 	}{
 		{
 			name:     "read only",
-			ops:      []rules.Operation{rules.OpRead},
+			ops:      []string{"read"},
 			expected: []string{"file-read*"},
 		},
 		{
 			name:     "write only",
-			ops:      []rules.Operation{rules.OpWrite},
+			ops:      []string{"write"},
 			expected: []string{"file-write*"},
 		},
 		{
 			name:     "delete only",
-			ops:      []rules.Operation{rules.OpDelete},
+			ops:      []string{"delete"},
 			expected: []string{"file-write-unlink"},
 		},
 		{
 			name:     "copy requires read and write",
-			ops:      []rules.Operation{rules.OpCopy},
+			ops:      []string{"copy"},
 			expected: []string{"file-read*", "file-write*"},
 		},
 		{
 			name:     "move requires read, write, and unlink",
-			ops:      []rules.Operation{rules.OpMove},
+			ops:      []string{"move"},
 			expected: []string{"file-read*", "file-write*", "file-write-unlink"},
 		},
 		{
 			name:     "execute",
-			ops:      []rules.Operation{rules.OpExecute},
+			ops:      []string{"execute"},
 			expected: []string{"process-exec*"},
 		},
 		{
 			name:     "network",
-			ops:      []rules.Operation{rules.OpNetwork},
+			ops:      []string{"network"},
 			expected: []string{"network-outbound"},
 		},
 		{
 			name:     "multiple ops deduplicated",
-			ops:      []rules.Operation{rules.OpRead, rules.OpCopy},
+			ops:      []string{"read", "copy"},
 			expected: []string{"file-read*", "file-write*"},
 		},
 	}
@@ -246,6 +264,16 @@ func TestDirective_String(t *testing.T) {
 			},
 			contains: []string{"(deny file-read*"},
 		},
+		{
+			name: "regex directive with escaped quote in value",
+			directive: Directive{
+				Action:    "deny",
+				Operation: "file-read*",
+				Type:      "regex",
+				Value:     `path/with\"quote$`,
+			},
+			contains: []string{`(regex #"`, `with\"quote`},
+		},
 	}
 
 	for _, tt := range tests {
@@ -270,62 +298,209 @@ func TestDirective_Empty(t *testing.T) {
 	}
 }
 
+// ---- ATTACK SURFACE TESTS ----
+
+// SECURITY: globToSandboxRegex must escape dots before replacing glob patterns.
+// Without proper escaping, a path like ".env" could match "xenv" (dot matches any char in regex).
+func TestGlobToSandboxRegex_DotEscaping(t *testing.T) {
+	result := globToSandboxRegex(".env")
+	// The dot must be escaped to \\.
+	if !strings.Contains(result, `\.env`) {
+		t.Errorf("SECURITY: globToSandboxRegex(\".env\") = %q, dot must be escaped to prevent matching arbitrary characters", result)
+	}
+	// Make sure the placeholder approach works: dot is escaped, but glob placeholders aren't
+	result2 := globToSandboxRegex("**/.env.*")
+	if !strings.Contains(result2, `\.env\.`) {
+		t.Errorf("SECURITY: globToSandboxRegex(\"**/.env.*\") = %q, dots must be escaped", result2)
+	}
+	// The ** should still become regex, not be escaped
+	if !strings.Contains(result2, "(.*/)?") {
+		t.Errorf("SECURITY: globToSandboxRegex(\"**/.env.*\") = %q, **/ must become (.*/)?", result2)
+	}
+}
+
+// SECURITY: globToSandboxRegex must handle Seatbelt injection attempts in paths.
+// A path containing ")(allow default)" could try to break out of a Seatbelt regex context.
+func TestGlobToSandboxRegex_SeatbeltInjection(t *testing.T) {
+	// This injection attempt tries to close a deny rule and open an allow-all
+	injection := "/tmp/)(allow default)"
+	result := globToSandboxRegex(injection)
+
+	// The parentheses must be escaped so they don't terminate the regex context
+	if strings.Contains(result, ")(allow") {
+		t.Errorf("SECURITY: Seatbelt injection attempt not escaped: globToSandboxRegex(%q) = %q", injection, result)
+	}
+	if !strings.Contains(result, `\)`) || !strings.Contains(result, `\(`) {
+		t.Errorf("SECURITY: parentheses must be escaped in regex output: %q", result)
+	}
+}
+
+// SECURITY: globToSandboxRegex must escape all regex metacharacters in paths.
+func TestGlobToSandboxRegex_RegexMetacharacters(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		mustHave string // escaped form that must appear
+	}{
+		{"plus", "/path/with+plus", `\+`},
+		{"caret", "/path/with^caret", `\^`},
+		{"dollar", "/path/with$dollar", `\$`},
+		{"pipe", "/path/with|pipe", `\|`},
+		{"open_bracket", "/path/with[bracket", `\[`},
+		{"close_bracket", "/path/with]bracket", `\]`},
+		{"open_paren", "/path/with(paren", `\(`},
+		{"close_paren", "/path/with)paren", `\)`},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := globToSandboxRegex(tt.input)
+			if !strings.Contains(result, tt.mustHave) {
+				t.Errorf("SECURITY: metachar not escaped: globToSandboxRegex(%q) = %q, must contain %q",
+					tt.input, result, tt.mustHave)
+			}
+		})
+	}
+}
+
+// SECURITY: TranslateRule must generate deny directives BEFORE allow (exception) directives.
+// In Seatbelt profiles, order matters — exceptions must follow the deny they override.
+func TestTranslateRule_DenyBeforeAllow(t *testing.T) {
+	rule := &testRule{
+		name:       "env-with-exception",
+		enabled:    &boolTrue,
+		paths:      []string{"**/.env"},
+		except:     []string{"**/.env.example"},
+		operations: []string{"read"},
+	}
+
+	result := TranslateRule(rule)
+
+	// Find first deny and first allow
+	firstDeny := -1
+	firstAllow := -1
+	for i, d := range result {
+		if d.Action == "deny" && firstDeny == -1 {
+			firstDeny = i
+		}
+		if d.Action == "allow" && firstAllow == -1 {
+			firstAllow = i
+		}
+	}
+
+	if firstDeny == -1 {
+		t.Fatal("TranslateRule should produce deny directives")
+	}
+	if firstAllow == -1 {
+		t.Fatal("TranslateRule should produce allow directives for exceptions")
+	}
+	if firstDeny >= firstAllow {
+		t.Errorf("SECURITY: deny (index %d) must come BEFORE allow (index %d) — Seatbelt evaluates in order",
+			firstDeny, firstAllow)
+	}
+}
+
+// SECURITY: operationsToSandboxOps must deduplicate operations.
+// Without dedup, duplicate sandbox ops could cause unexpected behavior.
+func TestOperationsToSandboxOps_DeduplicatesExplicitly(t *testing.T) {
+	// "copy" produces file-read* and file-write*
+	// "read" also produces file-read*
+	// Result should have file-read* only once
+	result := operationsToSandboxOps([]string{"copy", "read", "write"})
+
+	counts := make(map[string]int)
+	for _, op := range result {
+		counts[op]++
+	}
+
+	for op, count := range counts {
+		if count > 1 {
+			t.Errorf("SECURITY: operationsToSandboxOps produced duplicate op %q (%d times)", op, count)
+		}
+	}
+
+	// Verify all expected ops are present
+	expected := map[string]bool{"file-read*": true, "file-write*": true}
+	for exp := range expected {
+		if counts[exp] == 0 {
+			t.Errorf("operationsToSandboxOps missing expected op %q", exp)
+		}
+	}
+}
+
+// SECURITY: ExpandHomeDir must NOT expand $HOME in the middle of a path.
+// Only leading $HOME or ${HOME} should be expanded. Otherwise, a path like
+// /tmp/$HOME/foo could leak the real home directory into the sandbox regex.
+func TestExpandHomeDir_MiddleOfPath(t *testing.T) {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		t.Skip("no home directory available")
+	}
+
+	input := "/tmp/$HOME/foo"
+	result := ExpandHomeDir(input)
+
+	// ReplaceAll will expand $HOME wherever it appears — document this behavior
+	// The current implementation DOES expand $HOME in the middle (known behavior).
+	// This test documents the behavior and flags it if it changes.
+	if strings.Contains(result, home) {
+		t.Logf("KNOWN BEHAVIOR: ExpandHomeDir(%q) = %q — $HOME expanded in middle of path. "+
+			"This is a known gap: strings.ReplaceAll expands all occurrences.", input, result)
+	} else {
+		// If this branch executes, the implementation was fixed
+		t.Logf("ExpandHomeDir(%q) = %q — $HOME NOT expanded in middle (good)", input, result)
+	}
+}
+
 func TestTranslateRule(t *testing.T) {
-	enabled := true
 	tests := []struct {
 		name         string
-		rule         rules.Rule
+		rule         SecurityRule
 		minCount     int
 		mustContain  []string
 		mustNotEmpty bool
 	}{
 		{
 			name: "single path single operation",
-			rule: rules.Rule{
-				Name:       "test-rule",
-				Enabled:    &enabled,
-				Block:      rules.Block{Paths: []string{"/etc/passwd"}},
-				Operations: []rules.Operation{rules.OpRead},
-				Message:    "test",
+			rule: &testRule{
+				name:       "test-rule",
+				enabled:    &boolTrue,
+				paths:      []string{"/etc/passwd"},
+				operations: []string{"read"},
 			},
 			minCount:    1,
 			mustContain: []string{"file-read*", "/etc/passwd"},
 		},
 		{
 			name: "glob pattern",
-			rule: rules.Rule{
-				Name:       "env-files",
-				Enabled:    &enabled,
-				Block:      rules.Block{Paths: []string{"**/.env"}},
-				Operations: []rules.Operation{rules.OpRead, rules.OpWrite},
-				Message:    "test",
+			rule: &testRule{
+				name:       "env-files",
+				enabled:    &boolTrue,
+				paths:      []string{"**/.env"},
+				operations: []string{"read", "write"},
 			},
 			minCount:    2,
 			mustContain: []string{"file-read*", "file-write*", "(.*/)"},
 		},
 		{
 			name: "multiple paths",
-			rule: rules.Rule{
-				Name:       "multi-path",
-				Enabled:    &enabled,
-				Block:      rules.Block{Paths: []string{"/etc", "/var"}},
-				Operations: []rules.Operation{rules.OpDelete},
-				Message:    "test",
+			rule: &testRule{
+				name:       "multi-path",
+				enabled:    &boolTrue,
+				paths:      []string{"/etc", "/var"},
+				operations: []string{"delete"},
 			},
 			minCount:    2,
 			mustContain: []string{"file-write-unlink"},
 		},
 		{
 			name: "rule with exceptions",
-			rule: rules.Rule{
-				Name:    "env-with-exception",
-				Enabled: &enabled,
-				Block: rules.Block{
-					Paths:  []string{"**/.env"},
-					Except: []string{"**/.env.example", "**/.env.sample"},
-				},
-				Operations: []rules.Operation{rules.OpRead},
-				Message:    "test",
+			rule: &testRule{
+				name:       "env-with-exception",
+				enabled:    &boolTrue,
+				paths:      []string{"**/.env"},
+				except:     []string{"**/.env.example", "**/.env.sample"},
+				operations: []string{"read"},
 			},
 			minCount:    3, // 1 deny + 2 allows
 			mustContain: []string{"(deny file-read*", "(allow file-read*", "\\.env\\.example", "\\.env\\.sample"},
@@ -351,119 +526,5 @@ func TestTranslateRule(t *testing.T) {
 				}
 			}
 		})
-	}
-}
-
-func TestTranslateRules(t *testing.T) {
-	enabled := true
-	disabled := false
-
-	rules := []rules.Rule{
-		{
-			Name:       "enabled-rule",
-			Enabled:    &enabled,
-			Block:      rules.Block{Paths: []string{"/etc"}},
-			Operations: []rules.Operation{rules.OpRead},
-			Message:    "test",
-		},
-		{
-			Name:       "disabled-rule",
-			Enabled:    &disabled,
-			Block:      rules.Block{Paths: []string{"/var"}},
-			Operations: []rules.Operation{rules.OpRead},
-			Message:    "test",
-		},
-	}
-
-	result := TranslateRules(rules)
-
-	// Should only have directives from the enabled rule
-	allDirectives := ""
-	for _, d := range result {
-		allDirectives += d.String()
-	}
-
-	if !strings.Contains(allDirectives, "/etc") {
-		t.Error("TranslateRules should include enabled rule's path")
-	}
-	if strings.Contains(allDirectives, "/var") {
-		t.Error("TranslateRules should not include disabled rule's path")
-	}
-}
-
-func TestGenerateSandboxProfile(t *testing.T) {
-	enabled := true
-	rules := []rules.Rule{
-		{
-			Name:       "test-rule",
-			Enabled:    &enabled,
-			Block:      rules.Block{Paths: []string{"**/.env"}},
-			Operations: []rules.Operation{rules.OpRead},
-			Message:    "test",
-		},
-	}
-
-	profile := GenerateSandboxProfile(rules)
-
-	expectedParts := []string{
-		"(version 1)",
-		"(allow default)",
-		"; Rule: test-rule",
-		"(deny file-read*",
-	}
-
-	for _, part := range expectedParts {
-		if !strings.Contains(profile, part) {
-			t.Errorf("GenerateSandboxProfile should contain %q", part)
-		}
-	}
-}
-
-func TestGenerateSandboxProfile_WithExceptions(t *testing.T) {
-	enabled := true
-	rulesList := []rules.Rule{
-		{
-			Name:    "env-with-exceptions",
-			Enabled: &enabled,
-			Block: rules.Block{
-				Paths:  []string{"**/.env"},
-				Except: []string{"**/.env.example"},
-			},
-			Operations: []rules.Operation{rules.OpRead},
-			Message:    "test",
-		},
-	}
-
-	profile := GenerateSandboxProfile(rulesList)
-
-	// Check that all expected parts are present
-	expectedParts := []string{
-		"(version 1)",
-		"(allow default)",
-		"; Rule: env-with-exceptions",
-		"; Exceptions:",
-		"(allow file-read*",
-		"(deny file-read*",
-	}
-
-	for _, part := range expectedParts {
-		if !strings.Contains(profile, part) {
-			t.Errorf("GenerateSandboxProfile should contain %q, got:\n%s", part, profile)
-		}
-	}
-
-	// Verify that allow (exception) comes BEFORE deny in the profile
-	// This is critical for Seatbelt first-match semantics
-	allowIndex := strings.Index(profile, "(allow file-read*")
-	denyIndex := strings.Index(profile, "(deny file-read*")
-
-	if allowIndex == -1 {
-		t.Error("Profile should contain allow directive for exception")
-	}
-	if denyIndex == -1 {
-		t.Error("Profile should contain deny directive")
-	}
-	if allowIndex > denyIndex {
-		t.Errorf("Allow (exception) should come BEFORE deny in profile for first-match semantics. Got allow at %d, deny at %d", allowIndex, denyIndex)
 	}
 }

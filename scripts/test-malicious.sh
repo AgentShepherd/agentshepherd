@@ -1,5 +1,5 @@
 #!/bin/bash
-# Test malicious agent scenarios against shepherd-core gateway
+# Test malicious agent scenarios against crust gateway
 # Tests Layer 0 (request-side) blocking of dangerous tool_calls in message history
 # Usage: ./scripts/test-malicious.sh
 
@@ -58,7 +58,7 @@ EOF
     http_code=$(echo "$response" | tail -1)
     body=$(echo "$response" | sed '$d')
 
-    if [ "$http_code" = "403" ] || echo "$body" | grep -qi "AgentShepherd.*blocked"; then
+    if [ "$http_code" = "403" ] || echo "$body" | grep -qi "Crust.*blocked"; then
         if [ "$expect" = "BLOCKED" ]; then
             echo "PASS (blocked as expected)"
         else

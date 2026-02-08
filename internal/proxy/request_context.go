@@ -4,8 +4,8 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/AgentShepherd/agentshepherd/internal/telemetry"
-	"github.com/AgentShepherd/agentshepherd/internal/types"
+	"github.com/BakeLens/crust/internal/telemetry"
+	"github.com/BakeLens/crust/internal/types"
 )
 
 // RequestContext holds all context needed for processing a proxy request.

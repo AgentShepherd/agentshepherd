@@ -1,6 +1,5 @@
 # Binaries
-agentshepherd
-cmd/sandbox-exec/sandbox-exec
+crust
 
 # Database
 *.db
@@ -14,11 +13,16 @@ cmd/sandbox-exec/sandbox-exec
 
 # Build
 *.o
+!internal/sandbox/bpf/*.o
 *.exe
+**/target/
 
 # OS
 .DS_Store
 Thumbs.db
+
+# BPF (machine-specific, regenerate with: bpftool btf dump file /sys/kernel/btf/vmlinux format c)
+internal/sandbox/bpf/c/vmlinux.h
 
 # Claude settings
 .claude/settings.local.json

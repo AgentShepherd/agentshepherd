@@ -1,19 +1,19 @@
 <p align="center">
-  <img src="docs/banner.png" alt="AgentShepherd Banner" width="100%" />
+  <img src="docs/banner.png" alt="Crust Banner" width="100%" />
 </p>
 
-<h1 align="center">AgentShepherd</h1>
+<h1 align="center">Crust</h1>
 
 <p align="center">
   <strong>Your agents should never <del>(try to)</del> read your secrets.</strong>
 </p>
 
 <p align="center">
-  <a href="https://agentshepherd.ai">Website</a> •
+  <a href="https://getcrust.io">Website</a> •
   <a href="#quick-start">Quick Start</a> •
   <a href="#features">Features</a> •
   <a href="#how-it-works">How It Works</a> •
-  <a href="https://github.com/AgentShepherd/agentshepherd/issues">Issues</a>
+  <a href="https://github.com/BakeLens/crust/issues">Issues</a>
 </p>
 
 <p align="center">
@@ -35,12 +35,12 @@ AI agents are powerful. They can execute code, read files, make API calls, and i
 
 ## The Solution
 
-**AgentShepherd** is a transparent gateway that sits between your AI agents and LLM providers. It intercepts every tool call and blocks dangerous actions *before* they happen.
+**Crust** is a transparent gateway that sits between your AI agents and LLM providers. It intercepts every tool call and blocks dangerous actions *before* they happen.
 
 **100% local. Your data never leaves your machine.**
 
 ```
-Your Agent → AgentShepherd → LLM Provider
+Your Agent → Crust → LLM Provider
                   ↓
             🛡️ Security Check
             📊 Telemetry
@@ -54,10 +54,10 @@ An LLM by itself is just next-token prediction, but **tool calls make it agentic
 
 We specifically monitor **tool call requests**, not responses, because the request is the moment the agent decides to act: execute code, call an API, read your sensitive data, or delete your files. Even when a previous tool call response contains unsafe content, the agent cannot act on it without issuing a new tool call request—meaning every dangerous action must flow through a request we can inspect and block.
 
-By guarding this single chokepoint, AgentShepherd catches threats at the point *before* they reach the real world.
+By guarding this single chokepoint, Crust catches threats at the point *before* they reach the real world.
 
 <p align="center">
-  <img src="docs/agentshepherd.svg" alt="How AgentShepherd works" width="100%" />
+  <img src="docs/crust.png" alt="How Crust works" width="90%" />
 </p>
 
 ## Quick Start
@@ -65,16 +65,20 @@ By guarding this single chokepoint, AgentShepherd catches threats at the point *
 > **One command. That's it.**
 
 ```bash
-/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/AgentShepherd/agentshepherd/main/install.sh)"
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/BakeLens/crust/main/install.sh)"
 ```
 
-Then start AgentShepherd:
+Then start Crust:
 
 ```bash
-agentshepherd start
+# Auto mode — clients bring their own auth, provider resolved from model name
+crust start --auto
+
+# Or manual mode — single upstream with gateway API key
+crust start --endpoint https://api.openai.com/v1 --api-key sk-xxx
 ```
 
-Point your agent to `http://localhost:9090` instead of the LLM API URL and use `dummy` as the API key. Done.
+Point your agent to `http://localhost:9090` instead of the LLM API URL. In auto mode, the gateway routes requests to the correct provider based on the model name and passes through the client's auth header. Done.
 
 ## Features
 
@@ -102,19 +106,19 @@ rules:
 - Credential theft (`.env`, SSH keys, cloud credentials, browser data)
 - Shell history exposure (`.bash_history`, `.zsh_history`)
 - Persistence vectors (shell RC files, authorized_keys)
-- Self-tampering (agents can't disable AgentShepherd)
+- Self-tampering (agents can't disable Crust)
 - Private key exfiltration (content-based detection)
 
 ### ⚡ Near-Zero Latency
 
-Written in Go for maximum performance. AgentShepherd adds very small overhead to your API calls. Your agents won't even notice it's there.
+Written in Go for maximum performance. Crust adds very small overhead to your API calls. Your agents won't even notice it's there.
 
 ### 🔄 Hot Reload Rules
 
 Add or modify security rules without restarting. Your protection evolves as fast as your threats.
 
 ```bash
-agentshepherd add-rule my-rules.yaml
+crust add-rule my-rules.yaml
 # Rules active immediately!
 ```
 
@@ -128,20 +132,19 @@ Works with any agent framework:
 - LangChain / LangGraph / AutoGPT / AutoGen
 - Custom implementations
 
-Just change your API endpoint. No code changes required.
+Just change your API endpoint. No code changes required. In auto mode (`--auto`), the gateway resolves providers from model names and passes through client auth — no need to configure a single upstream or gateway API key.
 
 ## How It Works
 
 ```
-Agent Request ──▶ [Layer 0] ──▶ LLM ──▶ [Layer 1] ──▶ [Layer 2] ──▶ Execute
-                     │                      │             │
-                 Scan history           Scan response   Kernel
-                 tool_calls             tool_calls      sandbox
+Agent Request ──▶ [Layer 0] ──▶ LLM ──▶ [Layer 1] ──▶ Execute
+                     │                      │
+                 Scan history           Scan response
+                 tool_calls             tool_calls
 ```
 
 1. **Layer 0 (Request)**: Scans tool_calls in conversation history - catches "bad agent" patterns
 2. **Layer 1 (Response)**: Scans LLM-generated tool_calls against security rules
-3. **Layer 2 (Sandbox)**: OS-level enforcement via Landlock/Seatbelt (optional)
 
 All activity is logged locally to encrypted storage.
 
@@ -149,25 +152,29 @@ All activity is logged locally to encrypted storage.
 
 ```bash
 # Daemon management
-agentshepherd start              # Start the gateway
-agentshepherd status             # Check if running
-agentshepherd stop               # Stop the gateway
-agentshepherd logs [-f]          # View logs (optionally follow)
+crust start              # Interactive setup
+crust start --auto       # Auto mode (resolve provider from model name)
+crust start --auto --block-mode replace   # Show block messages to agent (avoid interrupt)
+crust start --endpoint URL --api-key KEY  # Manual mode
+crust status             # Check if running
+crust stop               # Stop the gateway
+crust logs [-f]          # View logs (optionally follow)
 
 # Rule management
-agentshepherd list-rules         # List all active rules
-agentshepherd add-rule FILE      # Add custom rules
-agentshepherd remove-rule FILE   # Remove user rules
-agentshepherd reload-rules       # Hot reload rules
+crust list-rules         # List all active rules
+crust add-rule FILE      # Add custom rules
+crust remove-rule FILE   # Remove user rules
+crust reload-rules       # Hot reload rules
 
 # Other
-agentshepherd version            # Show version
-agentshepherd uninstall          # Complete removal
+crust lint-rules [file]  # Validate rule syntax and patterns
+crust version            # Show version
+crust uninstall          # Complete removal
 ```
 
 ## Configuration
 
-AgentShepherd stores configuration in `~/.agentshepherd/`:
+Crust stores configuration in `~/.crust/`:
 
 ```yaml
 # config.yaml
@@ -176,8 +183,11 @@ server:
   log_level: info
 
 upstream:
-  url: "https://openrouter.ai/api/v1"
+  url: "https://openrouter.ai/api/v1"  # fallback upstream (used when no provider matches)
   timeout: 300
+  providers:                             # user-defined model keyword → base URL
+    my-llama: "http://localhost:11434/v1"
+    my-vllm:  "http://gpu-server:8000/v1"
 
 security:
   enabled: true
@@ -188,16 +198,20 @@ rules:
   watch: true  # hot reload
 ```
 
+### Auto Mode (Experimental)
+
+Auto mode (`--auto`) resolves the upstream provider from the `model` field using a built-in registry (e.g., Anthropic, OpenAI, Codex, DeepSeek, Gemini, Mistral, Qwen, Moonshot, Groq, MiniMax, HuggingFace). Clients bring their own auth tokens. User-defined providers in config take priority over builtins. See [providers.go](internal/proxy/providers.go) for the full registry.
+
 ## Built-in Rules
 
-AgentShepherd ships with battle-tested security rules:
+Crust ships with battle-tested security rules:
 
 | Category | Protection |
 |----------|------------|
 | **Credential Theft** | `.env`, SSH keys, cloud credentials, browser passwords |
 | **Shell History** | `.bash_history`, `.zsh_history`, command history |
 | **Persistence Prevention** | Shell RC files, authorized_keys |
-| **Self-Protection** | AgentShepherd data directories |
+| **Self-Protection** | Crust data directories |
 | **Private Key Detection** | Content-based detection of key exfiltration |
 
 ## Roadmap
@@ -207,18 +221,18 @@ AgentShepherd ships with battle-tested security rules:
 
 ## Contributing
 
-AgentShepherd is an open-source developer tool intended for research, education, and general-purpose agent safety. This project is in active development and we welcome contributions! PRs for customized rules are also welcome.
+Crust is an open-source developer tool intended for research, education, and general-purpose agent safety. This project is in active development and we welcome contributions! PRs for customized rules are also welcome.
 
 ## Citation
 
-If you use AgentShepherd in your research, please cite:
+If you use Crust in your research, please cite:
 
 ```bibtex
-@software{agentshepherd2026,
-  title = {AgentShepherd: A Transparent Gateway for AI Agents},
+@software{crust2026,
+  title = {Crust: A Transparent Gateway for AI Agents},
   author = {Chen, Zichen and Chen, Yuanyuan and Jiang, Bowen and Xu, Zhangchen},
   year = {2026},
-  url = {https://github.com/AgentShepherd/agentshepherd}
+  url = {https://github.com/BakeLens/crust}
 }
 ```
 

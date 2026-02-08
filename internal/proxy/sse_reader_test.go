@@ -6,7 +6,7 @@ import (
 	"io"
 	"testing"
 
-	"github.com/AgentShepherd/agentshepherd/internal/telemetry"
+	"github.com/BakeLens/crust/internal/telemetry"
 )
 
 func TestSSEReader_AnthropicToolUse(t *testing.T) {

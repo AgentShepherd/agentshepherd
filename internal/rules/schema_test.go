@@ -14,9 +14,9 @@ func TestRule_Validate(t *testing.T) {
 		{
 			name: "valid rule with paths",
 			rule: Rule{
-				Name:       "protect-env",
-				Message:    "Cannot access .env files",
-				Operations: []Operation{OpRead, OpWrite},
+				Name:    "protect-env",
+				Message: "Cannot access .env files",
+				Actions: []Operation{OpRead, OpWrite},
 				Block: Block{
 					Paths: []string{"**/.env"},
 				},
@@ -26,9 +26,9 @@ func TestRule_Validate(t *testing.T) {
 		{
 			name: "valid rule with hosts",
 			rule: Rule{
-				Name:       "block-internal",
-				Message:    "Cannot access internal network",
-				Operations: []Operation{OpNetwork},
+				Name:    "block-internal",
+				Message: "Cannot access internal network",
+				Actions: []Operation{OpNetwork},
 				Block: Block{
 					Hosts: []string{"10.*", "192.168.*"},
 				},
@@ -38,9 +38,9 @@ func TestRule_Validate(t *testing.T) {
 		{
 			name: "valid rule with paths and except",
 			rule: Rule{
-				Name:       "protect-env",
-				Message:    "Cannot access .env files",
-				Operations: []Operation{OpRead},
+				Name:    "protect-env",
+				Message: "Cannot access .env files",
+				Actions: []Operation{OpRead},
 				Block: Block{
 					Paths:  []string{"**/.env", "**/.env.*"},
 					Except: []string{"**/.env.example"},
@@ -51,9 +51,9 @@ func TestRule_Validate(t *testing.T) {
 		{
 			name: "missing name",
 			rule: Rule{
-				Message:    "test",
-				Operations: []Operation{OpRead},
-				Block:      Block{Paths: []string{"*"}},
+				Message: "test",
+				Actions: []Operation{OpRead},
+				Block:   Block{Paths: []string{"*"}},
 			},
 			wantErr: true,
 			errMsg:  "rule name is required",
@@ -61,9 +61,9 @@ func TestRule_Validate(t *testing.T) {
 		{
 			name: "missing message",
 			rule: Rule{
-				Name:       "test",
-				Operations: []Operation{OpRead},
-				Block:      Block{Paths: []string{"*"}},
+				Name:    "test",
+				Actions: []Operation{OpRead},
+				Block:   Block{Paths: []string{"*"}},
 			},
 			wantErr: true,
 			errMsg:  "rule message is required",
@@ -76,26 +76,26 @@ func TestRule_Validate(t *testing.T) {
 				Block:   Block{Paths: []string{"*"}},
 			},
 			wantErr: true,
-			errMsg:  "at least one operation is required",
+			errMsg:  "at least one action is required",
 		},
 		{
-			name: "invalid operation",
+			name: "invalid action",
 			rule: Rule{
-				Name:       "test",
-				Message:    "test",
-				Operations: []Operation{"invalid"},
-				Block:      Block{Paths: []string{"*"}},
+				Name:    "test",
+				Message: "test",
+				Actions: []Operation{"invalid"},
+				Block:   Block{Paths: []string{"*"}},
 			},
 			wantErr: true,
-			errMsg:  "invalid operation: invalid",
+			errMsg:  "invalid action: invalid",
 		},
 		{
 			name: "missing paths and hosts",
 			rule: Rule{
-				Name:       "test",
-				Message:    "test",
-				Operations: []Operation{OpRead},
-				Block:      Block{},
+				Name:    "test",
+				Message: "test",
+				Actions: []Operation{OpRead},
+				Block:   Block{},
 			},
 			wantErr: true,
 			errMsg:  "block.paths, block.hosts, match, all, or any is required",
@@ -103,9 +103,9 @@ func TestRule_Validate(t *testing.T) {
 		{
 			name: "hosts without network operation",
 			rule: Rule{
-				Name:       "test",
-				Message:    "test",
-				Operations: []Operation{OpRead},
+				Name:    "test",
+				Message: "test",
+				Actions: []Operation{OpRead},
 				Block: Block{
 					Hosts: []string{"10.*"},
 				},
@@ -188,9 +188,9 @@ func TestRule_GetSeverity(t *testing.T) {
 	})
 }
 
-func TestRule_HasOperation(t *testing.T) {
+func TestRule_HasAction(t *testing.T) {
 	r := Rule{
-		Operations: []Operation{OpRead, OpWrite, OpDelete},
+		Actions: []Operation{OpRead, OpWrite, OpDelete},
 	}
 
 	tests := []struct {
@@ -206,8 +206,8 @@ func TestRule_HasOperation(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(string(tt.op), func(t *testing.T) {
-			if got := r.HasOperation(tt.op); got != tt.want {
-				t.Errorf("HasOperation(%s) = %v, want %v", tt.op, got, tt.want)
+			if got := r.HasAction(tt.op); got != tt.want {
+				t.Errorf("HasAction(%s) = %v, want %v", tt.op, got, tt.want)
 			}
 		})
 	}
@@ -219,16 +219,16 @@ func TestValidateRuleSet(t *testing.T) {
 			Version: 1,
 			Rules: []Rule{
 				{
-					Name:       "rule1",
-					Message:    "msg1",
-					Operations: []Operation{OpRead},
-					Block:      Block{Paths: []string{"*"}},
+					Name:    "rule1",
+					Message: "msg1",
+					Actions: []Operation{OpRead},
+					Block:   Block{Paths: []string{"*"}},
 				},
 				{
-					Name:       "rule2",
-					Message:    "msg2",
-					Operations: []Operation{OpWrite},
-					Block:      Block{Paths: []string{"*"}},
+					Name:    "rule2",
+					Message: "msg2",
+					Actions: []Operation{OpWrite},
+					Block:   Block{Paths: []string{"*"}},
 				},
 			},
 		}
@@ -250,16 +250,16 @@ func TestValidateRuleSet(t *testing.T) {
 			Version: 1,
 			Rules: []Rule{
 				{
-					Name:       "same-name",
-					Message:    "msg1",
-					Operations: []Operation{OpRead},
-					Block:      Block{Paths: []string{"*"}},
+					Name:    "same-name",
+					Message: "msg1",
+					Actions: []Operation{OpRead},
+					Block:   Block{Paths: []string{"*"}},
 				},
 				{
-					Name:       "same-name",
-					Message:    "msg2",
-					Operations: []Operation{OpWrite},
-					Block:      Block{Paths: []string{"*"}},
+					Name:    "same-name",
+					Message: "msg2",
+					Actions: []Operation{OpWrite},
+					Block:   Block{Paths: []string{"*"}},
 				},
 			},
 		}
@@ -286,16 +286,16 @@ func TestValidateRuleSet(t *testing.T) {
 }
 
 func TestOperation_Constants(t *testing.T) {
-	// Verify all operations are in ValidOperations
+	// Verify all operations are in ValidActions
 	ops := []Operation{OpRead, OpWrite, OpDelete, OpCopy, OpMove, OpExecute, OpNetwork}
 	for _, op := range ops {
-		if !ValidOperations[op] {
-			t.Errorf("operation %s not in ValidOperations", op)
+		if !ValidActions[op] {
+			t.Errorf("operation %s not in ValidActions", op)
 		}
 	}
 
 	// Verify count matches
-	if len(ValidOperations) != len(ops) {
-		t.Errorf("ValidOperations has %d entries, expected %d", len(ValidOperations), len(ops))
+	if len(ValidActions) != len(ops) {
+		t.Errorf("ValidActions has %d entries, expected %d", len(ValidActions), len(ops))
 	}
 }

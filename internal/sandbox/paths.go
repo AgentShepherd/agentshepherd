@@ -38,25 +38,3 @@ func DefaultAllowPaths() []string {
 
 	return paths
 }
-
-// MinimalAllowPaths returns a minimal set of paths for highly restricted execution.
-// Use this when you want maximum security and only need basic command execution.
-func MinimalAllowPaths() []string {
-	return []string{
-		"/bin",
-		"/usr/bin",
-		"/lib",
-		"/lib64",
-		"/tmp",
-		"/dev",
-	}
-}
-
-// AllowPathsWithProc returns the default paths plus /proc access.
-// Use this only when commands genuinely need /proc (e.g., debugging tools).
-// WARNING: This allows reading /proc/*/cmdline and /proc/*/environ which
-// may expose API keys. Only use when Layer 1 rules block sensitive paths.
-func AllowPathsWithProc() []string {
-	paths := DefaultAllowPaths()
-	return append(paths, "/proc")
-}

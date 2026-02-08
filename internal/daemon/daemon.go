@@ -8,20 +8,22 @@ import (
 	"strconv"
 	"syscall"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 const (
-	pidFileName = "agentshepherd.pid"
-	logFileName = "agentshepherd.log"
+	pidFileName = "crust.pid"
+	logFileName = "crust.log"
 )
 
-// DataDir returns the agentshepherd data directory and creates it if needed
+// DataDir returns the crust data directory and creates it if needed
 func DataDir() string {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		home = "/tmp" // Fallback if home dir unavailable
 	}
-	dir := filepath.Join(home, ".agentshepherd")
+	dir := filepath.Join(home, ".crust")
 	_ = os.MkdirAll(dir, 0700) //nolint:errcheck // best effort - dir may exist
 	return dir
 }
@@ -36,9 +38,43 @@ func LogFile() string {
 	return filepath.Join(DataDir(), logFileName)
 }
 
-// WritePID writes the current process ID to the PID file
+// pidLockFile holds the open PID file to maintain the flock advisory lock.
+// The lock is held for the lifetime of the daemon process.
+var pidLockFile *os.File
+
+// WritePID writes the current process ID to the PID file with an exclusive
+// advisory lock (flock). The lock prevents two daemon instances from running
+// simultaneously. The returned file handle must remain open to hold the lock;
+// call CleanupPID on shutdown.
 func WritePID() error {
-	return os.WriteFile(pidFile(), []byte(strconv.Itoa(os.Getpid())), 0600)
+	path := pidFile()
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY, 0600)
+	if err != nil {
+		return fmt.Errorf("open PID file: %w", err)
+	}
+	if err := unix.Flock(int(f.Fd()), unix.LOCK_EX|unix.LOCK_NB); err != nil {
+		f.Close()
+		return fmt.Errorf("another instance is running (flock %s): %w", path, err)
+	}
+	if err := f.Truncate(0); err != nil {
+		f.Close()
+		return fmt.Errorf("truncate PID file: %w", err)
+	}
+	if _, err := fmt.Fprintf(f, "%d", os.Getpid()); err != nil {
+		f.Close()
+		return fmt.Errorf("write PID file: %w", err)
+	}
+	pidLockFile = f
+	return nil
+}
+
+// CleanupPID releases the flock and removes the PID file.
+func CleanupPID() {
+	if pidLockFile != nil {
+		pidLockFile.Close()
+		pidLockFile = nil
+	}
+	_ = os.Remove(pidFile())
 }
 
 // ReadPID reads the PID from the PID file
@@ -95,7 +131,7 @@ func IsRunning() (bool, int) {
 func Stop() error {
 	running, pid := IsRunning()
 	if !running {
-		return fmt.Errorf("agentshepherd is not running")
+		return fmt.Errorf("crust is not running")
 	}
 
 	process, err := os.FindProcess(pid)
@@ -105,7 +141,7 @@ func Stop() error {
 
 	// Send SIGTERM for graceful shutdown
 	if err := process.Signal(syscall.SIGTERM); err != nil {
-		return fmt.Errorf("failed to stop agentshepherd: %w", err)
+		return fmt.Errorf("failed to stop crust: %w", err)
 	}
 
 	// Wait for process to exit (with timeout)
@@ -127,7 +163,7 @@ func Stop() error {
 // It re-executes the program with special environment variable to indicate daemon mode
 func Daemonize(args []string) (int, error) {
 	// Open log file for daemon output
-	logFile, err := os.OpenFile(LogFile(), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	logFile, err := os.OpenFile(LogFile(), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
 	if err != nil {
 		return 0, fmt.Errorf("failed to open log file: %w", err)
 	}
@@ -165,7 +201,7 @@ func Daemonize(args []string) (int, error) {
 		"PATH=" + os.Getenv("PATH"),
 		"HOME=" + os.Getenv("HOME"),
 		"USER=" + os.Getenv("USER"),
-		"AGENTSHEPHERD_DAEMON=1",
+		"CRUST_DAEMON=1",
 	}
 	// Propagate secret environment variables if set
 	if apiKey := os.Getenv("LLM_API_KEY"); apiKey != "" {
@@ -194,5 +230,5 @@ func Daemonize(args []string) (int, error) {
 
 // IsDaemonMode checks if we're running in daemon mode
 func IsDaemonMode() bool {
-	return os.Getenv("AGENTSHEPHERD_DAEMON") == "1"
+	return os.Getenv("CRUST_DAEMON") == "1"
 }

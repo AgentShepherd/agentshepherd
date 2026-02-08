@@ -3,36 +3,38 @@ package security
 import (
 	"encoding/json"
 	"fmt"
+	"sync/atomic"
 
-	"github.com/AgentShepherd/agentshepherd/internal/rules"
-	"github.com/AgentShepherd/agentshepherd/internal/telemetry"
-	"github.com/AgentShepherd/agentshepherd/internal/types"
+	"github.com/BakeLens/crust/internal/rules"
+	"github.com/BakeLens/crust/internal/telemetry"
+	"github.com/BakeLens/crust/internal/types"
 )
 
 // Interceptor handles tool call interception and response modification
 type Interceptor struct {
 	engine  *rules.Engine
 	storage *telemetry.Storage
-	enabled bool
+	enabled atomic.Bool
 }
 
 // NewInterceptor creates a new interceptor
 func NewInterceptor(engine *rules.Engine, storage *telemetry.Storage) *Interceptor {
-	return &Interceptor{
+	i := &Interceptor{
 		engine:  engine,
 		storage: storage,
-		enabled: true,
 	}
+	i.enabled.Store(true)
+	return i
 }
 
 // SetEnabled enables or disables the interceptor
 func (i *Interceptor) SetEnabled(enabled bool) {
-	i.enabled = enabled
+	i.enabled.Store(enabled)
 }
 
 // IsEnabled returns whether the interceptor is enabled
 func (i *Interceptor) IsEnabled() bool {
-	return i.enabled
+	return i.enabled.Load()
 }
 
 // GetEngine returns the rule engine
@@ -62,12 +64,13 @@ type BlockedToolCall struct {
 // InterceptOpenAIResponse intercepts tool calls in an OpenAI format response
 // blockMode: types.BlockModeRemove (delete tool calls) or types.BlockModeReplace (substitute with echo command)
 func (i *Interceptor) InterceptOpenAIResponse(responseBody []byte, traceID, sessionID, model string, apiType types.APIType, blockMode types.BlockMode) (*InterceptionResult, error) {
-	if !i.enabled || i.engine == nil {
+	if !i.enabled.Load() || i.engine == nil {
 		return &InterceptionResult{ModifiedResponse: responseBody}, nil
 	}
 
 	var resp openAIResponse
 	if err := json.Unmarshal(responseBody, &resp); err != nil {
+		log.Warn("[Layer1] Failed to parse %s response: %v", apiType, err)
 		return &InterceptionResult{ModifiedResponse: responseBody}, nil
 	}
 
@@ -93,32 +96,11 @@ func (i *Interceptor) InterceptOpenAIResponse(responseBody []byte, traceID, sess
 				Arguments: json.RawMessage(tc.Function.Arguments),
 			}
 
-			// Use rules engine
-			matchResult := i.engine.Evaluate(rules.ToolCall{
-				Name:      tc.Function.Name,
-				Arguments: json.RawMessage(tc.Function.Arguments),
-			})
-
-			// Log the tool call
-			i.logToolCall(traceID, sessionID, tc.Function.Name, tc.Function.Arguments, apiType, model, matchResult)
-
-			if matchResult.Matched && matchResult.Action == rules.ActionBlock {
-				result.BlockedToolCalls = append(result.BlockedToolCalls, BlockedToolCall{
-					ToolCall:    toolCall,
-					MatchResult: matchResult,
-				})
-				result.HasBlockedCalls = true
+			_, blocked := i.evaluateToolCall(result, toolCall, traceID, sessionID, tc.Function.Arguments, apiType, model, useReplaceMode)
+			if blocked {
 				modified = true
-				RecordLayer1Block()
-				if useReplaceMode {
-					log.Warn("[Layer1] Replaced: %s (rule: %s)", tc.Function.Name, matchResult.RuleName)
-				} else {
-					log.Warn("[Layer1] Blocked: %s (rule: %s)", tc.Function.Name, matchResult.RuleName)
-				}
 			} else {
 				allowedToolCalls = append(allowedToolCalls, tc)
-				result.AllowedToolCalls = append(result.AllowedToolCalls, toolCall)
-				RecordLayer1Allow()
 			}
 		}
 
@@ -133,7 +115,7 @@ func (i *Interceptor) InterceptOpenAIResponse(responseBody []byte, traceID, sess
 			msg = buildReplaceWarning(result.BlockedToolCalls)
 		} else {
 			// Remove mode: standard warning
-			msg = buildWarningContent(result.BlockedToolCalls)
+			msg = BuildWarningContent(result.BlockedToolCalls)
 		}
 		if resp.Choices[0].Message.Content == "" {
 			resp.Choices[0].Message.Content = msg
@@ -159,12 +141,13 @@ func (i *Interceptor) InterceptOpenAIResponse(responseBody []byte, traceID, sess
 // InterceptAnthropicResponse intercepts tool calls in an Anthropic format response
 // blockMode: types.BlockModeRemove (delete tool calls) or types.BlockModeReplace (substitute with echo command)
 func (i *Interceptor) InterceptAnthropicResponse(responseBody []byte, traceID, sessionID, model string, apiType types.APIType, blockMode types.BlockMode) (*InterceptionResult, error) {
-	if !i.enabled || i.engine == nil {
+	if !i.enabled.Load() || i.engine == nil {
 		return &InterceptionResult{ModifiedResponse: responseBody}, nil
 	}
 
 	var resp anthropicResponse
 	if err := json.Unmarshal(responseBody, &resp); err != nil {
+		log.Warn("[Layer1] Failed to parse %s response: %v", apiType, err)
 		return &InterceptionResult{ModifiedResponse: responseBody}, nil
 	}
 
@@ -190,45 +173,25 @@ func (i *Interceptor) InterceptAnthropicResponse(responseBody []byte, traceID, s
 			Arguments: block.Input,
 		}
 
-		// Use rules engine
-		matchResult := i.engine.Evaluate(rules.ToolCall{
-			Name:      block.Name,
-			Arguments: block.Input,
-		})
-
-		// Log the tool call
-		i.logToolCall(traceID, sessionID, block.Name, string(block.Input), apiType, model, matchResult)
-
-		if matchResult.Matched && matchResult.Action == rules.ActionBlock {
-			result.BlockedToolCalls = append(result.BlockedToolCalls, BlockedToolCall{
-				ToolCall:    toolCall,
-				MatchResult: matchResult,
-			})
-			result.HasBlockedCalls = true
+		matchResult, blocked := i.evaluateToolCall(result, toolCall, traceID, sessionID, string(block.Input), apiType, model, useReplaceMode)
+		if blocked {
 			modified = true
-			RecordLayer1Block()
 			if useReplaceMode {
-				log.Warn("[Layer1] Replaced: %s (rule: %s)", block.Name, matchResult.RuleName)
-				msg := fmt.Sprintf("\n[AgentShepherd] Tool '%s' blocked: %s\nPlease try a different approach.\n",
+				msg := fmt.Sprintf("\n[Crust] Tool '%s' blocked: %s\nPlease inform the user and try a different approach.\n",
 					block.Name, buildReplaceMessage(matchResult))
-				replacedBlock := anthropicContentBlock{
+				allowedContent = append(allowedContent, anthropicContentBlock{
 					Type: "text",
 					Text: msg,
-				}
-				allowedContent = append(allowedContent, replacedBlock)
-			} else {
-				log.Warn("[Layer1] Blocked: %s (rule: %s)", block.Name, matchResult.RuleName)
+				})
 			}
 		} else {
 			allowedContent = append(allowedContent, block)
-			result.AllowedToolCalls = append(result.AllowedToolCalls, toolCall)
-			RecordLayer1Allow()
 		}
 	}
 
 	// Only inject warning in remove mode
 	if result.HasBlockedCalls && !useReplaceMode {
-		warningContent := buildWarningContent(result.BlockedToolCalls)
+		warningContent := BuildWarningContent(result.BlockedToolCalls)
 		allowedContent = append(allowedContent, anthropicContentBlock{
 			Type: "text",
 			Text: warningContent,
@@ -251,15 +214,136 @@ func (i *Interceptor) InterceptAnthropicResponse(responseBody []byte, traceID, s
 	return result, nil
 }
 
+// InterceptOpenAIResponsesResponse intercepts tool calls in an OpenAI Responses API format response.
+// The Responses API uses `output[]` with `type: "function_call"` items.
+func (i *Interceptor) InterceptOpenAIResponsesResponse(responseBody []byte, traceID, sessionID, model string, apiType types.APIType, blockMode types.BlockMode) (*InterceptionResult, error) {
+	if !i.enabled.Load() || i.engine == nil {
+		return &InterceptionResult{ModifiedResponse: responseBody}, nil
+	}
+
+	var resp openAIResponsesResponse
+	if err := json.Unmarshal(responseBody, &resp); err != nil {
+		log.Warn("[Layer1] Failed to parse %s response: %v", apiType, err)
+		return &InterceptionResult{ModifiedResponse: responseBody}, nil
+	}
+
+	result := &InterceptionResult{
+		BlockedToolCalls: make([]BlockedToolCall, 0),
+		AllowedToolCalls: make([]telemetry.ToolCall, 0),
+	}
+
+	useReplaceMode := blockMode.IsReplace()
+
+	allowedOutput := make([]openAIResponsesOutputItem, 0, len(resp.Output))
+	modified := false
+
+	for _, item := range resp.Output {
+		if item.Type != "function_call" {
+			allowedOutput = append(allowedOutput, item)
+			continue
+		}
+
+		toolCall := telemetry.ToolCall{
+			ID:        item.CallID,
+			Name:      item.Name,
+			Arguments: json.RawMessage(item.Arguments),
+		}
+
+		matchResult, blocked := i.evaluateToolCall(result, toolCall, traceID, sessionID, item.Arguments, apiType, model, useReplaceMode)
+		if blocked {
+			modified = true
+			if useReplaceMode {
+				msg := fmt.Sprintf("\n[Crust] Tool '%s' blocked: %s\nPlease inform the user and try a different approach.\n",
+					item.Name, buildReplaceMessage(matchResult))
+				allowedOutput = append(allowedOutput, openAIResponsesOutputItem{
+					Type: "message",
+					ID:   item.ID,
+					Content: []openAIResponsesContent{
+						{Type: "output_text", Text: msg},
+					},
+				})
+			}
+		} else {
+			allowedOutput = append(allowedOutput, item)
+		}
+	}
+
+	// Inject warning in remove mode
+	if result.HasBlockedCalls && !useReplaceMode {
+		warningContent := BuildWarningContent(result.BlockedToolCalls)
+		allowedOutput = append(allowedOutput, openAIResponsesOutputItem{
+			Type: "message",
+			Content: []openAIResponsesContent{
+				{Type: "output_text", Text: warningContent},
+			},
+		})
+		modified = true
+	}
+
+	resp.Output = allowedOutput
+
+	if modified {
+		modifiedBody, err := json.Marshal(resp)
+		if err != nil {
+			return &InterceptionResult{ModifiedResponse: responseBody}, err
+		}
+		result.ModifiedResponse = modifiedBody
+	} else {
+		result.ModifiedResponse = responseBody
+	}
+
+	return result, nil
+}
+
 // InterceptToolCalls intercepts tool calls based on API type
 // blockMode: types.BlockModeRemove (delete tool calls) or types.BlockModeReplace (substitute with echo command)
 func (i *Interceptor) InterceptToolCalls(responseBody []byte, traceID, sessionID, model string, apiType types.APIType, blockMode types.BlockMode) (*InterceptionResult, error) {
 	switch apiType {
 	case types.APITypeAnthropic:
 		return i.InterceptAnthropicResponse(responseBody, traceID, sessionID, model, apiType, blockMode)
+	case types.APITypeOpenAIResponses:
+		return i.InterceptOpenAIResponsesResponse(responseBody, traceID, sessionID, model, apiType, blockMode)
 	default:
 		return i.InterceptOpenAIResponse(responseBody, traceID, sessionID, model, apiType, blockMode)
 	}
+}
+
+// evaluateToolCall evaluates a single tool call against the rules engine.
+// Returns the match result. Handles logging, metrics, and result bookkeeping.
+// Returns true if the tool call was blocked.
+func (i *Interceptor) evaluateToolCall(
+	result *InterceptionResult,
+	tc telemetry.ToolCall,
+	traceID, sessionID, argsString string,
+	apiType types.APIType,
+	model string,
+	useReplaceMode bool,
+) (rules.MatchResult, bool) {
+	matchResult := i.engine.Evaluate(rules.ToolCall{
+		Name:      tc.Name,
+		Arguments: tc.Arguments,
+	})
+
+	i.logToolCall(traceID, sessionID, tc.Name, argsString, apiType, model, matchResult)
+
+	if matchResult.Matched && matchResult.Action == rules.ActionBlock {
+		result.BlockedToolCalls = append(result.BlockedToolCalls, BlockedToolCall{
+			ToolCall:    tc,
+			MatchResult: matchResult,
+		})
+		result.HasBlockedCalls = true
+		RecordLayer1Block()
+		if useReplaceMode {
+			log.Warn("[Layer1] Replaced: %s (rule: %s)", tc.Name, matchResult.RuleName)
+		} else {
+			log.Warn("[Layer1] Blocked: %s (rule: %s)", tc.Name, matchResult.RuleName)
+		}
+		return matchResult, true
+	}
+
+	result.AllowedToolCalls = append(result.AllowedToolCalls, tc)
+	RecordLayer1Allow()
+	return matchResult, false
 }
 
 func (i *Interceptor) logToolCall(traceID, sessionID, toolName, arguments string, apiType types.APIType, model string, matchResult rules.MatchResult) {
@@ -284,8 +368,9 @@ func (i *Interceptor) logToolCall(traceID, sessionID, toolName, arguments string
 	}
 }
 
-func buildWarningContent(blockedCalls []BlockedToolCall) string {
-	warning := "[SECURITY] The following tool calls were blocked:\n"
+// BuildWarningContent builds a warning message listing blocked tool calls.
+func BuildWarningContent(blockedCalls []BlockedToolCall) string {
+	warning := "[Crust] The following tool calls were blocked:\n"
 	for _, bc := range blockedCalls {
 		warning += "- " + bc.ToolCall.Name
 		if bc.MatchResult.Message != "" {
@@ -306,7 +391,7 @@ func buildReplaceMessage(matchResult rules.MatchResult) string {
 
 // buildReplaceWarning creates a friendly warning for replace mode
 func buildReplaceWarning(blockedCalls []BlockedToolCall) string {
-	warning := "[AgentShepherd] The following tool calls were blocked. Please try a different approach:\n"
+	warning := "[Crust] The following tool calls were blocked. Please try a different approach:\n"
 	for _, bc := range blockedCalls {
 		warning += fmt.Sprintf("- %s: %s\n", bc.ToolCall.Name, buildReplaceMessage(bc.MatchResult))
 	}
@@ -374,4 +459,32 @@ type anthropicContentBlock struct {
 	Name  string          `json:"name,omitempty"`
 	Input json.RawMessage `json:"input,omitempty"`
 	Text  string          `json:"text,omitempty"`
+}
+
+// OpenAI Responses API structures
+type openAIResponsesResponse struct {
+	ID     string                      `json:"id,omitempty"`
+	Object string                      `json:"object,omitempty"`
+	Model  string                      `json:"model,omitempty"`
+	Output []openAIResponsesOutputItem `json:"output,omitempty"`
+	Usage  *openAIResponsesUsage       `json:"usage,omitempty"`
+}
+
+type openAIResponsesOutputItem struct {
+	Type      string                   `json:"type"`
+	ID        string                   `json:"id,omitempty"`
+	CallID    string                   `json:"call_id,omitempty"`
+	Name      string                   `json:"name,omitempty"`
+	Arguments string                   `json:"arguments,omitempty"`
+	Content   []openAIResponsesContent `json:"content,omitempty"`
+}
+
+type openAIResponsesContent struct {
+	Type string `json:"type"`
+	Text string `json:"text,omitempty"`
+}
+
+type openAIResponsesUsage struct {
+	InputTokens  int64 `json:"input_tokens"`
+	OutputTokens int64 `json:"output_tokens"`
 }

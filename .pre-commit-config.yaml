@@ -54,12 +54,33 @@ repos:
         name: gitleaks (secret detection)
         exclude: (node_modules/|\.venv/|\.git/|__pycache__/)
 
+  # Dependency vulnerability check (govulncheck)
+  - repo: local
+    hooks:
+      - id: govulncheck
+        name: govulncheck (dependency CVEs)
+        entry: bash -c '~/go/bin/govulncheck ./...'
+        language: system
+        pass_filenames: false
+        files: (go\.mod|go\.sum|\.go)$
+
+  # Semgrep SAST scan
+  - repo: local
+    hooks:
+      - id: semgrep
+        name: semgrep (SAST)
+        entry: bash -c 'semgrep scan --config auto --error .'
+        language: system
+        pass_filenames: false
+        files: \.go$
+        stages: [pre-push]
+
   # Rule linting - validate rule syntax and patterns
   - repo: local
     hooks:
       - id: rule-lint
         name: rule lint
-        entry: bash -c 'go build -o /tmp/agentshepherd-lint . && /tmp/agentshepherd-lint lint-rules'
+        entry: bash -c 'go build -o /tmp/crust-lint . && /tmp/crust-lint lint-rules'
         language: system
         pass_filenames: false
         files: (internal/rules/builtin/.*\.yaml)$
@@ -79,7 +100,7 @@ repos:
     hooks:
       - id: sandbox-consistency
         name: sandbox consistency check
-        entry: bash -c 'go build -o /tmp/agentshepherd-check . && /tmp/agentshepherd-check check-sandbox'
+        entry: bash -c 'go build -o /tmp/crust-check . && /tmp/crust-check check-sandbox'
         language: system
         pass_filenames: false
         files: (internal/rules/builtin/.*\.yaml|internal/sandbox/.*\.go)$
@@ -103,5 +124,5 @@ repos:
         entry: bash -c 'go test ./internal/sandbox/... -run "TestSandbox" -v'
         language: system
         pass_filenames: false
-        files: (internal/sandbox/.*\.go|cmd/sandbox-exec/)$
+        files: internal/sandbox/.*\.go$
         stages: [pre-commit]
