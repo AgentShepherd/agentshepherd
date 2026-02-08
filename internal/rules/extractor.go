@@ -200,7 +200,7 @@ func (e *Extractor) Extract(toolName string, args json.RawMessage) ExtractedInfo
 	toolLower := strings.ToLower(toolName)
 
 	switch toolLower {
-	case "bash":
+	case "bash", "exec":
 		e.extractBashCommand(&info)
 	case "read", "read_file":
 		e.extractReadTool(&info)
@@ -208,7 +208,7 @@ func (e *Extractor) Extract(toolName string, args json.RawMessage) ExtractedInfo
 		e.extractWriteTool(&info)
 	case "edit":
 		e.extractEditTool(&info)
-	case "webfetch":
+	case "webfetch", "web_fetch", "web_search", "browser":
 		e.extractWebFetchTool(&info)
 	default:
 		// Unknown tool (including MCP): only extract generic paths
