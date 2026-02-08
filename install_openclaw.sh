@@ -99,11 +99,22 @@ detect_arch() {
 
 # Check for required commands
 check_requirements() {
-    local missing=()
-
     if ! command -v curl &> /dev/null && ! command -v wget &> /dev/null; then
-        missing+=("curl or wget")
+        echo -e "${RED}Error: Missing required command: curl or wget${NC}"
+        echo "Install curl or wget and try again."
+        exit 1
     fi
+
+    if ! command -v tar &> /dev/null; then
+        echo -e "${RED}Error: Missing required command: tar${NC}"
+        echo "Install tar and try again."
+        exit 1
+    fi
+}
+
+# Check for source build requirements
+check_source_requirements() {
+    local missing=()
 
     if ! command -v git &> /dev/null; then
         missing+=("git")
@@ -114,8 +125,7 @@ check_requirements() {
     fi
 
     if [ ${#missing[@]} -gt 0 ]; then
-        echo -e "${RED}Error: Missing required commands: ${missing[*]}${NC}"
-        echo "Install the missing tools and try again."
+        echo -e "${RED}Error: Pre-built binary not available and source build requires: ${missing[*]}${NC}"
         exit 1
     fi
 }
@@ -132,14 +142,14 @@ download() {
     fi
 }
 
-# Get latest version from GitHub (uses latest tag or main)
+# Get latest version from GitHub releases API
 get_latest_version() {
-    local url="https://api.github.com/repos/${GITHUB_REPO}/tags"
+    local url="https://api.github.com/repos/${GITHUB_REPO}/releases/latest"
     local version
     if command -v curl &> /dev/null; then
-        version=$(curl -fsSL "$url" 2>/dev/null | grep '"name"' | head -1 | sed -E 's/.*"([^"]+)".*/\1/')
+        version=$(curl -fsSL "$url" 2>/dev/null | grep '"tag_name"' | head -1 | sed -E 's/.*"([^"]+)".*/\1/')
     elif command -v wget &> /dev/null; then
-        version=$(wget -qO- "$url" 2>/dev/null | grep '"name"' | head -1 | sed -E 's/.*"([^"]+)".*/\1/')
+        version=$(wget -qO- "$url" 2>/dev/null | grep '"tag_name"' | head -1 | sed -E 's/.*"([^"]+)".*/\1/')
     fi
     echo "${version:-main}"
 }
@@ -184,20 +194,33 @@ main() {
     tmp_dir=$(mktemp -d)
     trap 'rm -rf "$tmp_dir"' EXIT
 
-    echo -e "${YELLOW}Cloning repository...${NC}"
-    if ! git clone --depth 1 --branch "$VERSION" "https://github.com/${GITHUB_REPO}.git" "$tmp_dir/crust" 2>/dev/null; then
-        # Fallback to main if version tag doesn't exist
-        git clone --depth 1 "https://github.com/${GITHUB_REPO}.git" "$tmp_dir/crust"
+    # Try downloading pre-built binary from GitHub Releases
+    local archive_name="crust_${VERSION#v}_${os}_${arch}.tar.gz"
+    local download_url="https://github.com/${GITHUB_REPO}/releases/download/${VERSION}/${archive_name}"
+    local installed=false
+
+    echo -e "${YELLOW}Downloading pre-built binary...${NC}"
+    if download "$download_url" "$tmp_dir/$archive_name" 2>/dev/null; then
+        tar -xzf "$tmp_dir/$archive_name" -C "$tmp_dir"
+        if [ -f "$tmp_dir/crust" ]; then
+            installed=true
+        fi
     fi
 
-    echo -e "${YELLOW}Building Crust...${NC}"
-    cd "$tmp_dir/crust"
-    go build -ldflags "-X main.Version=${VERSION#v}" -o crust .
+    if [ "$installed" = false ]; then
+        echo -e "${YELLOW}Pre-built binary not available, building from source...${NC}"
+        check_source_requirements
+        if ! git clone --depth 1 --branch "$VERSION" "https://github.com/${GITHUB_REPO}.git" "$tmp_dir/crust-src" 2>/dev/null; then
+            git clone --depth 1 "https://github.com/${GITHUB_REPO}.git" "$tmp_dir/crust-src"
+        fi
+        cd "$tmp_dir/crust-src"
+        go build -ldflags "-X main.Version=${VERSION#v}" -o "$tmp_dir/crust" .
+    fi
 
     # Install binary
     echo -e "${YELLOW}Installing to ${INSTALL_DIR}...${NC}"
     mkdir -p "$INSTALL_DIR"
-    mv "$tmp_dir/crust/crust" "$INSTALL_DIR/$BINARY_NAME"
+    mv "$tmp_dir/crust" "$INSTALL_DIR/$BINARY_NAME"
     chmod +x "$INSTALL_DIR/$BINARY_NAME"
 
     # Create data directory
