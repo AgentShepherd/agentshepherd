@@ -200,7 +200,7 @@ func (e *Extractor) Extract(toolName string, args json.RawMessage) ExtractedInfo
 	toolLower := strings.ToLower(toolName)
 
 	switch toolLower {
-	case "bash":
+	case "bash", "exec":
 		e.extractBashCommand(&info)
 	case "read", "read_file":
 		e.extractReadTool(&info)
