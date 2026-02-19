@@ -14,10 +14,21 @@ repos:
     hooks:
       - id: golangci-lint
         name: golangci-lint
-        entry: bash -c '~/go/bin/golangci-lint run --config .golangci.yml ./...'
+        entry: bash -c '~/go/bin/golangci-lint run ./...'
         language: system
         files: \.go$
         pass_filenames: false
+
+  # Nil safety analysis
+  - repo: local
+    hooks:
+      - id: nilaway
+        name: nilaway (nil safety)
+        entry: bash -c '~/go/bin/nilaway ./...'
+        language: system
+        files: \.go$
+        pass_filenames: false
+
 
   # Shell script checking
   - repo: local
@@ -110,7 +121,7 @@ repos:
     hooks:
       - id: go-test
         name: go test
-        entry: bash -c 'go test ./... -short'
+        entry: bash -c 'go test -race ./... -short'
         language: system
         pass_filenames: false
         files: \.go$
@@ -121,8 +132,19 @@ repos:
     hooks:
       - id: go-test-e2e
         name: go test e2e
-        entry: bash -c 'go test ./internal/sandbox/... -run "TestSandbox" -v'
+        entry: bash -c 'go test -race ./internal/sandbox/... -run "TestSandbox" -v'
         language: system
         pass_filenames: false
         files: internal/sandbox/.*\.go$
         stages: [pre-commit]
+
+  # Demo GIF regeneration (pre-push only, skips if vhs not installed)
+  - repo: local
+    hooks:
+      - id: demo-gif
+        name: demo-gif (regenerate docs/demo.gif)
+        entry: scripts/generate-demo-gif.sh
+        language: script
+        pass_filenames: false
+        files: (internal/tui/.*\.go|internal/logger/logger\.go|scripts/demo\.tape|scripts/demo-attack\.sh)$
+        stages: [pre-push]

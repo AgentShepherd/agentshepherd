@@ -1,64 +1,58 @@
 package sandbox
 
 import (
-	"fmt"
+	"errors"
 	"runtime"
 )
 
 // Sandbox wraps command execution in an OS-level sandbox.
-type Sandbox struct {
-	mapper *Mapper
-}
+type Sandbox struct{}
 
 // New creates a new Sandbox instance.
-func New(mapper *Mapper) *Sandbox {
-	return &Sandbox{
-		mapper: mapper,
-	}
+func New() *Sandbox {
+	return &Sandbox{}
 }
 
 // Wrap executes a command inside the sandbox.
 // Returns the exit code and any error.
 func (s *Sandbox) Wrap(command []string) (int, error) {
 	if len(command) == 0 {
-		return 1, fmt.Errorf("no command specified")
+		return 1, errors.New("no command specified")
 	}
 
 	return s.execute(command)
 }
 
-// IsHelperInstalled returns true if the bakelens-sandbox binary is found.
-func IsHelperInstalled() bool {
+// IsSupported returns whether sandbox is supported on this platform.
+// Checks that the helper binary exists — Rust validates
+// kernel capabilities at runtime.
+func IsSupported() bool {
 	_, err := findBakelensSandbox()
 	return err == nil
 }
 
-// IsSupported returns whether sandbox is supported on this platform.
-func IsSupported() bool {
-	switch runtime.GOOS {
-	case "darwin":
-		return true
-	case "linux":
-		return isLandlockSupported()
-	default:
-		return false
-	}
-}
+// helperPathOverride allows tests to override the helper binary path.
+var helperPathOverride string
 
-// Platform returns the sandbox mechanism for the current platform.
+// Platform returns the sandbox platform name.
+// Rust determines which enforcement mechanisms to use at runtime.
 func Platform() string {
 	switch runtime.GOOS {
 	case "darwin":
-		return "bakelens-sandbox (Seatbelt)"
+		return "bakelens-sandbox (macOS)"
 	case "linux":
-		abi := detectLandlockABI()
-		if abi >= 3 {
-			return fmt.Sprintf("Landlock ABI v%d (files + network)", abi)
-		} else if abi >= 1 {
-			return fmt.Sprintf("Landlock ABI v%d (files only)", abi)
-		}
-		return "Landlock not available"
+		return "bakelens-sandbox (Linux)"
+	case "freebsd":
+		return "bakelens-sandbox (FreeBSD)"
+	case "windows":
+		return "bakelens-sandbox (Windows)"
 	default:
 		return "not supported"
 	}
+}
+
+// BuildPolicy builds a rules-mode JSON policy for the given command.
+// Exported for callers that need the raw policy (e.g., dry-run preview).
+func BuildPolicy(command []string) ([]byte, error) {
+	return buildPolicy(command)
 }

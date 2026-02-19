@@ -48,7 +48,8 @@ CREATE TABLE IF NOT EXISTS tool_call_logs (
     api_type TEXT,
     was_blocked BOOLEAN DEFAULT FALSE,
     blocked_by_rule TEXT,
-    model TEXT
+    model TEXT,
+    layer TEXT DEFAULT 'L1'
 );
 
 CREATE INDEX IF NOT EXISTS idx_tool_call_logs_timestamp ON tool_call_logs(timestamp);

@@ -5,19 +5,33 @@ rules:
   - name: protect-env-files
     block: ["**/.env", "**/.env.*"]
     except: ["**/.env.example", "**/.env.template"]
-    actions: [read, write, delete, copy, move]
+    actions: [read, write, delete, copy, move, network]
     message: "Cannot access .env files - may contain secrets"
     severity: critical
 
   - name: protect-ssh-keys
     block: ["**/.ssh/id_*"]
     except: ["**/.ssh/id_*.pub"]
-    actions: [read, write, delete, copy, move]
+    actions: [read, write, delete, copy, move, network]
     message: "Cannot access SSH private keys"
     severity: critical
 
   # ===========================================================================
-  # 2. SELF PROTECTION
+  # 2. SYSTEM AUTHENTICATION FILES
+  # ===========================================================================
+  - name: protect-system-auth
+    block:
+      - "/etc/passwd"
+      - "/etc/shadow"
+      - "/etc/master.passwd"
+      - "/etc/sudoers"
+      - "/etc/sudoers.d/**"
+    actions: [read, write, delete, copy, move, network]
+    message: "Cannot access system authentication files"
+    severity: critical
+
+  # ===========================================================================
+  # 3. SELF PROTECTION
   # ===========================================================================
   - name: protect-crust
     block:
@@ -28,7 +42,7 @@ rules:
     severity: critical
 
   # ===========================================================================
-  # 3. SHELL HISTORY PROTECTION
+  # 4. SHELL HISTORY PROTECTION
   # ===========================================================================
   - name: protect-shell-history
     block:
@@ -42,12 +56,12 @@ rules:
       - "**/.psql_history"
       - "**/.sqlite_history"
       - "**/.lesshst"
-    actions: [read, write, delete, copy, move]
+    actions: [read, write, delete, copy, move, network]
     message: "Cannot access shell history files"
     severity: high
 
   # ===========================================================================
-  # 4. CLOUD CREDENTIALS PROTECTION
+  # 5. CLOUD CREDENTIALS PROTECTION
   # ===========================================================================
   - name: protect-cloud-credentials
     block:
@@ -68,12 +82,12 @@ rules:
       - "**/.terraform.d/credentials.tfrc.json"
       - "**/terraform.tfstate"
       - "**/terraform.tfstate.backup"
-    actions: [read, write, delete, copy, move]
+    actions: [read, write, delete, copy, move, network]
     message: "Cannot access cloud credentials"
     severity: critical
 
   # ===========================================================================
-  # 5. GPG/PGP KEY PROTECTION
+  # 6. GPG/PGP KEY PROTECTION
   # ===========================================================================
   - name: protect-gpg-keys
     block:
@@ -84,12 +98,12 @@ rules:
     except:
       - "**/.gnupg/pubring.gpg"
       - "**/.gnupg/*.conf"
-    actions: [read, write, delete, copy, move]
+    actions: [read, write, delete, copy, move, network]
     message: "Cannot access GPG private keys"
     severity: critical
 
   # ===========================================================================
-  # 6. BROWSER DATA PROTECTION
+  # 7. BROWSER DATA PROTECTION
   # ===========================================================================
   - name: protect-browser-data
     block:
@@ -113,18 +127,18 @@ rules:
     severity: high
 
   # ===========================================================================
-  # 7. GIT CREDENTIALS PROTECTION
+  # 8. GIT CREDENTIALS PROTECTION
   # ===========================================================================
   - name: protect-git-credentials
     block:
       - "**/.git-credentials"
       - "**/.config/git/credentials"
-    actions: [read, write, delete, copy, move]
+    actions: [read, write, delete, copy, move, network]
     message: "Cannot access git credentials"
     severity: high
 
   # ===========================================================================
-  # 8. PACKAGE MANAGER TOKENS
+  # 9. PACKAGE MANAGER TOKENS
   # ===========================================================================
   - name: protect-package-tokens
     block:
@@ -145,12 +159,12 @@ rules:
       - "**/.nuget/NuGet.Config"
       # Gem
       - "**/.gem/credentials"
-    actions: [read, write, delete, copy, move]
+    actions: [read, write, delete, copy, move, network]
     message: "Cannot access package manager tokens"
     severity: high
 
   # ===========================================================================
-  # 9. PERSISTENCE PROTECTION - Shell RC Files
+  # 10. PERSISTENCE PROTECTION - Shell RC Files
   # ===========================================================================
   - name: protect-shell-rc
     block:
@@ -166,7 +180,7 @@ rules:
     severity: critical
 
   # ===========================================================================
-  # 10. SSH AUTHORIZED KEYS PROTECTION
+  # 11. SSH AUTHORIZED KEYS PROTECTION
   # ===========================================================================
   - name: protect-ssh-authorized-keys
     block:
@@ -177,7 +191,7 @@ rules:
     severity: critical
 
   # ===========================================================================
-  # 11. PRIVATE KEY CONTENT DETECTION
+  # 12. PRIVATE KEY CONTENT DETECTION
   # ===========================================================================
   - name: detect-private-key-write
     match:
@@ -187,7 +201,7 @@ rules:
     severity: critical
 
   # ===========================================================================
-  # 12. SHELL EVASION PATTERNS (defense-in-depth for command regex rules)
+  # 13. SHELL EVASION PATTERNS (defense-in-depth for command regex rules)
   # ===========================================================================
   - name: block-eval-exec
     match:

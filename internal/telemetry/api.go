@@ -8,6 +8,73 @@ import (
 	"github.com/BakeLens/crust/internal/api"
 )
 
+// SessionsQuery represents query parameters for the sessions endpoint.
+type SessionsQuery struct {
+	Minutes int `form:"minutes" binding:"omitempty,min=1,max=10080"`
+	Limit   int `form:"limit" binding:"omitempty,min=1,max=200"`
+}
+
+// SessionEventsQuery represents query parameters for the session events endpoint.
+type SessionEventsQuery struct {
+	Limit int `form:"limit" binding:"omitempty,min=1,max=200"`
+}
+
+// HandleSessions handles GET /api/telemetry/sessions
+// Returns sessions aggregated from tool_call_logs grouped by session_id.
+// Stats are per-session only — not mixed with aggregate in-memory metrics.
+func (h *APIHandler) HandleSessions(c *gin.Context) {
+	var query SessionsQuery
+	if err := c.ShouldBindQuery(&query); err != nil {
+		api.Error(c, http.StatusBadRequest, err.Error())
+		return
+	}
+	if query.Minutes == 0 {
+		query.Minutes = 60
+	}
+	if query.Limit == 0 {
+		query.Limit = 50
+	}
+
+	sessions, err := h.storage.GetSessions(query.Minutes, query.Limit)
+	if err != nil {
+		api.Error(c, http.StatusInternalServerError, "Failed to get sessions")
+		return
+	}
+	if sessions == nil {
+		sessions = []SessionSummary{}
+	}
+	api.Success(c, sessions)
+}
+
+// HandleSessionEvents handles GET /api/telemetry/sessions/:session_id/events
+// Returns the most recent tool call events for a single session, newest-first.
+func (h *APIHandler) HandleSessionEvents(c *gin.Context) {
+	sessionID := c.Param("session_id")
+	if sessionID == "" {
+		api.Error(c, http.StatusBadRequest, "Session ID required")
+		return
+	}
+
+	var query SessionEventsQuery
+	if err := c.ShouldBindQuery(&query); err != nil {
+		api.Error(c, http.StatusBadRequest, err.Error())
+		return
+	}
+	if query.Limit == 0 {
+		query.Limit = 50
+	}
+
+	events, err := h.storage.GetSessionEvents(sessionID, query.Limit)
+	if err != nil {
+		api.Error(c, http.StatusInternalServerError, "Failed to get session events")
+		return
+	}
+	if events == nil {
+		events = []ToolCallLog{}
+	}
+	api.Success(c, events)
+}
+
 // APIHandler handles HTTP API requests for telemetry
 type APIHandler struct {
 	storage *Storage
@@ -16,16 +83,6 @@ type APIHandler struct {
 // NewAPIHandler creates a new telemetry API handler
 func NewAPIHandler(storage *Storage) *APIHandler {
 	return &APIHandler{storage: storage}
-}
-
-// RegisterRoutes registers telemetry API routes on the given router
-func (h *APIHandler) RegisterRoutes(router *gin.Engine) {
-	telemetry := router.Group("/api/telemetry")
-	{
-		telemetry.GET("/traces", h.HandleTraces)
-		telemetry.GET("/traces/:trace_id", h.HandleTrace)
-		telemetry.GET("/stats", h.HandleStats)
-	}
 }
 
 // TracesQuery represents query parameters for traces endpoint
@@ -152,7 +209,7 @@ func (h *APIHandler) HandleTrace(c *gin.Context) {
 
 // HandleStats handles GET /api/telemetry/stats
 func (h *APIHandler) HandleStats(c *gin.Context) {
-	stats, err := h.storage.GetTelemetryStats()
+	stats, err := h.storage.GetTraceStats()
 	if err != nil {
 		api.Error(c, http.StatusInternalServerError, "Failed to get stats")
 		return

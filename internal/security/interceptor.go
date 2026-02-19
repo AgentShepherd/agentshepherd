@@ -3,11 +3,18 @@ package security
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 	"sync/atomic"
 
 	"github.com/BakeLens/crust/internal/rules"
 	"github.com/BakeLens/crust/internal/telemetry"
 	"github.com/BakeLens/crust/internal/types"
+)
+
+// API-specific protocol constants for content block types.
+const (
+	contentTypeToolUse      = "tool_use"      // Anthropic
+	contentTypeFunctionCall = "function_call" // OpenAI Responses
 )
 
 // Interceptor handles tool call interception and response modification
@@ -162,7 +169,7 @@ func (i *Interceptor) InterceptAnthropicResponse(responseBody []byte, traceID, s
 	modified := false
 
 	for _, block := range resp.Content {
-		if block.Type != "tool_use" {
+		if block.Type != contentTypeToolUse {
 			allowedContent = append(allowedContent, block)
 			continue
 		}
@@ -238,7 +245,7 @@ func (i *Interceptor) InterceptOpenAIResponsesResponse(responseBody []byte, trac
 	modified := false
 
 	for _, item := range resp.Output {
-		if item.Type != "function_call" {
+		if item.Type != contentTypeFunctionCall {
 			allowedOutput = append(allowedOutput, item)
 			continue
 		}
@@ -324,15 +331,30 @@ func (i *Interceptor) evaluateToolCall(
 		Arguments: tc.Arguments,
 	})
 
-	i.logToolCall(traceID, sessionID, tc.Name, argsString, apiType, model, matchResult)
+	isBlocked := matchResult.Matched && matchResult.Action == rules.ActionBlock
+	ruleName := ""
+	if matchResult.Matched {
+		ruleName = matchResult.RuleName
+	}
 
-	if matchResult.Matched && matchResult.Action == rules.ActionBlock {
+	RecordEvent(Event{
+		Layer:      LayerL1,
+		TraceID:    traceID,
+		SessionID:  sessionID,
+		ToolName:   tc.Name,
+		Arguments:  json.RawMessage(argsString),
+		APIType:    apiType,
+		Model:      model,
+		WasBlocked: isBlocked,
+		RuleName:   ruleName,
+	})
+
+	if isBlocked {
 		result.BlockedToolCalls = append(result.BlockedToolCalls, BlockedToolCall{
 			ToolCall:    tc,
 			MatchResult: matchResult,
 		})
 		result.HasBlockedCalls = true
-		RecordLayer1Block()
 		if useReplaceMode {
 			log.Warn("[Layer1] Replaced: %s (rule: %s)", tc.Name, matchResult.RuleName)
 		} else {
@@ -342,42 +364,21 @@ func (i *Interceptor) evaluateToolCall(
 	}
 
 	result.AllowedToolCalls = append(result.AllowedToolCalls, tc)
-	RecordLayer1Allow()
 	return matchResult, false
-}
-
-func (i *Interceptor) logToolCall(traceID, sessionID, toolName, arguments string, apiType types.APIType, model string, matchResult rules.MatchResult) {
-	isBlocked := matchResult.Matched && matchResult.Action == rules.ActionBlock
-
-	tcLog := telemetry.ToolCallLog{
-		TraceID:       traceID,
-		SessionID:     sessionID,
-		ToolName:      toolName,
-		ToolArguments: json.RawMessage(arguments),
-		APIType:       apiType,
-		Model:         model,
-		WasBlocked:    isBlocked,
-	}
-
-	if matchResult.Matched {
-		tcLog.BlockedByRule = matchResult.RuleName
-	}
-
-	if err := i.storage.LogToolCall(tcLog); err != nil {
-		log.Warn("Failed to log tool call: %v", err)
-	}
 }
 
 // BuildWarningContent builds a warning message listing blocked tool calls.
 func BuildWarningContent(blockedCalls []BlockedToolCall) string {
 	warning := "[Crust] The following tool calls were blocked:\n"
+	var sb strings.Builder
 	for _, bc := range blockedCalls {
-		warning += "- " + bc.ToolCall.Name
+		sb.WriteString("- " + bc.ToolCall.Name)
 		if bc.MatchResult.Message != "" {
-			warning += ": " + bc.MatchResult.Message
+			sb.WriteString(": " + bc.MatchResult.Message)
 		}
-		warning += "\n"
+		sb.WriteString("\n")
 	}
+	warning += sb.String()
 	return warning
 }
 
@@ -392,9 +393,11 @@ func buildReplaceMessage(matchResult rules.MatchResult) string {
 // buildReplaceWarning creates a friendly warning for replace mode
 func buildReplaceWarning(blockedCalls []BlockedToolCall) string {
 	warning := "[Crust] The following tool calls were blocked. Please try a different approach:\n"
+	var sb strings.Builder
 	for _, bc := range blockedCalls {
-		warning += fmt.Sprintf("- %s: %s\n", bc.ToolCall.Name, buildReplaceMessage(bc.MatchResult))
+		fmt.Fprintf(&sb, "- %s: %s\n", bc.ToolCall.Name, buildReplaceMessage(bc.MatchResult))
 	}
+	warning += sb.String()
 	return warning
 }
 
@@ -416,7 +419,7 @@ type openAIUsage struct {
 
 type openAIChoice struct {
 	Index        int            `json:"index"`
-	Message      openAIMessage  `json:"message,omitempty"`
+	Message      openAIMessage  `json:"message,omitzero"`
 	Delta        *openAIMessage `json:"delta,omitempty"`
 	FinishReason string         `json:"finish_reason,omitempty"`
 }

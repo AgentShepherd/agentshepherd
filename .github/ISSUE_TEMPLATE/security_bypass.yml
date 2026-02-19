@@ -1,0 +1,56 @@
+name: Security Bypass (non-sensitive)
+description: Report a security rule gap that does NOT include an exploitable bypass
+labels: ["security", "bug", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **If you have found an exploitable security bypass, sandbox escape, or vulnerability,
+        please DO NOT use this form.** Report it privately via
+        [GitHub Security Advisories](https://github.com/BakeLab/crust-dev/security/advisories)
+        or see our [SECURITY.md](https://github.com/BakeLab/crust-dev/blob/main/SECURITY.md).
+
+        This form is for non-sensitive security improvements (e.g. "rule X should also cover pattern Y").
+
+  - type: input
+    id: version
+    attributes:
+      label: Crust Version
+      description: Output of `crust version`
+      placeholder: "1.0.0"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: layer
+    attributes:
+      label: Security Layer
+      description: Which security layer does this relate to?
+      options:
+        - Layer 0 (request history scanning)
+        - Layer 1 (response scanning)
+        - Layer 2 (OS sandbox)
+        - Rules configuration
+        - Unsure
+    validations:
+      required: true
+
+  - type: textarea
+    id: description
+    attributes:
+      label: Description
+      description: What security gap or rule improvement are you suggesting?
+    validations:
+      required: true
+
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating System
+      options:
+        - macOS
+        - Linux
+        - Windows
+        - FreeBSD
+    validations:
+      required: true

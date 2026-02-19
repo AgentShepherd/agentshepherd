@@ -1,10 +1,12 @@
 package rules
 
 import (
+	"cmp"
 	"encoding/json"
 	"fmt"
+	"os"
 	"regexp"
-	"sort"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -17,7 +19,40 @@ var log = logger.New("rules")
 
 // selfProtectAPIRegex is a hardcoded, tamper-proof check for management API access.
 // Compiled once at init — cannot be altered by YAML rule changes or hot-reload.
-var selfProtectAPIRegex = regexp.MustCompile(`(?i)(localhost|127\.0\.0\.1|\[?::1\]?|0\.0\.0\.0|0x7f000001|2130706433)[:/].*crust`)
+// Covers: localhost, entire 127.0.0.0/8 range, IPv6 loopback (::1),
+// IPv6-mapped IPv4 (::ffff:127.x.x.x), 0.0.0.0, hex (0x7fXXXXXX), decimal (2130706433),
+// inet_aton short forms (127.1, 127.0.1), DNS rebinding services (nip.io, sslip.io, etc.).
+var selfProtectAPIRegex = regexp.MustCompile(
+	`(?i)(` +
+		`localhost|` +
+		`127\.\d{1,3}\.\d{1,3}\.\d{1,3}|` + // entire 127.0.0.0/8 loopback range (4-part)
+		`127\.\d+\.\d+|` + // inet_aton 3-part: 127.0.1
+		`127\.\d+|` + // inet_aton 2-part: 127.1
+		`\[?::(?:ffff:)?127\.\d{1,3}\.\d{1,3}\.\d{1,3}\]?|` + // IPv6-mapped 127.x.x.x
+		`\[?::1\]?|` + // IPv6 loopback
+		`0\.0\.0\.0|` + // all-interfaces bind
+		`0x7f[0-9a-f]{6}|` + // hex representation of 127.0.0.0/8
+		`0x0[0:]|` + // hex zero host: 0x0:port or 0x0/path → 0.0.0.0
+		`0177\.\d{1,3}\.\d{1,3}\.\d{1,3}|` + // octal representation of 127.0.0.0/8
+		`2130706433|` + // decimal representation of 127.0.0.1
+		// DNS rebinding services: hostnames that resolve to loopback IPs
+		`[a-z0-9.-]*\.(?:nip|sslip|xip)\.io|` + // wildcard DNS: A.B.C.D.nip.io → A.B.C.D
+		`(?:localtest|lvh|vcap)\.me|` + // known rebinding domains → 127.0.0.1
+		`lacolhost\.com` + // known rebinding domain → 127.0.0.1
+		`)[:/].*crust` +
+		`|://0[:/].*crust`) // bare 0 as URL host (= 0.0.0.0)
+
+// selfProtectSocketRegex blocks agents from accessing the management API
+// via Unix domain sockets or Windows named pipes. Compiled once at init.
+var selfProtectSocketRegex = regexp.MustCompile(
+	`(?i)(` +
+		`--unix-socket|` + // curl --unix-socket
+		`UNIX-CONNECT:|` + // socat UNIX-CONNECT:
+		`AF_UNIX|` + // Python/C socket code
+		`crust-api[-.]\S*\.sock|` + // socket filenames (crust-api-9090.sock etc.)
+		`\\\\.\\pipe\\crust|` + // Windows named pipe \\.\pipe\crust*
+		`NamedPipeClientStream` + // .NET named pipe access
+		`)`)
 
 // Engine is the path-based rule engine
 type Engine struct {
@@ -36,6 +71,7 @@ type Engine struct {
 	extractor  *Extractor
 	normalizer *Normalizer
 	loader     *Loader
+	preFilter  *PreFilter
 
 	// Configuration
 	config EngineConfig
@@ -74,9 +110,9 @@ type CompiledRule struct {
 
 // EngineConfig holds engine configuration
 type EngineConfig struct {
-	UserRulesDir   string
-	DisableBuiltin bool
-	APIPort        int // Management API port (for dynamic protection rules)
+	UserRulesDir        string
+	DisableBuiltin      bool
+	SubprocessIsolation bool // Isolate shell interpreter in a subprocess for crash safety
 }
 
 // ReloadCallback is called after rules are reloaded
@@ -110,8 +146,17 @@ func NewEngine(cfg EngineConfig) (*Engine, error) {
 		extractor:  NewExtractor(),
 		normalizer: NewNormalizer(),
 		loader:     loader,
+		preFilter:  NewPreFilter(),
 		config:     cfg,
 		hitCounts:  make(map[string]*int64),
+	}
+
+	if cfg.SubprocessIsolation {
+		if exe, err := os.Executable(); err == nil {
+			if err := e.extractor.EnableSubprocessIsolation(exe); err != nil {
+				log.Warn("Shell worker failed to start (falling back to in-process): %v", err)
+			}
+		}
 	}
 
 	// Load builtin rules (unless disabled)
@@ -161,6 +206,7 @@ func NewTestEngine(rules []Rule) (*Engine, error) {
 		extractor:  NewExtractor(),
 		normalizer: NewNormalizer(),
 		loader:     NewLoader(""),
+		preFilter:  NewPreFilter(),
 		config:     EngineConfig{DisableBuiltin: true},
 		hitCounts:  make(map[string]*int64),
 	}
@@ -183,6 +229,9 @@ func NewTestEngineWithNormalizer(rules []Rule, normalizer *Normalizer) (*Engine,
 		return nil, err
 	}
 	engine.normalizer = normalizer
+	// Match the extractor's env to the normalizer's env so variable
+	// expansion ($HOME, etc.) resolves consistently in tests.
+	engine.extractor = NewExtractorWithEnv(normalizer.env)
 	return engine, nil
 }
 
@@ -212,6 +261,19 @@ func generateProtectionRules(cfg EngineConfig) []Rule {
 		},
 		Actions:  []Operation{OpWrite},
 		Message:  "BLOCKED: Cannot modify Crust rule files directly",
+		Severity: SeverityCritical,
+		Source:   SourceBuiltin,
+	})
+
+	// Rule 3: Block access to management API socket files
+	rules = append(rules, Rule{
+		Name:        "block-crust-socket-access",
+		Description: "Block access to Crust management API sockets",
+		Block: Block{
+			Paths: []string{"**/.crust/crust-api-*.sock", "**/.crust/*.sock"},
+		},
+		Actions:  []Operation{OpRead, OpWrite, OpDelete},
+		Message:  "BLOCKED: Cannot access Crust management socket",
 		Severity: SeverityCritical,
 		Source:   SourceBuiltin,
 	})
@@ -268,12 +330,26 @@ func (e *Engine) Evaluate(call ToolCall) MatchResult {
 	// Step 1: Extract paths and operation from the tool call
 	info := e.extractor.Extract(call.Name, call.Arguments)
 
+	// Step 1.4: PreFilter — detect obfuscation patterns the AST parser misses
+	// (base64 decode, hex escapes, IFS manipulation, dangerous curl/nc flags)
+	if info.Command != "" {
+		if match := e.preFilter.Check(info.Command); match != nil {
+			return MatchResult{
+				Matched:  true,
+				RuleName: "builtin:block-obfuscation",
+				Severity: SeverityHigh,
+				Action:   ActionBlock,
+				Message:  fmt.Sprintf("Blocked: %s (%s)", match.Reason, match.PatternName),
+			}
+		}
+	}
+
 	// Step 1.5: Block evasive commands that prevent static analysis
 	if info.Evasive {
 		return MatchResult{
 			Matched:  true,
 			RuleName: "builtin:block-shell-evasion",
-			Severity: "high",
+			Severity: SeverityHigh,
 			Action:   ActionBlock,
 			Message:  info.EvasiveReason,
 		}
@@ -284,17 +360,33 @@ func (e *Engine) Evaluate(call ToolCall) MatchResult {
 	if info.Content != "" {
 		info.Content = NormalizeUnicode(info.Content)
 	}
+	if info.RawJSON != "" {
+		info.RawJSON = NormalizeUnicode(info.RawJSON)
+	}
 
 	// Step 1.6: Hardcoded self-protection — block management API access.
 	// This check lives in Go code (not YAML) so it cannot be tampered with
 	// by agents modifying rule files or triggering hot-reload.
-	if info.Content != "" && selfProtectAPIRegex.MatchString(info.Content) {
+	// Uses RawJSON (full payload) — not Content, which may be overwritten to a single field.
+	if info.RawJSON != "" && selfProtectAPIRegex.MatchString(info.RawJSON) {
 		return MatchResult{
 			Matched:  true,
 			RuleName: "builtin:protect-crust-api",
-			Severity: "critical",
+			Severity: SeverityCritical,
 			Action:   ActionBlock,
 			Message:  "Cannot access Crust management API",
+		}
+	}
+
+	// Step 1.65: Block management API access via Unix socket / named pipe.
+	// Agents may try curl --unix-socket, socat, or direct Python AF_UNIX.
+	if info.RawJSON != "" && selfProtectSocketRegex.MatchString(info.RawJSON) {
+		return MatchResult{
+			Matched:  true,
+			RuleName: "builtin:protect-crust-socket",
+			Severity: SeverityCritical,
+			Action:   ActionBlock,
+			Message:  "Cannot access Crust management socket",
 		}
 	}
 
@@ -302,42 +394,75 @@ func (e *Engine) Evaluate(call ToolCall) MatchResult {
 	rules := e.merged
 	e.mu.RUnlock()
 
-	// Step 2: Normalize extracted paths and resolve symlinks to prevent bypasses
-	normalizedPaths := e.normalizer.NormalizeAllWithSymlinks(info.Paths)
+	// Step 2: Normalize extracted paths (without symlink resolution yet)
+	normalizedPaths := e.normalizer.NormalizeAll(info.Paths)
+
+	// Step 2.5: Block /proc access (Linux-only, no-op on other platforms).
+	// /proc exposes process environ, cmdline, memory — all sensitive.
+	// Hardcoded in Go (not YAML) so it cannot be tampered with.
+	// Check BEFORE symlink resolution: EvalSymlinks on /proc/self/fd/N resolves
+	// to the target file, losing the /proc/ prefix. The normalizer already
+	// maps /dev/fd → /proc/self/fd so traversals like /dev/fd/../environ match.
+	if blocked, path := hasProcPath(normalizedPaths); blocked {
+		return MatchResult{
+			Matched:  true,
+			RuleName: "builtin:protect-proc",
+			Severity: SeverityCritical,
+			Action:   ActionBlock,
+			Message:  fmt.Sprintf("Cannot access %s — /proc may expose secrets, API keys, and process memory", path),
+		}
+	}
+
+	// Step 2.9: Resolve symlinks for rule matching (after proc check).
+	// Match against BOTH pre-resolved and post-resolved paths so rules work
+	// regardless of whether they use symlink paths or real paths.
+	// Example: on macOS /etc is a symlink to /private/etc — a rule for
+	// "/etc/passwd" matches the pre-resolved path, while "/private/etc/passwd"
+	// matches the resolved path. User-created symlinks (ln -s ~/.ssh/id_rsa
+	// /tmp/x) are caught by the resolved path matching the SSH key rule.
+	resolvedPaths := e.normalizer.resolveSymlinks(normalizedPaths)
+	allPaths := mergeUnique(normalizedPaths, resolvedPaths)
 
 	// Step 3: Evaluate operation-based rules (for known tools)
-	if info.Operation != "" {
-		if result := e.evaluateOperationRules(rules, info, normalizedPaths, call.Name); result.Matched {
+	if info.Operation != OpNone {
+		if result := e.evaluateOperationRules(rules, info, allPaths, call.Name); result.Matched {
 			return result
 		}
 	}
 
 	// Step 4: Fallback rules (content-only) - matches raw JSON of ANY tool including MCP
+	// Uses RawJSON (full payload) so extractContentField overwrites don't hide fields.
 	// Uses pre-compiled content regex from CompiledMatch when available.
+	contentForRules := info.RawJSON
+	if contentForRules == "" {
+		contentForRules = info.Content
+	}
 	for _, compiled := range rules {
 		if !compiled.Rule.IsEnabled() {
 			continue
 		}
-		if compiled.Rule.IsContentOnly() && info.Content != "" {
+		if compiled.Rule.IsContentOnly() && contentForRules != "" {
+			// Respect actions filter if rule specifies actions.
+			// E.g., detect-private-key-write with actions:[write] should NOT
+			// fire on read operations (grep "PRIVATE KEY" *.py).
+			// OpNone (unknown tools, MCP plugins) still matches regardless —
+			// preserves catch-all behavior for unrecognized tools.
+			if info.Operation != OpNone && !compiled.Rule.HasAction(info.Operation) {
+				continue
+			}
 			contentMatched := false
 			if compiled.MatchCompiled != nil {
 				// Use pre-compiled pattern
 				if compiled.MatchCompiled.ContentRegex != nil {
-					contentMatched = compiled.MatchCompiled.ContentRegex.MatchString(info.Content)
+					contentMatched = compiled.MatchCompiled.ContentRegex.MatchString(contentForRules)
 				} else {
 					// Literal match (case-insensitive substring)
-					contentMatched = containsIgnoreCase(info.Content, compiled.MatchCompiled.Match.Content)
+					contentMatched = containsIgnoreCase(contentForRules, compiled.MatchCompiled.Match.Content)
 				}
 			}
 			if contentMatched {
 				e.incrementHitCount(compiled.Rule.Name)
-				return MatchResult{
-					Matched:  true,
-					RuleName: compiled.Rule.Name,
-					Severity: compiled.Rule.GetSeverity(),
-					Action:   ActionBlock,
-					Message:  compiled.Rule.Message,
-				}
+				return blockResult(&compiled.Rule, "")
 			}
 		}
 	}
@@ -363,33 +488,19 @@ func (e *Engine) evaluateOperationRules(rules []CompiledRule, info ExtractedInfo
 		if compiled.PathMatcher != nil && len(normalizedPaths) > 0 {
 			matched, matchedPath := compiled.PathMatcher.MatchAny(normalizedPaths)
 			if matched {
-				// Increment hit count
 				e.incrementHitCount(compiled.Rule.Name)
-
-				return MatchResult{
-					Matched:  true,
-					RuleName: compiled.Rule.Name,
-					Severity: compiled.Rule.GetSeverity(),
-					Action:   ActionBlock,
-					Message:  formatMessage(compiled.Rule.Message, matchedPath),
-				}
+				return blockResult(&compiled.Rule, matchedPath)
 			}
 		}
 
-		// Check host matching for network operations
-		if info.Operation == OpNetwork && compiled.HostMatcher != nil && len(info.Hosts) > 0 {
+		// Check host matching whenever hosts are extracted (not just OpNetwork).
+		// This enables host rules to fire for scp (OpCopy), rsync, etc.
+		// The HasAction check at the top of this loop still scopes correctly.
+		if compiled.HostMatcher != nil && len(info.Hosts) > 0 {
 			matched, matchedHost := compiled.HostMatcher.MatchAny(info.Hosts)
 			if matched {
-				// Increment hit count
 				e.incrementHitCount(compiled.Rule.Name)
-
-				return MatchResult{
-					Matched:  true,
-					RuleName: compiled.Rule.Name,
-					Severity: compiled.Rule.GetSeverity(),
-					Action:   ActionBlock,
-					Message:  formatMessage(compiled.Rule.Message, matchedHost),
-				}
+				return blockResult(&compiled.Rule, matchedHost)
 			}
 		}
 
@@ -397,13 +508,7 @@ func (e *Engine) evaluateOperationRules(rules []CompiledRule, info ExtractedInfo
 		if compiled.MatchCompiled != nil {
 			if e.evaluateMatchCompiled(compiled.MatchCompiled, info, normalizedPaths, toolName) {
 				e.incrementHitCount(compiled.Rule.Name)
-				return MatchResult{
-					Matched:  true,
-					RuleName: compiled.Rule.Name,
-					Severity: compiled.Rule.GetSeverity(),
-					Action:   ActionBlock,
-					Message:  compiled.Rule.Message,
-				}
+				return blockResult(&compiled.Rule, "")
 			}
 		}
 
@@ -418,13 +523,7 @@ func (e *Engine) evaluateOperationRules(rules []CompiledRule, info ExtractedInfo
 			}
 			if allMatched {
 				e.incrementHitCount(compiled.Rule.Name)
-				return MatchResult{
-					Matched:  true,
-					RuleName: compiled.Rule.Name,
-					Severity: compiled.Rule.GetSeverity(),
-					Action:   ActionBlock,
-					Message:  compiled.Rule.Message,
-				}
+				return blockResult(&compiled.Rule, "")
 			}
 		}
 
@@ -433,13 +532,7 @@ func (e *Engine) evaluateOperationRules(rules []CompiledRule, info ExtractedInfo
 			for i := range compiled.AnyCompiledMatches {
 				if e.evaluateMatchCompiled(&compiled.AnyCompiledMatches[i], info, normalizedPaths, toolName) {
 					e.incrementHitCount(compiled.Rule.Name)
-					return MatchResult{
-						Matched:  true,
-						RuleName: compiled.Rule.Name,
-						Severity: compiled.Rule.GetSeverity(),
-						Action:   ActionBlock,
-						Message:  compiled.Rule.Message,
-					}
+					return blockResult(&compiled.Rule, "")
 				}
 			}
 		}
@@ -459,26 +552,7 @@ func (e *Engine) evaluateMatchCompiled(cm *CompiledMatch, info ExtractedInfo, no
 
 	// Path matching — use pre-compiled regex or glob
 	if cm.Match.Path != "" {
-		if len(normalizedPaths) == 0 {
-			return false
-		}
-		matched := false
-		if cm.PathRegex != nil {
-			for _, p := range normalizedPaths {
-				if cm.PathRegex.MatchString(p) {
-					matched = true
-					break
-				}
-			}
-		} else if cm.PathGlob != nil {
-			for _, p := range normalizedPaths {
-				if cm.PathGlob.Match(p) {
-					matched = true
-					break
-				}
-			}
-		}
-		if !matched {
+		if !matchAnyRegexGlob(normalizedPaths, cm.PathRegex, cm.PathGlob, "") {
 			return false
 		}
 	}
@@ -493,43 +567,15 @@ func (e *Engine) evaluateMatchCompiled(cm *CompiledMatch, info ExtractedInfo, no
 				return false
 			}
 		} else {
-			// Literal match (case-insensitive substring)
 			if !containsIgnoreCase(info.Command, cm.Match.Command) {
 				return false
 			}
 		}
 	}
 
-	// Host matching — use pre-compiled regex or glob
+	// Host matching — use pre-compiled regex, glob, or literal
 	if cm.Match.Host != "" {
-		if len(info.Hosts) == 0 {
-			return false
-		}
-		matched := false
-		if cm.HostRegex != nil {
-			for _, h := range info.Hosts {
-				if cm.HostRegex.MatchString(h) {
-					matched = true
-					break
-				}
-			}
-		} else if cm.HostGlob != nil {
-			for _, h := range info.Hosts {
-				if cm.HostGlob.Match(h) {
-					matched = true
-					break
-				}
-			}
-		} else {
-			// Literal host match (exact)
-			for _, h := range info.Hosts {
-				if h == cm.Match.Host {
-					matched = true
-					break
-				}
-			}
-		}
-		if !matched {
+		if !matchAnyRegexGlob(info.Hosts, cm.HostRegex, cm.HostGlob, cm.Match.Host) {
 			return false
 		}
 	}
@@ -575,15 +621,48 @@ func compileRegex(pattern string) (*regexp.Regexp, error) {
 	return regexp.Compile(pattern)
 }
 
-// matchTools checks if toolName (lowercase) is in the list of allowed tools
-func matchTools(tools []string, toolName string) bool {
-	toolLower := strings.ToLower(toolName)
-	for _, t := range tools {
-		if t == toolLower {
+// patternKind returns "regex" or "glob" based on the pattern prefix.
+func patternKind(pattern string) string {
+	if strings.HasPrefix(pattern, "re:") {
+		return "regex"
+	}
+	return "glob"
+}
+
+// compilePattern compiles a pattern as either a regex (if "re:" prefixed) or a glob.
+// The separator is used for glob compilation ('/' for paths, '.' for hosts).
+func compilePattern(pattern string, separator rune) (*regexp.Regexp, glob.Glob, error) {
+	if strings.HasPrefix(pattern, "re:") {
+		re, err := compileRegex(pattern[3:])
+		return re, nil, err
+	}
+	g, err := glob.Compile(pattern, separator)
+	return nil, g, err
+}
+
+// matchAnyRegexGlob returns true if any item matches the regex, glob, or literal.
+// Pass nil for unused matchers. Literal is only checked if both re and g are nil.
+func matchAnyRegexGlob(items []string, re *regexp.Regexp, g glob.Glob, literal string) bool {
+	for _, item := range items {
+		if re != nil {
+			if re.MatchString(item) {
+				return true
+			}
+		} else if g != nil {
+			if g.Match(item) {
+				return true
+			}
+		} else if item == literal {
 			return true
 		}
 	}
 	return false
+}
+
+// matchTools checks if toolName (lowercase) is in the list of allowed tools
+func matchTools(tools []string, toolName string) bool {
+	toolLower := strings.ToLower(toolName)
+	return slices.Contains(tools, toolLower)
 }
 
 // containsIgnoreCase checks if s contains substr (case-insensitive)
@@ -599,11 +678,21 @@ func (e *Engine) EvaluateJSON(toolName string, argsJSON string) MatchResult {
 	})
 }
 
-// formatMessage formats a rule message, optionally including the matched path/host
-func formatMessage(template string, matchedValue string) string {
-	// For now, just return the template as-is
-	// Future: could support placeholders like {path} or {host}
-	return template
+// blockResult creates a MatchResult for a blocking rule match.
+// If matchedValue is non-empty, {path} and {host} placeholders in the message are expanded.
+func blockResult(rule *Rule, matchedValue string) MatchResult {
+	msg := rule.Message
+	if matchedValue != "" {
+		msg = strings.Replace(msg, "{path}", matchedValue, 1)
+		msg = strings.Replace(msg, "{host}", matchedValue, 1)
+	}
+	return MatchResult{
+		Matched:  true,
+		RuleName: rule.Name,
+		Severity: rule.GetSeverity(),
+		Action:   ActionBlock,
+		Message:  msg,
+	}
 }
 
 // GetRules returns all active rules
@@ -627,21 +716,20 @@ func (e *Engine) GetRules() []Rule {
 func (e *Engine) GetBuiltinRules() []Rule {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
-
-	rules := make([]Rule, len(e.builtin))
-	for i, cr := range e.builtin {
-		rules[i] = cr.Rule
-	}
-	return rules
+	return extractRules(e.builtin)
 }
 
 // GetUserRules returns only user rules
 func (e *Engine) GetUserRules() []Rule {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
+	return extractRules(e.user)
+}
 
-	rules := make([]Rule, len(e.user))
-	for i, cr := range e.user {
+// extractRules converts a slice of CompiledRule to a slice of Rule.
+func extractRules(compiled []CompiledRule) []Rule {
+	rules := make([]Rule, len(compiled))
+	for i, cr := range compiled {
 		rules[i] = cr.Rule
 	}
 	return rules
@@ -720,7 +808,11 @@ func (e *Engine) OnReload(callback ReloadCallback) {
 // notifyReload calls all registered reload callbacks.
 func (e *Engine) notifyReload() {
 	rules := e.GetAllRules()
-	for _, cb := range e.onReloadCallbacks {
+	e.mu.RLock()
+	cbs := make([]ReloadCallback, len(e.onReloadCallbacks))
+	copy(cbs, e.onReloadCallbacks)
+	e.mu.RUnlock()
+	for _, cb := range cbs {
 		go cb(rules) // Non-blocking
 	}
 }
@@ -728,7 +820,7 @@ func (e *Engine) notifyReload() {
 // sanitizePattern rejects patterns containing null bytes or control characters.
 // Returns an error so the user gets a clear message about what's wrong.
 func sanitizePattern(pattern string) error {
-	for i := 0; i < len(pattern); i++ {
+	for i := range len(pattern) {
 		if pattern[i] == 0 {
 			return fmt.Errorf("pattern contains null byte at position %d", i)
 		}
@@ -737,6 +829,31 @@ func sanitizePattern(pattern string) error {
 		}
 	}
 	return nil
+}
+
+// sanitizePatterns validates a slice of patterns, returning a contextual error.
+func sanitizePatterns(patterns []string, ruleName, fieldName string) error {
+	for i, p := range patterns {
+		if err := sanitizePattern(p); err != nil {
+			return fmt.Errorf("rule %q %s[%d]: %w", ruleName, fieldName, i, err)
+		}
+	}
+	return nil
+}
+
+// compileMatchConditions compiles a slice of Match conditions into CompiledMatch values.
+func compileMatchConditions(conditions []Match, ruleName, condType string) ([]CompiledMatch, error) {
+	var compiled []CompiledMatch
+	for i, cond := range conditions {
+		cm, err := compileMatchPattern(&cond)
+		if err != nil {
+			return nil, fmt.Errorf("rule %q %s[%d]: %w", ruleName, condType, i, err)
+		}
+		if cm != nil {
+			compiled = append(compiled, *cm)
+		}
+	}
+	return compiled, nil
 }
 
 // compileMatchPattern pre-compiles a single Match condition's patterns.
@@ -762,19 +879,11 @@ func compileMatchPattern(m *Match) (*CompiledMatch, error) {
 
 	// Compile Path (regex or glob)
 	if m.Path != "" {
-		if strings.HasPrefix(m.Path, "re:") {
-			re, err := compileRegex(m.Path[3:])
-			if err != nil {
-				return nil, fmt.Errorf("match.path regex %q: %w", m.Path, err)
-			}
-			cm.PathRegex = re
-		} else {
-			g, err := glob.Compile(m.Path, '/')
-			if err != nil {
-				return nil, fmt.Errorf("match.path glob %q: %w", m.Path, err)
-			}
-			cm.PathGlob = g
+		re, g, err := compilePattern(m.Path, '/')
+		if err != nil {
+			return nil, fmt.Errorf("match.path %s %q: %w", patternKind(m.Path), m.Path, err)
 		}
+		cm.PathRegex, cm.PathGlob = re, g
 	}
 
 	// Compile Command (regex only; literals use substring match at runtime)
@@ -788,19 +897,11 @@ func compileMatchPattern(m *Match) (*CompiledMatch, error) {
 
 	// Compile Host (regex or glob)
 	if m.Host != "" {
-		if strings.HasPrefix(m.Host, "re:") {
-			re, err := compileRegex(m.Host[3:])
-			if err != nil {
-				return nil, fmt.Errorf("match.host regex %q: %w", m.Host, err)
-			}
-			cm.HostRegex = re
-		} else {
-			g, err := glob.Compile(m.Host, '.')
-			if err != nil {
-				return nil, fmt.Errorf("match.host glob %q: %w", m.Host, err)
-			}
-			cm.HostGlob = g
+		re, g, err := compilePattern(m.Host, '.')
+		if err != nil {
+			return nil, fmt.Errorf("match.host %s %q: %w", patternKind(m.Host), m.Host, err)
 		}
+		cm.HostRegex, cm.HostGlob = re, g
 	}
 
 	// Compile Content (regex only; literals use substring match at runtime)
@@ -844,19 +945,16 @@ func (e *Engine) compileRules(rules []Rule, strict bool) ([]CompiledRule, error)
 // Returns a clear error if any pattern is invalid.
 func compileOneRule(rule Rule) (CompiledRule, error) {
 	// Sanitize Block patterns before compilation
-	for i, p := range rule.Block.Paths {
-		if err := sanitizePattern(p); err != nil {
-			return CompiledRule{}, fmt.Errorf("rule %q block.paths[%d]: %w", rule.Name, i, err)
-		}
-	}
-	for i, p := range rule.Block.Except {
-		if err := sanitizePattern(p); err != nil {
-			return CompiledRule{}, fmt.Errorf("rule %q block.except[%d]: %w", rule.Name, i, err)
-		}
-	}
-	for i, p := range rule.Block.Hosts {
-		if err := sanitizePattern(p); err != nil {
-			return CompiledRule{}, fmt.Errorf("rule %q block.hosts[%d]: %w", rule.Name, i, err)
+	for _, check := range []struct {
+		patterns []string
+		field    string
+	}{
+		{rule.Block.Paths, "block.paths"},
+		{rule.Block.Except, "block.except"},
+		{rule.Block.Hosts, "block.hosts"},
+	} {
+		if err := sanitizePatterns(check.patterns, rule.Name, check.field); err != nil {
+			return CompiledRule{}, err
 		}
 	}
 
@@ -890,28 +988,14 @@ func compileOneRule(rule Rule) (CompiledRule, error) {
 		}
 	}
 
-	// Compile AllConditions (AND logic)
-	var allCompiled []CompiledMatch
-	for i, cond := range rule.AllConditions {
-		cm, err := compileMatchPattern(&cond)
-		if err != nil {
-			return CompiledRule{}, fmt.Errorf("rule %q all[%d]: %w", rule.Name, i, err)
-		}
-		if cm != nil {
-			allCompiled = append(allCompiled, *cm)
-		}
+	// Compile AllConditions (AND logic) and AnyConditions (OR logic)
+	allCompiled, err := compileMatchConditions(rule.AllConditions, rule.Name, "all")
+	if err != nil {
+		return CompiledRule{}, err
 	}
-
-	// Compile AnyConditions (OR logic)
-	var anyCompiled []CompiledMatch
-	for i, cond := range rule.AnyConditions {
-		cm, err := compileMatchPattern(&cond)
-		if err != nil {
-			return CompiledRule{}, fmt.Errorf("rule %q any[%d]: %w", rule.Name, i, err)
-		}
-		if cm != nil {
-			anyCompiled = append(anyCompiled, *cm)
-		}
+	anyCompiled, err := compileMatchConditions(rule.AnyConditions, rule.Name, "any")
+	if err != nil {
+		return CompiledRule{}, err
 	}
 
 	return CompiledRule{
@@ -932,8 +1016,8 @@ func (e *Engine) rebuildMergedLocked() {
 	all = append(all, e.user...)
 
 	// Sort by priority (lower = higher priority)
-	sort.Slice(all, func(i, j int) bool {
-		return all[i].Rule.GetPriority() < all[j].Rule.GetPriority()
+	slices.SortFunc(all, func(a, b CompiledRule) int {
+		return cmp.Compare(a.Rule.GetPriority(), b.Rule.GetPriority())
 	})
 
 	e.merged = all
@@ -947,9 +1031,41 @@ func (e *Engine) rebuildMergedLocked() {
 	}
 }
 
-// incrementHitCount increments the hit count for a rule
+// mergeUnique returns the union of two string slices, preserving order and
+// removing duplicates. Used to combine pre-symlink and post-symlink resolved
+// paths so that rule patterns match against both forms.
+func mergeUnique(a, b []string) []string {
+	if len(a) == 0 {
+		return b
+	}
+	if len(b) == 0 {
+		return a
+	}
+	seen := make(map[string]bool, len(a))
+	result := make([]string, 0, len(a)+len(b))
+	for _, s := range a {
+		if !seen[s] {
+			seen[s] = true
+			result = append(result, s)
+		}
+	}
+	for _, s := range b {
+		if !seen[s] {
+			seen[s] = true
+			result = append(result, s)
+		}
+	}
+	return result
+}
+
+// incrementHitCount increments the hit count for a rule.
+// Acquires RLock to safely read the hitCounts map, which may be written
+// by rebuildMergedLocked during concurrent ReloadUserRules.
 func (e *Engine) incrementHitCount(name string) {
-	if count := e.hitCounts[name]; count != nil {
+	e.mu.RLock()
+	count := e.hitCounts[name]
+	e.mu.RUnlock()
+	if count != nil {
 		atomic.AddInt64(count, 1)
 	}
 }

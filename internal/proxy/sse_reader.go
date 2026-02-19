@@ -94,7 +94,6 @@ func (r *SSEReader) triggerComplete() {
 	interceptor := security.GetGlobalInterceptor()
 	if interceptor != nil && interceptor.IsEnabled() && len(toolCalls) > 0 {
 		engine := interceptor.GetEngine()
-		storage := interceptor.GetStorage()
 
 		// Log all tool calls and check for violations
 		for _, tc := range toolCalls {
@@ -104,27 +103,24 @@ func (r *SSEReader) triggerComplete() {
 			})
 
 			blocked := matchResult.Matched && matchResult.Action == rules.ActionBlock
-
-			// Log the tool call
-			tcLog := telemetry.ToolCallLog{
-				TraceID:       r.traceID,
-				SessionID:     r.sessionID,
-				ToolName:      tc.Name,
-				ToolArguments: tc.Arguments,
-				APIType:       r.apiType,
-				Model:         r.model,
-				WasBlocked:    blocked,
-			}
+			ruleName := ""
 			if blocked {
-				tcLog.BlockedByRule = matchResult.RuleName
+				ruleName = matchResult.RuleName
 				log.Warn("[STREAMING] Tool call would be blocked: %s (rule: %s) - already sent to client",
 					tc.Name, matchResult.RuleName)
 			}
-			if storage != nil {
-				if err := storage.LogToolCall(tcLog); err != nil {
-					log.Debug("Failed to log tool call: %v", err)
-				}
-			}
+
+			security.RecordEvent(security.Event{
+				Layer:      security.LayerL1Stream,
+				TraceID:    r.traceID,
+				SessionID:  r.sessionID,
+				ToolName:   tc.Name,
+				Arguments:  tc.Arguments,
+				APIType:    r.apiType,
+				Model:      r.model,
+				WasBlocked: blocked,
+				RuleName:   ruleName,
+			})
 		}
 	}
 
@@ -167,20 +163,7 @@ func (r *SSEReader) processBuffer() {
 }
 
 func (r *SSEReader) parseSSEEvent(event []byte) {
-	lines := bytes.Split(event, []byte("\n"))
-
-	var eventType string
-	var dataLine []byte
-	for _, line := range lines {
-		line = bytes.TrimSuffix(line, []byte("\r"))
-
-		if bytes.HasPrefix(line, []byte("event:")) {
-			eventType = string(bytes.TrimSpace(bytes.TrimPrefix(line, []byte("event:"))))
-		} else if bytes.HasPrefix(line, []byte("data:")) {
-			dataLine = bytes.TrimPrefix(line, []byte("data:"))
-			dataLine = bytes.TrimPrefix(dataLine, []byte(" "))
-		}
-	}
+	eventType, dataLine := parseSSEEventData(event)
 
 	if len(dataLine) == 0 {
 		return

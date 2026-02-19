@@ -1,6 +1,7 @@
 package rules
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 
@@ -14,7 +15,7 @@ func (s *StringOrArray) UnmarshalYAML(node *yaml.Node) error {
 	switch node.Kind {
 	case yaml.ScalarNode:
 		if node.Value == "" {
-			return fmt.Errorf("empty pattern not allowed")
+			return errors.New("empty pattern not allowed")
 		}
 		*s = []string{node.Value}
 		return nil
@@ -24,7 +25,7 @@ func (s *StringOrArray) UnmarshalYAML(node *yaml.Node) error {
 			return err
 		}
 		if len(arr) == 0 {
-			return fmt.Errorf("empty pattern list not allowed")
+			return errors.New("empty pattern list not allowed")
 		}
 		for i, v := range arr {
 			if v == "" {
@@ -55,7 +56,7 @@ type RuleConfig struct {
 	Name     string   `yaml:"name,omitempty"`
 	Actions  []string `yaml:"actions,omitempty"`
 	Message  string   `yaml:"message,omitempty"`
-	Severity string   `yaml:"severity,omitempty"`
+	Severity Severity `yaml:"severity,omitempty"`
 }
 
 // MatchConfig is a single match condition
@@ -84,15 +85,15 @@ func (r *RuleConfig) Validate() error {
 	}
 
 	if formats == 0 {
-		return fmt.Errorf("rule must have block, match, all, or any")
+		return errors.New("rule must have block, match, all, or any")
 	}
 	if formats > 1 {
-		return fmt.Errorf("rule cannot mix block/match/all/any")
+		return errors.New("rule cannot mix block/match/all/any")
 	}
 
 	// Composite/match rules require name
 	if (r.Match != nil || len(r.All) > 0 || len(r.Any) > 0) && r.Name == "" {
-		return fmt.Errorf("match/composite rules require a name")
+		return errors.New("match/composite rules require a name")
 	}
 
 	// Validate match conditions
@@ -114,7 +115,8 @@ func (r *RuleConfig) Validate() error {
 
 	// Validate actions
 	for _, action := range r.Actions {
-		if !isValidAction(action) {
+		lower := strings.ToLower(action)
+		if lower != "all" && !ValidActions[Operation(lower)] {
 			return fmt.Errorf("unknown action: %q", action)
 		}
 	}
@@ -125,19 +127,9 @@ func (r *RuleConfig) Validate() error {
 // Validate checks if a match condition has at least one field
 func (m *MatchConfig) Validate() error {
 	if m.Path == "" && m.Command == "" && m.Host == "" && m.Content == "" && len(m.Tool) == 0 {
-		return fmt.Errorf("must have at least one field (path, command, host, content, tool)")
+		return errors.New("must have at least one field (path, command, host, content, tool)")
 	}
 	return nil
-}
-
-var validActions = map[string]bool{
-	"read": true, "write": true, "delete": true,
-	"copy": true, "move": true, "execute": true,
-	"network": true, "all": true,
-}
-
-func isValidAction(action string) bool {
-	return validActions[strings.ToLower(action)]
 }
 
 // ToRule converts RuleConfig to the internal Rule type
@@ -152,14 +144,14 @@ func (r *RuleConfig) ToRule() *Rule {
 	// Simple block format
 	if len(r.Block) > 0 {
 		rule.Block = Block{
-			Paths:  []string(r.Block),
-			Except: []string(r.Except),
+			Paths:  r.Block,
+			Except: r.Except,
 		}
 		if rule.Name == "" {
 			rule.Name = generateName(r.Block[0])
 		}
 		if rule.Message == "" {
-			rule.Message = fmt.Sprintf("Access blocked: %s", r.Block[0])
+			rule.Message = "Access blocked: " + r.Block[0]
 		}
 		return rule
 	}
@@ -189,7 +181,7 @@ func convertMatch(cfg *MatchConfig) *Match {
 		Command: cfg.Command,
 		Host:    cfg.Host,
 		Content: cfg.Content,
-		Tools:   normalizeTools([]string(cfg.Tool)),
+		Tools:   normalizeTools(cfg.Tool),
 	}
 }
 
@@ -201,11 +193,11 @@ func convertMatches(cfgs []MatchConfig) []Match {
 	return matches
 }
 
-func normalizeTools(tools []string) []string {
+func normalizeTools(tools StringOrArray) StringOrArray {
 	if len(tools) == 0 {
 		return nil
 	}
-	normalized := make([]string, len(tools))
+	normalized := make(StringOrArray, len(tools))
 	for i, t := range tools {
 		normalized[i] = strings.ToLower(t)
 	}
@@ -226,29 +218,21 @@ func generateName(pattern string) string {
 	return "block-" + name
 }
 
+// AllOperations is the default set of operations when no actions are specified.
+var AllOperations = []Operation{OpRead, OpWrite, OpDelete, OpCopy, OpMove, OpExecute, OpNetwork}
+
 func parseActions(ops []string) []Operation {
 	if len(ops) == 0 {
-		return []Operation{OpRead, OpWrite, OpDelete, OpCopy, OpMove, OpExecute, OpNetwork}
+		return AllOperations
 	}
 	result := make([]Operation, 0, len(ops))
 	for _, op := range ops {
-		switch strings.ToLower(op) {
-		case "read":
-			result = append(result, OpRead)
-		case "write":
-			result = append(result, OpWrite)
-		case "delete":
-			result = append(result, OpDelete)
-		case "copy":
-			result = append(result, OpCopy)
-		case "move":
-			result = append(result, OpMove)
-		case "execute":
-			result = append(result, OpExecute)
-		case "network":
-			result = append(result, OpNetwork)
-		case "all":
-			return []Operation{OpRead, OpWrite, OpDelete, OpCopy, OpMove, OpExecute, OpNetwork}
+		lower := Operation(strings.ToLower(op))
+		if lower == "all" {
+			return AllOperations
+		}
+		if ValidActions[lower] {
+			result = append(result, lower)
 		}
 	}
 	return result

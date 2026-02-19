@@ -3,18 +3,15 @@ package daemon
 import (
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strconv"
-	"syscall"
-	"time"
-
-	"golang.org/x/sys/unix"
 )
 
 const (
-	pidFileName = "crust.pid"
-	logFileName = "crust.log"
+	pidFileName  = "crust.pid"
+	portFileName = "crust.port"
+	logFileName  = "crust.log"
+	socketPrefix = "crust-api-" // socket file: crust-api-{proxyPort}.sock
 )
 
 // DataDir returns the crust data directory and creates it if needed
@@ -38,43 +35,41 @@ func LogFile() string {
 	return filepath.Join(DataDir(), logFileName)
 }
 
-// pidLockFile holds the open PID file to maintain the flock advisory lock.
-// The lock is held for the lifetime of the daemon process.
-var pidLockFile *os.File
-
-// WritePID writes the current process ID to the PID file with an exclusive
-// advisory lock (flock). The lock prevents two daemon instances from running
-// simultaneously. The returned file handle must remain open to hold the lock;
-// call CleanupPID on shutdown.
-func WritePID() error {
-	path := pidFile()
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY, 0600)
-	if err != nil {
-		return fmt.Errorf("open PID file: %w", err)
+// LogFileDisplay returns a display-friendly log path using ~ for the home directory.
+func LogFileDisplay() string {
+	p := LogFile()
+	if home, err := os.UserHomeDir(); err == nil {
+		if rel, err := filepath.Rel(home, p); err == nil && !filepath.IsAbs(rel) {
+			return "~/" + rel
+		}
 	}
-	if err := unix.Flock(int(f.Fd()), unix.LOCK_EX|unix.LOCK_NB); err != nil {
-		f.Close()
-		return fmt.Errorf("another instance is running (flock %s): %w", path, err)
-	}
-	if err := f.Truncate(0); err != nil {
-		f.Close()
-		return fmt.Errorf("truncate PID file: %w", err)
-	}
-	if _, err := fmt.Fprintf(f, "%d", os.Getpid()); err != nil {
-		f.Close()
-		return fmt.Errorf("write PID file: %w", err)
-	}
-	pidLockFile = f
-	return nil
+	return p
 }
 
-// CleanupPID releases the flock and removes the PID file.
-func CleanupPID() {
-	if pidLockFile != nil {
-		pidLockFile.Close()
-		pidLockFile = nil
+// portFile returns the path to the port file.
+func portFile() string {
+	return filepath.Join(DataDir(), portFileName)
+}
+
+// WritePort writes the proxy port number to the port file.
+func WritePort(port int) error {
+	return os.WriteFile(portFile(), []byte(strconv.Itoa(port)), 0600)
+}
+
+// ReadPort reads the proxy port number from the port file.
+func ReadPort() (int, error) {
+	data, err := os.ReadFile(portFile())
+	if err != nil {
+		return 0, err
 	}
-	_ = os.Remove(pidFile())
+	port, err := strconv.Atoi(string(data))
+	if err != nil {
+		return 0, fmt.Errorf("invalid port file content: %w", err)
+	}
+	if port < 1 || port > 65535 {
+		return 0, fmt.Errorf("invalid port value: %d", port)
+	}
+	return port, nil
 }
 
 // ReadPID reads the PID from the PID file
@@ -103,129 +98,10 @@ func RemovePID() error {
 	return os.Remove(pidFile())
 }
 
-// IsRunning checks if the daemon is running
-func IsRunning() (bool, int) {
-	pid, err := ReadPID()
-	if err != nil {
-		return false, 0
-	}
-
-	// Check if process exists
-	process, err := os.FindProcess(pid)
-	if err != nil {
-		return false, 0
-	}
-
-	// Send signal 0 to check if process is alive
-	err = process.Signal(syscall.Signal(0))
-	if err != nil {
-		// Process doesn't exist, clean up stale PID file
-		_ = RemovePID() //nolint:errcheck // cleanup best effort
-		return false, 0
-	}
-
-	return true, pid
-}
-
-// Stop stops the running daemon
-func Stop() error {
-	running, pid := IsRunning()
-	if !running {
-		return fmt.Errorf("crust is not running")
-	}
-
-	process, err := os.FindProcess(pid)
-	if err != nil {
-		return fmt.Errorf("failed to find process: %w", err)
-	}
-
-	// Send SIGTERM for graceful shutdown
-	if err := process.Signal(syscall.SIGTERM); err != nil {
-		return fmt.Errorf("failed to stop crust: %w", err)
-	}
-
-	// Wait for process to exit (with timeout)
-	for i := 0; i < 30; i++ {
-		time.Sleep(100 * time.Millisecond)
-		if running, _ := IsRunning(); !running {
-			return nil
-		}
-	}
-
-	// Force kill if still running
-	_ = process.Signal(syscall.SIGKILL) //nolint:errcheck // best effort
-	_ = RemovePID()                     //nolint:errcheck // cleanup best effort
-
-	return nil
-}
-
-// Daemonize starts the current program as a daemon
-// It re-executes the program with special environment variable to indicate daemon mode
-func Daemonize(args []string) (int, error) {
-	// Open log file for daemon output
-	logFile, err := os.OpenFile(LogFile(), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
-	if err != nil {
-		return 0, fmt.Errorf("failed to open log file: %w", err)
-	}
-
-	// Prepare command to re-execute self
-	executable, err := os.Executable()
-	if err != nil {
-		return 0, fmt.Errorf("failed to get executable path: %w", err)
-	}
-
-	// Add daemon flag after the "start" subcommand
-	// args[0] should be "start", insert --daemon-mode after it
-	daemonArgs := make([]string, 0, len(args)+1)
-	if len(args) > 0 {
-		daemonArgs = append(daemonArgs, args[0])         // "start"
-		daemonArgs = append(daemonArgs, "--daemon-mode") // flag for start subcommand
-		daemonArgs = append(daemonArgs, args[1:]...)     // rest of args
-	} else {
-		daemonArgs = append(daemonArgs, "--daemon-mode")
-	}
-
-	// SECURITY: Validate executable path is absolute
-	if !filepath.IsAbs(executable) {
-		return 0, fmt.Errorf("executable path must be absolute: %s", executable)
-	}
-
-	cmd := exec.Command(executable, daemonArgs...)
-	cmd.Stdout = logFile
-	cmd.Stderr = logFile
-	cmd.Stdin = nil
-
-	// SECURITY: Use restricted environment to prevent injection attacks
-	// Only propagate essential environment variables
-	cmd.Env = []string{
-		"PATH=" + os.Getenv("PATH"),
-		"HOME=" + os.Getenv("HOME"),
-		"USER=" + os.Getenv("USER"),
-		"CRUST_DAEMON=1",
-	}
-	// Propagate secret environment variables if set
-	if apiKey := os.Getenv("LLM_API_KEY"); apiKey != "" {
-		cmd.Env = append(cmd.Env, "LLM_API_KEY="+apiKey)
-	}
-	if dbKey := os.Getenv("DB_KEY"); dbKey != "" {
-		cmd.Env = append(cmd.Env, "DB_KEY="+dbKey)
-	}
-
-	// Start in new session (detach from terminal)
-	cmd.SysProcAttr = &syscall.SysProcAttr{
-		Setsid: true,
-	}
-
-	if err := cmd.Start(); err != nil {
-		return 0, fmt.Errorf("failed to start daemon: %w", err)
-	}
-
-	pid := cmd.Process.Pid
-
-	// Don't wait for the process - it's now a daemon
-	_ = cmd.Process.Release()
-
-	return pid, nil
+// SocketFile returns the API socket path for a given proxy port.
+// Each crust session gets its own socket: ~/.crust/crust-api-{proxyPort}.sock
+func SocketFile(proxyPort int) string {
+	return filepath.Join(DataDir(), socketPrefix+strconv.Itoa(proxyPort)+".sock")
 }
 
 // IsDaemonMode checks if we're running in daemon mode

@@ -3,6 +3,7 @@ package security
 import (
 	"context"
 	"fmt"
+	"net"
 	"net/http"
 	"sync"
 	"time"
@@ -21,11 +22,13 @@ type Manager struct {
 
 	// Streaming buffering settings
 	bufferStreaming bool
-	maxBufferSize   int
+	maxBufferEvents int
 	bufferTimeout   int
 	blockMode       types.BlockMode
 
 	apiHTTPServer *http.Server
+	apiListener   net.Listener
+	socketPath    string // Unix socket path or Windows pipe name (for cleanup)
 	stopChan      chan struct{}
 	wg            sync.WaitGroup
 }
@@ -39,12 +42,12 @@ var (
 type Config struct {
 	DBPath          string
 	DBKey           string // Encryption key for SQLCipher
-	APIPort         int
+	SocketPath      string // Unix socket path or Windows pipe identifier
 	SecurityEnabled bool
 	RetentionDays   int // Data retention in days, 0 = forever
 	// Streaming buffering settings
 	BufferStreaming bool            // Enable response buffering for streaming requests
-	MaxBufferSize   int             // Maximum SSE events to buffer
+	MaxBufferEvents int             // Maximum SSE events to buffer
 	BufferTimeout   int             // Buffer timeout in seconds
 	BlockMode       types.BlockMode // types.BlockModeRemove (default) or types.BlockModeReplace
 }
@@ -70,7 +73,7 @@ func Init(cfg Config) (*Manager, error) {
 		storage:         storage,
 		retentionDays:   cfg.RetentionDays,
 		bufferStreaming: cfg.BufferStreaming,
-		maxBufferSize:   cfg.MaxBufferSize,
+		maxBufferEvents: cfg.MaxBufferEvents,
 		bufferTimeout:   cfg.BufferTimeout,
 		blockMode:       blockMode,
 		stopChan:        make(chan struct{}),
@@ -93,10 +96,17 @@ func Init(cfg Config) (*Manager, error) {
 		}
 	}
 
-	// Initialize API server
+	// Initialize API server with Unix domain socket (or named pipe on Windows)
 	m.apiServer = NewAPIServer(storage, m.interceptor)
+	m.socketPath = cfg.SocketPath
+
+	ln, err := apiListener(cfg.SocketPath)
+	if err != nil {
+		storage.Close()
+		return nil, fmt.Errorf("failed to create API listener: %w", err)
+	}
+	m.apiListener = ln
 	m.apiHTTPServer = &http.Server{
-		Addr:              fmt.Sprintf(":%d", cfg.APIPort),
 		Handler:           m.apiServer.Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
@@ -104,7 +114,7 @@ func Init(cfg Config) (*Manager, error) {
 	m.wg.Add(1)
 	go func() {
 		defer m.wg.Done()
-		if err := m.apiHTTPServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		if err := m.apiHTTPServer.Serve(ln); err != nil && err != http.ErrServerClosed {
 			log.Error("API server error: %v", err)
 		}
 	}()
@@ -157,6 +167,11 @@ func (m *Manager) Shutdown(ctx context.Context) error {
 		}
 	}
 
+	// Clean up socket file (no-op for Windows named pipes)
+	if m.socketPath != "" {
+		cleanupSocket(m.socketPath)
+	}
+
 	m.wg.Wait()
 
 	if m.storage != nil {
@@ -191,6 +206,23 @@ func GetGlobalManager() *Manager {
 	return globalManager
 }
 
+// SetGlobalManager sets the global manager (for testing)
+func SetGlobalManager(m *Manager) {
+	globalManagerMu.Lock()
+	globalManager = m
+	globalManagerMu.Unlock()
+}
+
+// NewManagerForTest creates a lightweight manager with an interceptor only.
+// No API server, no cleanup goroutines. Intended for unit tests.
+func NewManagerForTest(interceptor *Interceptor) *Manager {
+	return &Manager{
+		interceptor: interceptor,
+		blockMode:   types.BlockModeRemove,
+		stopChan:    make(chan struct{}),
+	}
+}
+
 // GetGlobalInterceptor returns the global interceptor (convenience function)
 func GetGlobalInterceptor() *Interceptor {
 	globalManagerMu.RLock()
@@ -207,20 +239,23 @@ func GetGlobalInterceptor() *Interceptor {
 type InterceptionConfig struct {
 	// BufferStreaming enables buffered streaming mode for SSE responses
 	BufferStreaming bool
-	MaxBufferSize   int
+	MaxBufferEvents int
 	BufferTimeout   int             // seconds
 	BlockMode       types.BlockMode // types.BlockModeRemove or types.BlockModeReplace
 }
 
 // GetInterceptionConfig returns the security interception configuration
 func GetInterceptionConfig() InterceptionConfig {
-	if globalManager == nil {
+	globalManagerMu.RLock()
+	m := globalManager
+	globalManagerMu.RUnlock()
+	if m == nil {
 		return InterceptionConfig{BlockMode: types.BlockModeRemove}
 	}
 	return InterceptionConfig{
-		BufferStreaming: globalManager.bufferStreaming,
-		MaxBufferSize:   globalManager.maxBufferSize,
-		BufferTimeout:   globalManager.bufferTimeout,
-		BlockMode:       globalManager.blockMode,
+		BufferStreaming: m.bufferStreaming,
+		MaxBufferEvents: m.maxBufferEvents,
+		BufferTimeout:   m.bufferTimeout,
+		BlockMode:       m.blockMode,
 	}
 }

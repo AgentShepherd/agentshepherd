@@ -22,9 +22,7 @@ jobs:
           go-version: '1.24.13'
 
       - name: golangci-lint
-        uses: golangci/golangci-lint-action@v6
-        with:
-          version: latest
+        uses: golangci/golangci-lint-action@v8
 
       - name: go vet
         run: go vet ./...
@@ -33,6 +31,12 @@ jobs:
         run: |
           go install golang.org/x/vuln/cmd/govulncheck@latest
           govulncheck ./...
+
+      - name: nilaway (nil safety)
+        run: |
+          go install go.uber.org/nilaway/cmd/nilaway@latest
+          nilaway ./...
+
 
   test:
     name: Go Test
@@ -47,6 +51,9 @@ jobs:
       - name: Build
         run: go build ./...
 
-      - name: Unit tests
-        run: go test ./... -short
+      - name: Build (notui)
+        run: go build -tags notui ./...
+
+      - name: Unit tests (with race detector)
+        run: go test -race ./... -short
 

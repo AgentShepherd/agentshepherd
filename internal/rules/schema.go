@@ -3,6 +3,7 @@ package rules
 import (
 	"errors"
 	"fmt"
+	"slices"
 )
 
 // Rule types for path-based security rules
@@ -22,7 +23,7 @@ type Rule struct {
 	Block       Block       `yaml:"block" json:"block"`
 	Actions     []Operation `yaml:"actions" json:"actions"`
 	Message     string      `yaml:"message" json:"message"`
-	Severity    string      `yaml:"severity,omitempty" json:"severity,omitempty"`
+	Severity    Severity    `yaml:"severity,omitempty" json:"severity,omitempty"`
 
 	// Advanced match (Level 4)
 	Match *Match `yaml:"-" json:"match,omitempty"`
@@ -32,31 +33,32 @@ type Rule struct {
 	AnyConditions []Match `yaml:"-" json:"any_conditions,omitempty"` // OR
 
 	// Runtime fields
-	Source   string `yaml:"-" json:"source,omitempty"`
+	Source   Source `yaml:"-" json:"source,omitempty"`
 	FilePath string `yaml:"-" json:"file_path,omitempty"`
 	HitCount int64  `yaml:"-" json:"hit_count,omitempty"` // number of times this rule matched
 }
 
 // Match represents a single match condition for advanced rules
 type Match struct {
-	Path    string   `json:"path,omitempty"`
-	Command string   `json:"command,omitempty"`
-	Host    string   `json:"host,omitempty"`
-	Content string   `json:"content,omitempty"` // Pattern to match in Write/Edit content
-	Tools   []string `json:"tools,omitempty"`
+	Path    string        `json:"path,omitempty"`
+	Command string        `json:"command,omitempty"`
+	Host    string        `json:"host,omitempty"`
+	Content string        `json:"content,omitempty"` // Pattern to match in Write/Edit content
+	Tools   StringOrArray `json:"tools,omitempty"`
 }
 
 // Block defines what paths/hosts to block
 type Block struct {
-	Paths  []string `yaml:"paths,omitempty" json:"paths,omitempty"`   // glob patterns
-	Except []string `yaml:"except,omitempty" json:"except,omitempty"` // exclusions
-	Hosts  []string `yaml:"hosts,omitempty" json:"hosts,omitempty"`   // for network ops
+	Paths  StringOrArray `yaml:"paths,omitempty" json:"paths,omitempty"`   // glob patterns
+	Except StringOrArray `yaml:"except,omitempty" json:"except,omitempty"` // exclusions
+	Hosts  StringOrArray `yaml:"hosts,omitempty" json:"hosts,omitempty"`   // for network ops
 }
 
 // Operation represents the type of file/network operation
 type Operation string
 
 const (
+	OpNone    Operation = ""
 	OpRead    Operation = "read"
 	OpWrite   Operation = "write"
 	OpDelete  Operation = "delete"
@@ -79,8 +81,8 @@ var ValidActions = map[Operation]bool{
 
 // Default values for rules
 const (
-	DefaultRulePriority = 50
-	DefaultRuleSeverity = "critical"
+	DefaultRulePriority          = 50
+	DefaultRuleSeverity Severity = SeverityCritical
 )
 
 // IsEnabled returns whether the rule is enabled (default true)
@@ -100,7 +102,7 @@ func (r *Rule) GetPriority() int {
 }
 
 // GetSeverity returns the rule severity (default critical)
-func (r *Rule) GetSeverity() string {
+func (r *Rule) GetSeverity() Severity {
 	if r.Severity == "" {
 		return DefaultRuleSeverity
 	}
@@ -127,6 +129,11 @@ func (r *Rule) Validate() error {
 		}
 	}
 
+	// Validate severity if explicitly set
+	if r.Severity != "" && !ValidSeverities[r.Severity] {
+		return fmt.Errorf("invalid severity: %s", r.Severity)
+	}
+
 	// Check if rule has any matching criteria (simple block, advanced match, or composite)
 	hasBlockPaths := len(r.Block.Paths) > 0
 	hasBlockHosts := len(r.Block.Hosts) > 0
@@ -140,13 +147,7 @@ func (r *Rule) Validate() error {
 
 	// Validate that hosts are only used with network operation (for simple block format)
 	if hasBlockHosts {
-		hasNetwork := false
-		for _, op := range r.Actions {
-			if op == OpNetwork {
-				hasNetwork = true
-				break
-			}
-		}
+		hasNetwork := slices.Contains(r.Actions, OpNetwork)
 		if !hasNetwork {
 			return errors.New("block.hosts requires 'network' operation")
 		}
@@ -204,12 +205,7 @@ func ValidateRuleSet(rs *RuleSet) error {
 
 // HasAction checks if the rule applies to the given action
 func (r *Rule) HasAction(op Operation) bool {
-	for _, o := range r.Actions {
-		if o == op {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(r.Actions, op)
 }
 
 // GetName returns the rule name.
@@ -229,6 +225,9 @@ func (r *Rule) GetActions() []string {
 	}
 	return out
 }
+
+// GetBlockHosts returns the blocked host patterns.
+func (r *Rule) GetBlockHosts() []string { return r.Block.Hosts }
 
 // IsContentOnly returns true if this rule only matches on content (raw JSON)
 // Content-only rules are evaluated for ALL tool calls regardless of operation

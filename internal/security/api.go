@@ -66,6 +66,8 @@ func (s *APIServer) registerRoutes() {
 			telemetryGroup.GET("/traces", s.telemetryAPI.HandleTraces)
 			telemetryGroup.GET("/traces/:trace_id", s.telemetryAPI.HandleTrace)
 			telemetryGroup.GET("/stats", s.telemetryAPI.HandleStats)
+			telemetryGroup.GET("/sessions", s.telemetryAPI.HandleSessions)
+			telemetryGroup.GET("/sessions/:session_id/events", s.telemetryAPI.HandleSessionEvents)
 		}
 
 		// Rules routes (if rule engine is available)
@@ -123,14 +125,20 @@ func (s *APIServer) handleLogs(c *gin.Context) {
 }
 
 // handleStats handles GET /api/security/stats
+// Returns in-memory metrics for the current daemon session (not DB totals).
 func (s *APIServer) handleStats(c *gin.Context) {
-	stats, err := s.storage.GetStats()
-	if err != nil {
-		api.Error(c, http.StatusInternalServerError, "Failed to get stats")
-		return
-	}
+	m := GetMetrics()
+	blocked := m.Layer0Blocks.Load() + m.Layer1Blocks.Load() + m.Layer2Blocks.Load()
 
-	api.Success(c, stats)
+	api.Success(c, gin.H{
+		"total_tool_calls":   m.TotalToolCalls.Load(),
+		"blocked_tool_calls": blocked,
+		"allowed_tool_calls": m.Layer1Allowed.Load(),
+		"layer0_blocks":      m.Layer0Blocks.Load(),
+		"layer1_blocks":      m.Layer1Blocks.Load(),
+		"layer1_allowed":     m.Layer1Allowed.Load(),
+		"layer2_blocks":      m.Layer2Blocks.Load(),
+	})
 }
 
 // handleStatus handles GET /api/security/status

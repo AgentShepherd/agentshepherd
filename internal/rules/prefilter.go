@@ -99,20 +99,15 @@ func (pf *PreFilter) ContainsObfuscation(cmd string) bool {
 	return pf.Check(cmd) != nil
 }
 
-// defaultPreFilterPatterns contains patterns for common obfuscation techniques
+// defaultPreFilterPatterns contains patterns for common obfuscation techniques.
+//
+// NOTE: command-substitution ($(), backticks) and process-substitution (<(), >())
+// are intentionally NOT included. The shell interpreter expands $() in dry-run
+// mode, so paths inside substitutions are correctly extracted and matched against
+// rules. Process substitution is already blocked by astHasUnsafe (ProcSubst case).
+// Blocking these at the PreFilter level caused false positives on normal agent
+// commands like "cd $(git rev-parse --show-toplevel)" and "diff <(sort a) <(sort b)".
 var defaultPreFilterPatterns = []PreFilterPatternDef{
-	// Command substitution - used to hide commands
-	{
-		Name:    "command-substitution-dollar",
-		Pattern: `\$\([^)]+\)`,
-		Reason:  "command substitution $()",
-	},
-	{
-		Name:    "command-substitution-backtick",
-		Pattern: "`[^`]+`",
-		Reason:  "command substitution backticks",
-	},
-
 	// Eval - executes strings as commands
 	{
 		Name:    "eval-keyword",
@@ -132,16 +127,14 @@ var defaultPreFilterPatterns = []PreFilterPatternDef{
 		Reason:  "piped base64 decode",
 	},
 
-	// Hex encoding
+	// Hex encoding — require 3+ consecutive hex escapes.
+	// Single \x00 (grep for nulls) and \x1b (ANSI colors) are normal.
+	// 3+ consecutive hex escapes indicate encoded command/path hiding
+	// (e.g., \x63\x61\x74 = "cat").
 	{
 		Name:    "hex-escape",
-		Pattern: `\\x[0-9a-fA-F]{2}`,
-		Reason:  "hex escape sequence",
-	},
-	{
-		Name:    "printf-escape",
-		Pattern: `printf\s+['"]\\`,
-		Reason:  "printf with escapes",
+		Pattern: `(\\x[0-9a-fA-F]{2}){3,}`,
+		Reason:  "multiple hex escape sequences (possible encoded command)",
 	},
 
 	// Indirect variable expansion
@@ -186,13 +179,6 @@ var defaultPreFilterPatterns = []PreFilterPatternDef{
 		Pattern: `\w+\(\)\s*\{\s*\w+\s*\|\s*\w+\s*&`,
 		Reason:  "named fork bomb pattern",
 	},
-
-	// Process substitution
-	{
-		Name:    "process-substitution",
-		Pattern: `<\([^)]+\)|>\([^)]+\)`,
-		Reason:  "process substitution",
-	},
 }
 
 // IsSafeCommand performs a quick safety check on a command.
@@ -201,8 +187,8 @@ var defaultPreFilterPatterns = []PreFilterPatternDef{
 func IsSafeCommand(cmd string) bool {
 	// Quick string checks before regex (performance)
 	suspicious := []string{
-		"$(", "`", "eval ", "base64 -d", "base64 --decode",
-		"\\x", "${!", "IFS=", ":()", "-e /bin",
+		"eval ", "base64 -d", "base64 --decode",
+		"${!", "IFS=", ":()", "-e /bin",
 	}
 	cmdLower := strings.ToLower(cmd)
 	for _, s := range suspicious {

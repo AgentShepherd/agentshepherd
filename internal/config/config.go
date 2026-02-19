@@ -1,9 +1,13 @@
 package config
 
 import (
+	"bytes"
+	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/BakeLens/crust/internal/logger"
 	"github.com/BakeLens/crust/internal/types"
@@ -26,20 +30,21 @@ type Config struct {
 
 // SandboxConfig holds OS sandbox settings
 type SandboxConfig struct {
-	Enabled   bool   `yaml:"enabled"`    // enable OS-level sandbox (Landlock/Seatbelt)
-	BPFHelper string `yaml:"bpf_helper"` // path to BPF helper Unix socket (Linux-only, optional)
+	Enabled bool `yaml:"enabled"` // enable OS-level sandbox
 }
 
 // APIConfig holds management API settings
 type APIConfig struct {
-	Port int `yaml:"port"`
+	// SocketPath is the Unix domain socket path (or named pipe identifier on Windows).
+	// Auto-derived from proxy port if empty: ~/.crust/crust-api-{proxyPort}.sock
+	SocketPath string `yaml:"socket_path"`
 }
 
 // ServerConfig holds server settings
 type ServerConfig struct {
-	Port     int    `yaml:"port"`
-	LogLevel string `yaml:"log_level"`
-	NoColor  bool   `yaml:"no_color"`
+	Port     int            `yaml:"port"`
+	LogLevel types.LogLevel `yaml:"log_level"`
+	NoColor  bool           `yaml:"no_color"`
 }
 
 // UpstreamConfig holds upstream (downstream target) settings
@@ -49,7 +54,7 @@ type UpstreamConfig struct {
 	// Timeout in seconds for upstream requests
 	Timeout int `yaml:"timeout"`
 	// APIKey for upstream authentication (set at runtime, not from config file)
-	APIKey string `yaml:"-"`
+	APIKey string `yaml:"-"` //nolint:gosec // not a hardcoded credential, runtime-set field
 	// Providers maps user-defined model keywords to base URLs (e.g. "my-llama": "http://localhost:11434/v1")
 	Providers map[string]string `yaml:"providers"`
 }
@@ -70,11 +75,11 @@ type TelemetryConfig struct {
 
 // SecurityConfig holds security module settings
 type SecurityConfig struct {
-	Enabled         bool            `yaml:"enabled"`          // enable security interception (uses rules engine)
-	BufferStreaming bool            `yaml:"buffer_streaming"` // enable response buffering for streaming requests
-	MaxBufferSize   int             `yaml:"max_buffer_size"`  // maximum number of SSE events to buffer (default: 1000)
-	BufferTimeout   int             `yaml:"buffer_timeout"`   // buffer timeout in seconds (default: 60)
-	BlockMode       types.BlockMode `yaml:"block_mode"`       // "remove" (default) or "replace" (substitute with echo command)
+	Enabled         bool            `yaml:"enabled"`           // enable security interception (uses rules engine)
+	BufferStreaming bool            `yaml:"buffer_streaming"`  // enable response buffering for streaming requests
+	MaxBufferEvents int             `yaml:"max_buffer_events"` // maximum number of SSE events to buffer (default: 1000)
+	BufferTimeout   int             `yaml:"buffer_timeout"`    // buffer timeout in seconds (default: 60)
+	BlockMode       types.BlockMode `yaml:"block_mode"`        // "remove" (default) or "replace" (substitute with echo command)
 }
 
 // Validate validates the SecurityConfig and sets defaults.
@@ -93,8 +98,8 @@ func (c *SecurityConfig) Validate() error {
 
 	// Validate buffer settings when buffering is enabled
 	if c.BufferStreaming {
-		if c.MaxBufferSize <= 0 {
-			return fmt.Errorf("max_buffer_size must be positive when buffer_streaming is enabled, got %d", c.MaxBufferSize)
+		if c.MaxBufferEvents <= 0 {
+			return fmt.Errorf("max_buffer_events must be positive when buffer_streaming is enabled, got %d", c.MaxBufferEvents)
 		}
 		if c.BufferTimeout <= 0 {
 			return fmt.Errorf("buffer_timeout must be positive when buffer_streaming is enabled, got %d", c.BufferTimeout)
@@ -112,6 +117,15 @@ type RulesConfig struct {
 	Watch          bool   `yaml:"watch"`           // enable file watching for hot reload
 }
 
+// DefaultConfigPath returns the default config file path (~/.crust/config.yaml).
+func DefaultConfigPath() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "config.yaml"
+	}
+	return filepath.Join(home, ".crust", "config.yaml")
+}
+
 // defaultDBPath returns the default database path under ~/.crust/.
 func defaultDBPath() string {
 	home, err := os.UserHomeDir()
@@ -126,7 +140,7 @@ func DefaultConfig() *Config {
 	return &Config{
 		Server: ServerConfig{
 			Port:     9090,
-			LogLevel: "info",
+			LogLevel: types.LogLevelInfo,
 			NoColor:  false,
 		},
 		Upstream: UpstreamConfig{
@@ -136,9 +150,7 @@ func DefaultConfig() *Config {
 		Storage: StorageConfig{
 			DBPath: defaultDBPath(),
 		},
-		API: APIConfig{
-			Port: 9091,
-		},
+		API: APIConfig{},
 		Telemetry: TelemetryConfig{
 			Enabled:       false, // disabled by default
 			RetentionDays: 7,
@@ -148,7 +160,7 @@ func DefaultConfig() *Config {
 		Security: SecurityConfig{
 			Enabled:         true,
 			BufferStreaming: true, // enabled by default for security
-			MaxBufferSize:   1000,
+			MaxBufferEvents: 1000,
 			BufferTimeout:   60,
 			BlockMode:       types.BlockModeRemove,
 		},
@@ -164,29 +176,100 @@ func DefaultConfig() *Config {
 	}
 }
 
-// Load loads configuration from a YAML file
+// Validate checks all Config fields and returns a multi-error report.
+// Call this AFTER CLI overrides have been applied, not during Load().
+func (c *Config) Validate() error {
+	var errs []string
+
+	// Port ranges
+	if c.Server.Port < 1 || c.Server.Port > 65535 {
+		errs = append(errs, fmt.Sprintf("server.port: must be 1-65535 (got %d)", c.Server.Port))
+	}
+
+	// Log level
+	if !c.Server.LogLevel.Valid() {
+		errs = append(errs, fmt.Sprintf("server.log_level: unknown log level %q (valid: trace, debug, info, warn, error)", c.Server.LogLevel))
+	}
+
+	// Upstream URL (only validate format; empty is valid for --auto mode)
+	if c.Upstream.URL != "" {
+		if u, err := url.Parse(c.Upstream.URL); err != nil || (u.Scheme != "http" && u.Scheme != "https") {
+			errs = append(errs, fmt.Sprintf("upstream.url: must be a valid http/https URL (got %q)", c.Upstream.URL))
+		}
+	}
+
+	// Upstream timeout (0 = no timeout, valid for long streaming)
+	if c.Upstream.Timeout < 0 {
+		errs = append(errs, fmt.Sprintf("upstream.timeout: must be >= 0 (got %d)", c.Upstream.Timeout))
+	}
+
+	// Provider URLs
+	for name, provURL := range c.Upstream.Providers {
+		if provURL == "" {
+			errs = append(errs, fmt.Sprintf("upstream.providers.%s: URL must not be empty", name))
+		} else if u, err := url.Parse(provURL); err != nil || (u.Scheme != "http" && u.Scheme != "https") {
+			errs = append(errs, fmt.Sprintf("upstream.providers.%s: must be a valid http/https URL (got %q)", name, provURL))
+		}
+	}
+
+	// Telemetry
+	if c.Telemetry.RetentionDays < 0 || c.Telemetry.RetentionDays > 36500 {
+		errs = append(errs, fmt.Sprintf("telemetry.retention_days: must be 0-36500 (got %d)", c.Telemetry.RetentionDays))
+	}
+	if c.Telemetry.SampleRate < 0 || c.Telemetry.SampleRate > 1 {
+		errs = append(errs, fmt.Sprintf("telemetry.sample_rate: must be 0.0-1.0 (got %g)", c.Telemetry.SampleRate))
+	}
+
+	// Security (delegate)
+	if err := c.Security.Validate(); err != nil {
+		errs = append(errs, err.Error())
+	}
+
+	if len(errs) == 0 {
+		return nil
+	}
+	var sb strings.Builder
+	sb.WriteString("config validation failed:\n")
+	for i, e := range errs {
+		fmt.Fprintf(&sb, "  %d. %s\n", i+1, e)
+	}
+	return errors.New(sb.String())
+}
+
+// isUnknownFieldError returns true if the error is from yaml.Decoder.KnownFields(true)
+// detecting an unrecognized key (e.g. typo like "servr:").
+func isUnknownFieldError(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "not found in type")
+}
+
+// Load loads configuration from a YAML file.
+// Note: Load does NOT call Validate(). Callers should apply CLI overrides
+// first, then call cfg.Validate() themselves.
 func Load(path string) (*Config, error) {
 	cfg := DefaultConfig()
 
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			// Validate defaults before returning
-			if err := cfg.Security.Validate(); err != nil {
-				return nil, fmt.Errorf("config validation: %w", err)
-			}
 			return cfg, nil
 		}
 		return nil, err
 	}
 
-	if err := yaml.Unmarshal(data, cfg); err != nil {
-		return nil, err
-	}
-
-	// Validate configuration
-	if err := cfg.Security.Validate(); err != nil {
-		return nil, fmt.Errorf("config validation: %w", err)
+	// Try strict decode to warn about unknown fields (typos like "servr:")
+	dec := yaml.NewDecoder(bytes.NewReader(data))
+	dec.KnownFields(true)
+	if err := dec.Decode(cfg); err != nil {
+		if isUnknownFieldError(err) {
+			cfgLog.Warn("config has unknown fields (ignored): %v", err)
+			// Re-parse without strict mode for forward compatibility
+			cfg = DefaultConfig()
+			if err2 := yaml.Unmarshal(data, cfg); err2 != nil {
+				return nil, fmt.Errorf("config parse error: %w", err2)
+			}
+		} else {
+			return nil, fmt.Errorf("config parse error: %w", err)
+		}
 	}
 
 	return cfg, nil

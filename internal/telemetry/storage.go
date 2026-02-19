@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/url"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/BakeLens/crust/internal/logger"
@@ -34,6 +35,7 @@ func NewStorage(dbPath string, encryptionKey string) (*Storage, error) {
 	params := url.Values{}
 	params.Set("_busy_timeout", "5000")
 	params.Set("_journal_mode", "WAL")
+	params.Set("_foreign_keys", "1")
 
 	// SECURITY FIX: Pass encryption key via connection string parameter
 	// instead of PRAGMA statement to prevent SQL injection
@@ -52,11 +54,15 @@ func NewStorage(dbPath string, encryptionKey string) (*Storage, error) {
 		return nil, fmt.Errorf("failed to open database: %w", err)
 	}
 
+	// SQLite supports only one writer at a time. Limiting to 1 connection
+	// serializes all DB access at the Go level, preventing SQLITE_BUSY errors.
+	conn.SetMaxOpenConns(1)
+
 	// Verify encryption is working by running a simple query
 	encrypted := false
 	if encryptionKey != "" {
 		var result int
-		if err := conn.QueryRow("SELECT 1").Scan(&result); err != nil {
+		if err := conn.QueryRowContext(context.Background(), "SELECT 1").Scan(&result); err != nil {
 			conn.Close()
 			return nil, fmt.Errorf("encryption key verification failed: %w", err)
 		}
@@ -107,8 +113,33 @@ func (s *Storage) initSchema() error {
 		schema = []byte(inlineSchema)
 	}
 
-	_, err = s.conn.Exec(string(schema))
-	return err
+	_, err = s.conn.ExecContext(context.Background(), string(schema))
+	if err != nil {
+		return err
+	}
+
+	// Run migrations for existing databases
+	s.runMigrations()
+	return nil
+}
+
+// runMigrations applies incremental schema changes for existing databases.
+// Each migration is idempotent — safe to run multiple times.
+func (s *Storage) runMigrations() {
+	ctx := context.Background()
+	migrations := []string{
+		// v0.x: Add layer column to tool_call_logs for per-layer telemetry tracking
+		`ALTER TABLE tool_call_logs ADD COLUMN layer TEXT DEFAULT 'L1'`,
+	}
+	for _, m := range migrations {
+		_, err := s.conn.ExecContext(ctx, m)
+		if err != nil {
+			// "duplicate column name" means migration already applied — ignore
+			if !strings.Contains(err.Error(), "duplicate column") {
+				log.Debug("Migration skipped: %v", err)
+			}
+		}
+	}
 }
 
 // inlineSchema is a fallback if schema.sql is not found
@@ -119,7 +150,7 @@ CREATE TABLE IF NOT EXISTS traces (
 	session_id TEXT,
 	start_time DATETIME,
 	end_time DATETIME,
-	metadata JSON,
+	metadata BLOB DEFAULT '{}',
 	created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 CREATE INDEX IF NOT EXISTS idx_traces_trace_id ON traces(trace_id);
@@ -135,8 +166,8 @@ CREATE TABLE IF NOT EXISTS spans (
 	span_kind TEXT,
 	start_time DATETIME,
 	end_time DATETIME,
-	attributes JSON,
-	events JSON,
+	attributes BLOB DEFAULT '{}',
+	events BLOB DEFAULT '[]',
 	input_tokens INTEGER DEFAULT 0,
 	output_tokens INTEGER DEFAULT 0,
 	status_code TEXT DEFAULT 'UNSET',
@@ -159,7 +190,8 @@ CREATE TABLE IF NOT EXISTS tool_call_logs (
 	api_type TEXT,
 	was_blocked BOOLEAN DEFAULT FALSE,
 	blocked_by_rule TEXT,
-	model TEXT
+	model TEXT,
+	layer TEXT DEFAULT 'L1'
 );
 CREATE INDEX IF NOT EXISTS idx_tool_call_logs_timestamp ON tool_call_logs(timestamp);
 CREATE INDEX IF NOT EXISTS idx_tool_call_logs_trace_id ON tool_call_logs(trace_id);
@@ -213,66 +245,36 @@ type ToolCallLog struct {
 	WasBlocked    bool            `json:"was_blocked"`
 	BlockedByRule string          `json:"blocked_by_rule,omitempty"`
 	Model         string          `json:"model,omitempty"`
-}
-
-// Stats represents security statistics
-type Stats struct {
-	TotalToolCalls   int64            `json:"total_tool_calls"`
-	BlockedToolCalls int64            `json:"blocked_tool_calls"`
-	TopBlockedTools  []ToolStat       `json:"top_blocked_tools"`
-	RecentActivity   []ActivityWindow `json:"recent_activity"`
-}
-
-// ToolStat represents statistics for a specific tool
-type ToolStat struct {
-	ToolName     string `json:"tool_name"`
-	TotalCalls   int64  `json:"total_calls"`
-	BlockedCalls int64  `json:"blocked_calls"`
-}
-
-// ActivityWindow represents activity within a time window
-type ActivityWindow struct {
-	Window       string `json:"window"`
-	TotalCalls   int64  `json:"total_calls"`
-	BlockedCalls int64  `json:"blocked_calls"`
+	Layer         string          `json:"layer,omitempty"`
 }
 
 // =============================================================================
 // Trace Operations (using sqlc)
 // =============================================================================
 
-// GetOrCreateTrace gets an existing trace or creates a new one
+// GetOrCreateTrace gets an existing trace or creates a new one.
+// Uses INSERT ... ON CONFLICT to avoid TOCTOU races between concurrent goroutines.
 func (s *Storage) GetOrCreateTrace(traceID string, sessionID string) (*Trace, error) {
 	ctx := context.Background()
-
-	// Try to get existing trace
-	dbTrace, err := s.queries.GetTraceByID(ctx, traceID)
-	if err == nil {
-		return dbTraceToTrace(&dbTrace), nil
-	}
-
-	if err != sql.ErrNoRows {
-		return nil, fmt.Errorf("failed to query trace: %w", err)
-	}
-
-	// Create new trace
 	now := time.Now().UTC()
-	rowID, err := s.queries.CreateTrace(ctx, db.CreateTraceParams{
+
+	// Atomic upsert — no TOCTOU race
+	_, err := s.queries.UpsertTrace(ctx, db.UpsertTraceParams{
 		TraceID:   traceID,
 		SessionID: strPtr(sessionID),
 		StartTime: &now,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("failed to create trace: %w", err)
+		return nil, fmt.Errorf("failed to upsert trace: %w", err)
 	}
 
-	// Return constructed trace (we know the values we just inserted)
-	return &Trace{
-		ID:        rowID,
-		TraceID:   traceID,
-		SessionID: sessionID,
-		StartTime: now,
-	}, nil
+	// Fetch the canonical row (may have been created by another goroutine)
+	dbTrace, err := s.queries.GetTraceByID(ctx, traceID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get trace after upsert: %w", err)
+	}
+
+	return dbTraceToTrace(&dbTrace), nil
 }
 
 // UpdateTraceEndTime updates the end time of a trace
@@ -310,6 +312,95 @@ func (s *Storage) InsertSpan(span *Span) error {
 
 	span.ID = id
 	return nil
+}
+
+// RecordSpanTx atomically records a trace, main span, tool spans, and updates
+// the trace end time in a single transaction. This prevents partial writes
+// (e.g., trace without spans) if an error occurs mid-sequence.
+func (s *Storage) RecordSpanTx(traceID, sessionID string, mainSpan *Span, toolSpans []*Span) error {
+	ctx := context.Background()
+
+	tx, err := s.conn.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin tx: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck // rollback is a no-op after commit
+
+	qtx := s.queries.WithTx(tx)
+
+	// 1. Upsert trace
+	now := time.Now().UTC()
+	_, err = qtx.UpsertTrace(ctx, db.UpsertTraceParams{
+		TraceID:   traceID,
+		SessionID: strPtr(sessionID),
+		StartTime: &now,
+	})
+	if err != nil {
+		return fmt.Errorf("upsert trace: %w", err)
+	}
+
+	// Get trace rowid for span FK
+	dbTrace, err := qtx.GetTraceByID(ctx, traceID)
+	if err != nil {
+		return fmt.Errorf("get trace: %w", err)
+	}
+
+	// 2. Insert main span
+	mainSpan.TraceRowID = dbTrace.ID
+	spanID, err := qtx.InsertSpan(ctx, db.InsertSpanParams{
+		TraceRowid:    int64Ptr(mainSpan.TraceRowID),
+		SpanID:        mainSpan.SpanID,
+		ParentSpanID:  strPtr(mainSpan.ParentSpanID),
+		Name:          mainSpan.Name,
+		SpanKind:      strPtr(mainSpan.SpanKind),
+		StartTime:     timePtr(mainSpan.StartTime),
+		EndTime:       timePtr(mainSpan.EndTime),
+		Attributes:    mainSpan.Attributes,
+		Events:        mainSpan.Events,
+		InputTokens:   int64Ptr(mainSpan.InputTokens),
+		OutputTokens:  int64Ptr(mainSpan.OutputTokens),
+		StatusCode:    strPtr(mainSpan.StatusCode),
+		StatusMessage: strPtr(mainSpan.StatusMessage),
+	})
+	if err != nil {
+		return fmt.Errorf("insert span: %w", err)
+	}
+	mainSpan.ID = spanID
+
+	// 3. Insert tool spans
+	for _, ts := range toolSpans {
+		ts.TraceRowID = dbTrace.ID
+		_, err = qtx.InsertSpan(ctx, db.InsertSpanParams{
+			TraceRowid:    int64Ptr(ts.TraceRowID),
+			SpanID:        ts.SpanID,
+			ParentSpanID:  strPtr(ts.ParentSpanID),
+			Name:          ts.Name,
+			SpanKind:      strPtr(ts.SpanKind),
+			StartTime:     timePtr(ts.StartTime),
+			EndTime:       timePtr(ts.EndTime),
+			Attributes:    ts.Attributes,
+			Events:        ts.Events,
+			InputTokens:   int64Ptr(ts.InputTokens),
+			OutputTokens:  int64Ptr(ts.OutputTokens),
+			StatusCode:    strPtr(ts.StatusCode),
+			StatusMessage: strPtr(ts.StatusMessage),
+		})
+		if err != nil {
+			return fmt.Errorf("insert tool span %s: %w", ts.Name, err)
+		}
+	}
+
+	// 4. Update trace end time
+	endTime := time.Now().UTC()
+	err = qtx.UpdateTraceEndTime(ctx, db.UpdateTraceEndTimeParams{
+		TraceID: traceID,
+		EndTime: &endTime,
+	})
+	if err != nil {
+		return fmt.Errorf("update trace end time: %w", err)
+	}
+
+	return tx.Commit()
 }
 
 // GetTraceSpans returns all spans for a trace
@@ -350,44 +441,187 @@ func (s *Storage) ListRecentTraces(limit int) ([]Trace, error) {
 	return traces, nil
 }
 
-// GetTelemetryStats returns telemetry statistics
-func (s *Storage) GetTelemetryStats() (map[string]interface{}, error) {
-	ctx := context.Background()
-	stats := make(map[string]interface{})
+// TraceStats holds aggregate trace and span statistics.
+type TraceStats struct {
+	TotalTraces       int64            `json:"total_traces"`
+	TotalSpans        int64            `json:"total_spans"`
+	TotalInputTokens  int64            `json:"total_input_tokens"`
+	TotalOutputTokens int64            `json:"total_output_tokens"`
+	SpansByKind       map[string]int64 `json:"spans_by_kind,omitempty"`
+}
 
-	// Total traces and spans
+// GetTraceStats returns trace and span statistics.
+func (s *Storage) GetTraceStats() (*TraceStats, error) {
+	ctx := context.Background()
+	stats := &TraceStats{}
+
 	traceCount, err := s.queries.GetTraceCount(ctx)
 	if err != nil {
-		log.Debug("Failed to get trace count: %v", err)
+		log.Warn("Failed to get trace count: %v", err)
 	}
+	stats.TotalTraces = traceCount
+
 	spanCount, err := s.queries.GetSpanCount(ctx)
 	if err != nil {
-		log.Debug("Failed to get span count: %v", err)
+		log.Warn("Failed to get span count: %v", err)
 	}
-	stats["total_traces"] = traceCount
-	stats["total_spans"] = spanCount
+	stats.TotalSpans = spanCount
 
-	// Token totals
 	tokenTotals, err := s.queries.GetTokenTotals(ctx)
 	if err != nil {
-		log.Debug("Failed to get token totals: %v", err)
+		log.Warn("Failed to get token totals: %v", err)
 	}
-	stats["total_input_tokens"] = tokenTotals.TotalInput
-	stats["total_output_tokens"] = tokenTotals.TotalOutput
+	if v, ok := tokenTotals.TotalInput.(int64); ok {
+		stats.TotalInputTokens = v
+	}
+	if v, ok := tokenTotals.TotalOutput.(int64); ok {
+		stats.TotalOutputTokens = v
+	}
 
-	// Spans by kind
 	spansByKind, err := s.queries.GetSpansByKind(ctx)
 	if err == nil {
-		kindMap := make(map[string]int64)
+		stats.SpansByKind = make(map[string]int64)
 		for _, row := range spansByKind {
 			if row.SpanKind != nil {
-				kindMap[*row.SpanKind] = row.Count
+				stats.SpansByKind[*row.SpanKind] = row.Count
 			}
 		}
-		stats["spans_by_kind"] = kindMap
 	}
 
 	return stats, nil
+}
+
+// =============================================================================
+// Session Queries (raw SQL — aggregations not suited to sqlc)
+// =============================================================================
+
+// SessionSummary holds aggregate stats for one conversation session.
+type SessionSummary struct {
+	SessionID    string    `json:"session_id"`
+	Model        string    `json:"model"`
+	TotalCalls   int64     `json:"total_calls"`
+	BlockedCalls int64     `json:"blocked_calls"`
+	FirstSeen    time.Time `json:"first_seen"`
+	LastSeen     time.Time `json:"last_seen"`
+}
+
+// sqliteDateFormats lists the datetime formats SQLite uses for text-stored timestamps,
+// tried in order when parsing aggregate function results (MIN/MAX return strings).
+var sqliteDateFormats = []string{
+	"2006-01-02T15:04:05.999999999Z07:00",
+	"2006-01-02T15:04:05Z07:00",
+	"2006-01-02 15:04:05.999999999-07:00",
+	"2006-01-02 15:04:05-07:00",
+	"2006-01-02 15:04:05",
+	"2006-01-02T15:04:05",
+}
+
+// parseSQLiteTime parses a SQLite datetime string into a time.Time.
+func parseSQLiteTime(s string) time.Time {
+	for _, layout := range sqliteDateFormats {
+		if t, err := time.Parse(layout, s); err == nil {
+			return t.UTC()
+		}
+	}
+	return time.Time{}
+}
+
+// GetSessions returns recent sessions aggregated from tool_call_logs, ordered by
+// most-recently-active first. Each row corresponds to one unique session_id.
+func (s *Storage) GetSessions(minutes int, limit int) ([]SessionSummary, error) {
+	if minutes <= 0 {
+		minutes = 60
+	} else if minutes > MaxRecentMinutes {
+		minutes = MaxRecentMinutes
+	}
+	if limit <= 0 {
+		limit = 50
+	}
+
+	ctx := context.Background()
+	rows, err := s.conn.QueryContext(ctx, `
+		SELECT
+			session_id,
+			model,
+			COUNT(*) AS total_calls,
+			COALESCE(SUM(CASE WHEN was_blocked THEN 1 ELSE 0 END), 0) AS blocked_calls,
+			MIN(timestamp) AS first_seen,
+			MAX(timestamp) AS last_seen
+		FROM tool_call_logs
+		WHERE session_id IS NOT NULL
+		  AND timestamp > datetime('now', ?)
+		GROUP BY session_id
+		ORDER BY last_seen DESC
+		LIMIT ?
+	`, fmt.Sprintf("-%d minutes", minutes), int64(limit))
+	if err != nil {
+		return nil, fmt.Errorf("failed to query sessions: %w", err)
+	}
+	defer rows.Close()
+
+	var sessions []SessionSummary
+	for rows.Next() {
+		var ss SessionSummary
+		var model *string
+		// Aggregate functions (MIN/MAX) return strings in SQLite — scan as string, parse manually.
+		var firstSeenStr, lastSeenStr string
+		if err := rows.Scan(&ss.SessionID, &model, &ss.TotalCalls, &ss.BlockedCalls, &firstSeenStr, &lastSeenStr); err != nil {
+			return nil, fmt.Errorf("failed to scan session row: %w", err)
+		}
+		ss.Model = derefStr(model)
+		ss.FirstSeen = parseSQLiteTime(firstSeenStr)
+		ss.LastSeen = parseSQLiteTime(lastSeenStr)
+		sessions = append(sessions, ss)
+	}
+	return sessions, rows.Err()
+}
+
+// GetSessionEvents returns the most recent tool call events for a specific session,
+// ordered newest-first.
+func (s *Storage) GetSessionEvents(sessionID string, limit int) ([]ToolCallLog, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+
+	ctx := context.Background()
+	rows, err := s.conn.QueryContext(ctx, `
+		SELECT id, timestamp, trace_id, session_id, tool_name, tool_arguments,
+		       api_type, was_blocked, blocked_by_rule, model, layer
+		FROM tool_call_logs
+		WHERE session_id = ?
+		ORDER BY timestamp DESC
+		LIMIT ?
+	`, sessionID, int64(limit))
+	if err != nil {
+		return nil, fmt.Errorf("failed to query session events: %w", err)
+	}
+	defer rows.Close()
+
+	var logs []ToolCallLog
+	for rows.Next() {
+		var l ToolCallLog
+		var ts *time.Time
+		var argsStr, apiType, blockedByRule, model, layer *string
+		var wasBlocked *bool
+		if err := rows.Scan(
+			&l.ID, &ts, &l.TraceID, &l.SessionID,
+			&l.ToolName, &argsStr, &apiType, &wasBlocked,
+			&blockedByRule, &model, &layer,
+		); err != nil {
+			return nil, fmt.Errorf("failed to scan log row: %w", err)
+		}
+		l.Timestamp = derefTime(ts)
+		if argsStr != nil {
+			l.ToolArguments = json.RawMessage(*argsStr)
+		}
+		l.APIType = types.APIType(derefStr(apiType))
+		l.WasBlocked = derefBool(wasBlocked)
+		l.BlockedByRule = derefStr(blockedByRule)
+		l.Model = derefStr(model)
+		l.Layer = derefStr(layer)
+		logs = append(logs, l)
+	}
+	return logs, rows.Err()
 }
 
 // =============================================================================
@@ -404,6 +638,11 @@ func (s *Storage) LogToolCall(toolLog ToolCallLog) error {
 		argsStr = &str
 	}
 
+	layer := toolLog.Layer
+	if layer == "" {
+		layer = "L1" // default to Layer 1 for backwards compatibility
+	}
+
 	return s.queries.LogToolCall(ctx, db.LogToolCallParams{
 		TraceID:       toolLog.TraceID,
 		SessionID:     strPtr(toolLog.SessionID),
@@ -413,6 +652,7 @@ func (s *Storage) LogToolCall(toolLog ToolCallLog) error {
 		WasBlocked:    &toolLog.WasBlocked,
 		BlockedByRule: strPtr(toolLog.BlockedByRule),
 		Model:         strPtr(toolLog.Model),
+		Layer:         &layer,
 	})
 }
 
@@ -450,45 +690,6 @@ func (s *Storage) GetRecentLogs(minutes int, limit int) ([]ToolCallLog, error) {
 	return logs, nil
 }
 
-// GetStats returns security statistics
-func (s *Storage) GetStats() (*Stats, error) {
-	ctx := context.Background()
-	stats := &Stats{}
-
-	// Total and blocked tool calls
-	toolStats, err := s.queries.GetToolCallStats(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get tool call counts: %w", err)
-	}
-	stats.TotalToolCalls = toolStats.Total
-	if blocked, ok := toolStats.Blocked.(int64); ok {
-		stats.BlockedToolCalls = blocked
-	}
-
-	// Top blocked tools
-	topBlocked, err := s.queries.GetTopBlockedTools(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get top blocked tools: %w", err)
-	}
-
-	for _, row := range topBlocked {
-		blockedCalls := int64(0)
-		if row.BlockedCalls != nil {
-			blockedCalls = int64(*row.BlockedCalls)
-		}
-		stats.TopBlockedTools = append(stats.TopBlockedTools, ToolStat{
-			ToolName:     row.ToolName,
-			TotalCalls:   row.TotalCalls,
-			BlockedCalls: blockedCalls,
-		})
-	}
-
-	// Note: RecentActivity query was removed due to sqlc limitations
-	// Can be added back with raw SQL if needed
-
-	return stats, nil
-}
-
 // MaxRetentionDays is the maximum allowed retention period
 const MaxRetentionDays = 36500 // 100 years
 
@@ -504,32 +705,54 @@ func (s *Storage) CleanupOldData(days int) (int64, error) {
 	}
 
 	ctx := context.Background()
-	var totalDeleted int64
 	timeOffset := fmt.Sprintf("-%d days", days)
 
+	// Use a transaction for atomic cleanup across all tables
+	tx, err := s.conn.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, fmt.Errorf("failed to begin cleanup transaction: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck // rollback is a no-op after commit
+
+	qtx := s.queries.WithTx(tx)
+	var totalDeleted int64
+
 	// Delete old tool call logs
-	result, err := s.queries.DeleteOldToolCallLogs(ctx, timeOffset)
+	result, err := qtx.DeleteOldToolCallLogs(ctx, timeOffset)
 	if err != nil {
 		return 0, fmt.Errorf("failed to delete old tool call logs: %w", err)
 	}
-	deleted, _ := result.RowsAffected()
+	deleted, err := result.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("failed to get rows affected for tool call logs: %w", err)
+	}
 	totalDeleted += deleted
 
 	// Delete old spans
-	result, err = s.queries.DeleteOldSpans(ctx, timeOffset)
+	result, err = qtx.DeleteOldSpans(ctx, timeOffset)
 	if err != nil {
-		return totalDeleted, fmt.Errorf("failed to delete old spans: %w", err)
+		return 0, fmt.Errorf("failed to delete old spans: %w", err)
 	}
-	deleted, _ = result.RowsAffected()
+	deleted, err = result.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("failed to get rows affected for spans: %w", err)
+	}
 	totalDeleted += deleted
 
 	// Delete old traces
-	result, err = s.queries.DeleteOldTraces(ctx, timeOffset)
+	result, err = qtx.DeleteOldTraces(ctx, timeOffset)
 	if err != nil {
-		return totalDeleted, fmt.Errorf("failed to delete old traces: %w", err)
+		return 0, fmt.Errorf("failed to delete old traces: %w", err)
 	}
-	deleted, _ = result.RowsAffected()
+	deleted, err = result.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("failed to get rows affected for traces: %w", err)
+	}
 	totalDeleted += deleted
+
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("failed to commit cleanup transaction: %w", err)
+	}
 
 	if totalDeleted > 0 {
 		log.Info("Cleaned up %d old records (retention: %d days)", totalDeleted, days)
@@ -637,6 +860,7 @@ func dbToolCallLogToToolCallLog(l *db.ToolCallLog) ToolCallLog {
 		WasBlocked:    derefBool(l.WasBlocked),
 		BlockedByRule: derefStr(l.BlockedByRule),
 		Model:         derefStr(l.Model),
+		Layer:         derefStr(l.Layer),
 	}
 }
 

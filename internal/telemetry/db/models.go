@@ -37,6 +37,7 @@ type ToolCallLog struct {
 	WasBlocked    *bool      `json:"was_blocked"`
 	BlockedByRule *string    `json:"blocked_by_rule"`
 	Model         *string    `json:"model"`
+	Layer         *string    `json:"layer"`
 }
 
 type Trace struct {

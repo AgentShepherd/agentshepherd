@@ -474,3 +474,225 @@ func TestMatcherEdgeCases(t *testing.T) {
 		})
 	}
 }
+
+// TestMatcher_ReverseGlobMatching verifies the reverse-glob matching logic
+// that catches paths containing glob characters (e.g., "cat /home/user/.e*").
+// When the shell extractor can't expand globs at static analysis time,
+// the matcher must detect that the glob could match a protected file.
+func TestMatcher_ReverseGlobMatching(t *testing.T) {
+	tests := []struct {
+		name     string
+		patterns []string
+		excepts  []string
+		path     string
+		want     bool
+	}{
+		// === Star glob in filename ===
+		{
+			name:     "star glob matches .env",
+			patterns: []string{"**/.env"},
+			path:     "/home/user/.e*",
+			want:     true,
+		},
+		{
+			name:     "star glob matches .env.local",
+			patterns: []string{"**/.env.*"},
+			path:     "/home/user/.env.*",
+			want:     true,
+		},
+		{
+			name:     "star glob matches SSH key",
+			patterns: []string{"**/.ssh/id_*"},
+			path:     "/home/user/.ssh/id_*",
+			want:     true,
+		},
+		{
+			name:     "star glob too narrow — .x* does not match .env",
+			patterns: []string{"**/.env"},
+			path:     "/home/user/.x*",
+			want:     false,
+		},
+
+		// === Question mark glob in filename ===
+		{
+			name:     "question mark matches .env (4 chars)",
+			patterns: []string{"**/.env"},
+			path:     "/home/user/.en?",
+			want:     true,
+		},
+		{
+			name:     "question mark no match — wrong length",
+			patterns: []string{"**/.env"},
+			path:     "/home/user/.e?",
+			want:     false,
+		},
+
+		// === Bracket glob in filename ===
+		{
+			name:     "bracket glob matches .env",
+			patterns: []string{"**/.env"},
+			path:     "/home/user/.[e]nv",
+			want:     true,
+		},
+		{
+			name:     "bracket glob no match",
+			patterns: []string{"**/.env"},
+			path:     "/home/user/.[x]nv",
+			want:     false,
+		},
+
+		// === Directory compatibility ===
+		{
+			name:     "glob in correct directory",
+			patterns: []string{"**/.ssh/id_*"},
+			path:     "/home/user/.ssh/id_*",
+			want:     true,
+		},
+		{
+			name:     "glob in wrong directory",
+			patterns: []string{"**/.ssh/id_*"},
+			path:     "/tmp/id_*",
+			want:     false,
+		},
+
+		// === Except patterns respected ===
+		{
+			name:     "glob matches but excepted",
+			patterns: []string{"**/.env*"},
+			excepts:  []string{"**/.env.example"},
+			path:     "/home/user/.env.exampl?",
+			want:     true, // .env.exampl? could match .env.example, but also .env.examplX — block conservatively
+		},
+		{
+			name:     "glob with except — concrete file excepted",
+			patterns: []string{"**/.env"},
+			excepts:  []string{"/home/user/.env"},
+			path:     "/home/user/.e*",
+			want:     false, // the concrete test path /home/user/.env IS excepted
+		},
+
+		// === Multiple patterns ===
+		{
+			name:     "glob matches second pattern",
+			patterns: []string{"**/config.yaml", "**/.env"},
+			path:     "/app/.e*",
+			want:     true,
+		},
+
+		// === Non-glob paths unaffected ===
+		{
+			name:     "normal path still works",
+			patterns: []string{"**/.env"},
+			path:     "/home/user/.env",
+			want:     true,
+		},
+		{
+			name:     "normal path no match",
+			patterns: []string{"**/.env"},
+			path:     "/home/user/safe.txt",
+			want:     false,
+		},
+
+		// === Glob only in directory (not filename) ===
+		{
+			name:     "glob only in directory part — not handled by reverse-glob",
+			patterns: []string{"**/.env"},
+			path:     "/home/*/.env",
+			want:     true, // standard match handles this via compiled glob
+		},
+
+		// === Real-world bypass patterns ===
+		{
+			name:     "cat /home/user/.e* (actual bypass)",
+			patterns: []string{"**/.env", "**/.env.*"},
+			excepts:  []string{"**/.env.example"},
+			path:     "/home/user/.e*",
+			want:     true,
+		},
+		{
+			name:     "cat ~/.ssh/id_r* (SSH key glob)",
+			patterns: []string{"**/.ssh/id_*"},
+			excepts:  []string{"**/.ssh/id_*.pub"},
+			path:     "/home/user/.ssh/id_r*",
+			want:     true,
+		},
+		{
+			name:     "cat ~/.aws/cred* (AWS creds glob)",
+			patterns: []string{"**/.aws/credentials", "**/.aws/config"},
+			path:     "/home/user/.aws/cred*",
+			want:     true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m, err := NewMatcher(tt.patterns, tt.excepts)
+			if err != nil {
+				t.Fatalf("NewMatcher() error = %v", err)
+			}
+
+			got := m.Match(tt.path)
+			if got != tt.want {
+				t.Errorf("Match(%q) = %v, want %v (patterns=%v, excepts=%v)",
+					tt.path, got, tt.want, tt.patterns, tt.excepts)
+			}
+		})
+	}
+}
+
+// TestContainsGlob verifies the glob metacharacter detection helper.
+func TestContainsGlob(t *testing.T) {
+	tests := []struct {
+		input string
+		want  bool
+	}{
+		{"/home/user/.env", false},
+		{"/home/user/.e*", true},
+		{"/home/user/.en?", true},
+		{"/home/user/.[e]nv", true},
+		{"no-glob-here", false},
+		{"*", true},
+		{"file?.txt", true},
+		{"[abc]", true},
+		{"", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.input, func(t *testing.T) {
+			if got := containsGlob(tt.input); got != tt.want {
+				t.Errorf("containsGlob(%q) = %v, want %v", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestMatcher_ExceptWithMultiplePatterns verifies that the early-return
+// Match implementation correctly checks exceptions for all matching patterns.
+func TestMatcher_ExceptWithMultiplePatterns(t *testing.T) {
+	m, err := NewMatcher(
+		[]string{"**/.env", "**/.env.*"},
+		[]string{"**/.env.example"},
+	)
+	if err != nil {
+		t.Fatalf("NewMatcher: %v", err)
+	}
+
+	tests := []struct {
+		path string
+		want bool
+	}{
+		{"/home/user/.env", true},
+		{"/home/user/.env.production", true},
+		{"/home/user/.env.example", false},
+		{"/tmp/.env.example", false},
+		{"/tmp/safe.txt", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.path, func(t *testing.T) {
+			got := m.Match(tt.path)
+			if got != tt.want {
+				t.Errorf("Match(%q) = %v, want %v", tt.path, got, tt.want)
+			}
+		})
+	}
+}

@@ -15,9 +15,9 @@ storage:
   db_path: "./crust.db"
   encryption_key: ""        # SQLCipher key (empty = no encryption)
 
-# Management API
+# Management API (Unix domain socket, auto-derived from proxy port)
 api:
-  port: 9091
+  socket_path: ""   # default: ~/.crust/crust-api-{proxyPort}.sock
 
 # Telemetry (writes to SQLite via storage)
 telemetry:
@@ -29,7 +29,7 @@ telemetry:
 security:
   enabled: true
   buffer_streaming: true      # Buffer streaming responses for security evaluation (default: true)
-  max_buffer_size: 1000       # Maximum SSE events to buffer
+  max_buffer_events: 1000     # Maximum SSE events to buffer
   buffer_timeout: 60          # Buffer timeout in seconds
   block_mode: remove          # "remove" (delete tool calls) or "replace" (substitute with echo command)
 
@@ -43,4 +43,3 @@ rules:
 # OS Sandbox (Layer 2)
 sandbox:
   enabled: false            # Enable OS-level sandbox (Landlock on Linux, Seatbelt on macOS)
-  bpf_helper: ""            # Path to BPF helper socket (Linux-only, requires bpf-helper daemon)

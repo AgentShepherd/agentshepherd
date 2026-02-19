@@ -3,572 +3,786 @@
 package sandbox
 
 import (
-	"bytes"
+	"encoding/json"
+	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/BakeLens/crust/internal/rules"
 )
 
-// getTestDataDir returns the test data directory for ALLOWED files.
-// Can be overridden with TEST_DATA_DIR env var.
-func getTestDataDir() string {
-	if dir := os.Getenv("TEST_DATA_DIR"); dir != "" {
-		return dir
-	}
-	return "/test-data"
-}
+// ==================== Go → Rust Integration Contract Tests ====================
+//
+// These tests verify the Go→Rust IPC contract: policy JSON serialization,
+// exit code propagation, environment sanitization, and error handling.
+// They do NOT test Rust enforcement (Landlock, Seatbelt, etc.) — that is
+// covered by the Rust test suite.
+//
+// Run with: task test-e2e
+// Requires: bakelens-sandbox binary (build with: task build)
 
-// getBlockedDataDir returns the test data directory for BLOCKED files.
-// On Linux, this must be outside Landlock's allowed paths (/tmp, /var, etc.)
-// Can be overridden with TEST_BLOCKED_DATA_DIR env var.
-func getBlockedDataDir() string {
-	if dir := os.Getenv("TEST_BLOCKED_DATA_DIR"); dir != "" {
-		return dir
-	}
-	// Default: same as test data dir (works for macOS Seatbelt which does file-level filtering)
-	return getTestDataDir()
-}
+// --- Policy JSON contract ---
 
-// setupTestSandbox creates a sandbox with builtin rules for E2E testing.
-func setupTestSandbox(t *testing.T) *Sandbox {
-	t.Helper()
-
-	// Ensure bakelens-sandbox helper is found
+// TestE2E_PolicyAcceptedByRust verifies Rust parses the policy JSON that Go produces.
+// This catches JSON schema mismatches between Go's PolicyJSON and Rust's InputPolicy.
+func TestE2E_PolicyAcceptedByRust(t *testing.T) {
 	setupBakelensSandboxPath(t)
+	restore := suppressOutput()
+	defer restore()
 
-	profilePath := filepath.Join(t.TempDir(), "sandbox.sb")
-	mapper := NewMapper(profilePath)
+	SetRules([]SecurityRule{
+		&testRule{
+			name:       "test-rule",
+			paths:      []string{"**/.env", "**/.env.*"},
+			except:     []string{"**/.env.example"},
+			operations: []string{"read", "write"},
+		},
+	})
+	defer SetRules(nil)
 
-	// Load builtin rules
+	sb := New()
+	exitCode, err := sb.Wrap([]string{"true"})
+	if err != nil {
+		t.Fatalf("Wrap() failed: %v (Rust may have rejected Go's policy JSON)", err)
+	}
+	if exitCode != 0 {
+		t.Errorf("exit code = %d, want 0 (Rust may have rejected policy)", exitCode)
+	}
+}
+
+// TestE2E_PolicyWithHostsAccepted verifies Rust accepts rules with host entries.
+func TestE2E_PolicyWithHostsAccepted(t *testing.T) {
+	setupBakelensSandboxPath(t)
+	restore := suppressOutput()
+	defer restore()
+
+	SetRules([]SecurityRule{
+		&testRule{
+			name:       "block-ip",
+			paths:      []string{"**/.env"},
+			operations: []string{"read"},
+			hosts:      []string{"127.0.0.1"},
+		},
+	})
+	defer SetRules(nil)
+
+	sb := New()
+	exitCode, err := sb.Wrap([]string{"true"})
+	if err != nil {
+		t.Fatalf("Wrap() with host entries failed: %v", err)
+	}
+	if exitCode != 0 {
+		t.Errorf("exit code = %d, want 0", exitCode)
+	}
+}
+
+// TestE2E_EmptyRulesAccepted verifies Rust accepts a policy with zero deny rules.
+func TestE2E_EmptyRulesAccepted(t *testing.T) {
+	setupBakelensSandboxPath(t)
+	restore := suppressOutput()
+	defer restore()
+
+	SetRules(nil)
+
+	sb := New()
+	exitCode, err := sb.Wrap([]string{"true"})
+	if err != nil {
+		t.Fatalf("Wrap() with empty rules failed: %v", err)
+	}
+	if exitCode != 0 {
+		t.Errorf("exit code = %d, want 0", exitCode)
+	}
+}
+
+// TestE2E_MultipleRulesAccepted verifies Rust accepts a policy with many rules.
+func TestE2E_MultipleRulesAccepted(t *testing.T) {
+	setupBakelensSandboxPath(t)
+	restore := suppressOutput()
+	defer restore()
+
+	rules := make([]SecurityRule, 20)
+	for i := range rules {
+		rules[i] = &testRule{
+			name:       "rule-" + strings.Repeat("x", 5) + string(rune('a'+i)),
+			paths:      []string{"**/pattern-" + string(rune('a'+i))},
+			operations: []string{"read", "write", "delete"},
+		}
+	}
+	SetRules(rules)
+	defer SetRules(nil)
+
+	sb := New()
+	exitCode, err := sb.Wrap([]string{"true"})
+	if err != nil {
+		t.Fatalf("Wrap() with 20 rules failed: %v", err)
+	}
+	if exitCode != 0 {
+		t.Errorf("exit code = %d, want 0", exitCode)
+	}
+}
+
+// --- Exit code propagation ---
+
+// TestE2E_ExitCodeZero verifies exit code 0 is propagated from Rust.
+func TestE2E_ExitCodeZero(t *testing.T) {
+	setupBakelensSandboxPath(t)
+	restore := suppressOutput()
+	defer restore()
+
+	SetRules(nil)
+	sb := New()
+
+	exitCode, err := sb.Wrap([]string{"true"})
+	if err != nil {
+		t.Fatalf("Wrap() error: %v", err)
+	}
+	if exitCode != 0 {
+		t.Errorf("exit code = %d, want 0", exitCode)
+	}
+}
+
+// TestE2E_ExitCodeNonZero verifies non-zero exit codes are propagated from Rust.
+func TestE2E_ExitCodeNonZero(t *testing.T) {
+	setupBakelensSandboxPath(t)
+	restore := suppressOutput()
+	defer restore()
+
+	SetRules(nil)
+	sb := New()
+
+	exitCode, err := sb.Wrap([]string{"false"})
+	if err != nil {
+		t.Fatalf("Wrap() error: %v", err)
+	}
+	if exitCode != 1 {
+		t.Errorf("exit code = %d, want 1", exitCode)
+	}
+}
+
+// TestE2E_ExitCodeFromShell verifies specific exit codes pass through.
+func TestE2E_ExitCodeFromShell(t *testing.T) {
+	setupBakelensSandboxPath(t)
+	restore := suppressOutput()
+	defer restore()
+
+	SetRules(nil)
+	sb := New()
+
+	exitCode, err := sb.Wrap([]string{"sh", "-c", "exit 42"})
+	if err != nil {
+		t.Fatalf("Wrap() error: %v", err)
+	}
+	if exitCode != 42 {
+		t.Errorf("exit code = %d, want 42", exitCode)
+	}
+}
+
+// --- Command argument passing ---
+
+// TestE2E_CommandArgsPreserved verifies arguments pass through Go→Rust→exec correctly.
+func TestE2E_CommandArgsPreserved(t *testing.T) {
+	setupBakelensSandboxPath(t)
+	restore := suppressOutput()
+	defer restore()
+
+	SetRules(nil)
+	sb := New()
+
+	// Write a marker via the sandboxed command, read it back
+	tmpFile := t.TempDir() + "/args-test.txt"
+	exitCode, err := sb.Wrap([]string{"sh", "-c", "echo hello world > " + tmpFile})
+	if err != nil {
+		t.Fatalf("Wrap() error: %v", err)
+	}
+	if exitCode != 0 {
+		t.Fatalf("exit code = %d, want 0", exitCode)
+	}
+
+	content, err := os.ReadFile(tmpFile)
+	if err != nil {
+		t.Fatalf("read marker file: %v", err)
+	}
+	if got := strings.TrimSpace(string(content)); got != "hello world" {
+		t.Errorf("marker content = %q, want %q", got, "hello world")
+	}
+}
+
+// TestE2E_CommandWithSpacesInArgs verifies arguments with spaces are preserved.
+func TestE2E_CommandWithSpacesInArgs(t *testing.T) {
+	setupBakelensSandboxPath(t)
+	restore := suppressOutput()
+	defer restore()
+
+	SetRules(nil)
+	sb := New()
+
+	tmpFile := t.TempDir() + "/spaces-test.txt"
+	exitCode, err := sb.Wrap([]string{"sh", "-c", "echo 'arg with spaces' > " + tmpFile})
+	if err != nil {
+		t.Fatalf("Wrap() error: %v", err)
+	}
+	if exitCode != 0 {
+		t.Fatalf("exit code = %d, want 0", exitCode)
+	}
+
+	content, err := os.ReadFile(tmpFile)
+	if err != nil {
+		t.Fatalf("read marker file: %v", err)
+	}
+	if got := strings.TrimSpace(string(content)); got != "arg with spaces" {
+		t.Errorf("marker content = %q, want %q", got, "arg with spaces")
+	}
+}
+
+// --- Environment sanitization pipeline ---
+
+// TestE2E_EnvSanitization verifies dangerous env vars do NOT reach the sandboxed process.
+func TestE2E_EnvSanitization(t *testing.T) {
+	setupBakelensSandboxPath(t)
+	restore := suppressOutput()
+	defer restore()
+
+	// Set dangerous env vars that must NOT leak into the sandbox
+	t.Setenv("LD_PRELOAD", "/tmp/evil.so")
+	t.Setenv("DYLD_INSERT_LIBRARIES", "/tmp/evil.dylib")
+	t.Setenv("SECRET_API_KEY", "hunter2")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "s3cr3t")
+
+	SetRules(nil)
+	sb := New()
+
+	tmpFile := t.TempDir() + "/env-test.txt"
+	exitCode, err := sb.Wrap([]string{"sh", "-c", "env > " + tmpFile})
+	if err != nil {
+		t.Fatalf("Wrap() error: %v", err)
+	}
+	if exitCode != 0 {
+		t.Fatalf("exit code = %d, want 0", exitCode)
+	}
+
+	content, err := os.ReadFile(tmpFile)
+	if err != nil {
+		t.Fatalf("read env output: %v", err)
+	}
+
+	env := string(content)
+	for _, dangerous := range []string{"LD_PRELOAD", "DYLD_INSERT_LIBRARIES", "SECRET_API_KEY", "AWS_SECRET_ACCESS_KEY"} {
+		if strings.Contains(env, dangerous+"=") {
+			t.Errorf("SECURITY: sandboxed process must not see %s", dangerous)
+		}
+	}
+}
+
+// TestE2E_EnvSafeVarsPresent verifies allowlisted env vars ARE passed through.
+func TestE2E_EnvSafeVarsPresent(t *testing.T) {
+	setupBakelensSandboxPath(t)
+	restore := suppressOutput()
+	defer restore()
+
+	t.Setenv("HOME", "/home/testuser")
+	t.Setenv("PATH", "/usr/bin:/bin")
+
+	SetRules(nil)
+	sb := New()
+
+	tmpFile := t.TempDir() + "/env-safe.txt"
+	exitCode, err := sb.Wrap([]string{"sh", "-c", "env > " + tmpFile})
+	if err != nil {
+		t.Fatalf("Wrap() error: %v", err)
+	}
+	if exitCode != 0 {
+		t.Fatalf("exit code = %d, want 0", exitCode)
+	}
+
+	content, err := os.ReadFile(tmpFile)
+	if err != nil {
+		t.Fatalf("read env output: %v", err)
+	}
+
+	env := string(content)
+	if !strings.Contains(env, "HOME=") {
+		t.Error("sandboxed process should see HOME")
+	}
+	if !strings.Contains(env, "PATH=") {
+		t.Error("sandboxed process should see PATH")
+	}
+}
+
+// TestE2E_ProxyURLInjection verifies proxy URL env vars are injected when set.
+func TestE2E_ProxyURLInjection(t *testing.T) {
+	setupBakelensSandboxPath(t)
+	restore := suppressOutput()
+	defer restore()
+
+	SetProxyURL("http://127.0.0.1:9876")
+	defer SetProxyURL("")
+
+	SetRules(nil)
+	sb := New()
+
+	tmpFile := t.TempDir() + "/proxy-env.txt"
+	exitCode, err := sb.Wrap([]string{"sh", "-c", "env > " + tmpFile})
+	if err != nil {
+		t.Fatalf("Wrap() error: %v", err)
+	}
+	if exitCode != 0 {
+		t.Fatalf("exit code = %d, want 0", exitCode)
+	}
+
+	content, err := os.ReadFile(tmpFile)
+	if err != nil {
+		t.Fatalf("read env output: %v", err)
+	}
+
+	env := string(content)
+	if !strings.Contains(env, "ANTHROPIC_BASE_URL=http://127.0.0.1:9876") {
+		t.Error("ANTHROPIC_BASE_URL not injected into sandboxed process")
+	}
+	if !strings.Contains(env, "OPENAI_BASE_URL=http://127.0.0.1:9876/v1") {
+		t.Error("OPENAI_BASE_URL not injected into sandboxed process")
+	}
+}
+
+// TestE2E_NoProxyURLWhenUnset verifies proxy vars are NOT injected when proxy is not set.
+func TestE2E_NoProxyURLWhenUnset(t *testing.T) {
+	setupBakelensSandboxPath(t)
+	restore := suppressOutput()
+	defer restore()
+
+	SetProxyURL("")
+
+	SetRules(nil)
+	sb := New()
+
+	tmpFile := t.TempDir() + "/no-proxy-env.txt"
+	exitCode, err := sb.Wrap([]string{"sh", "-c", "env > " + tmpFile})
+	if err != nil {
+		t.Fatalf("Wrap() error: %v", err)
+	}
+	if exitCode != 0 {
+		t.Fatalf("exit code = %d, want 0", exitCode)
+	}
+
+	content, err := os.ReadFile(tmpFile)
+	if err != nil {
+		t.Fatalf("read env output: %v", err)
+	}
+
+	env := string(content)
+	if strings.Contains(env, "ANTHROPIC_BASE_URL=") {
+		t.Error("ANTHROPIC_BASE_URL should not be present when proxy is unset")
+	}
+	if strings.Contains(env, "OPENAI_BASE_URL=") {
+		t.Error("OPENAI_BASE_URL should not be present when proxy is unset")
+	}
+}
+
+// --- Error handling ---
+
+// TestE2E_NonexistentCommand verifies the pipeline handles a nonexistent command.
+func TestE2E_NonexistentCommand(t *testing.T) {
+	setupBakelensSandboxPath(t)
+	restore := suppressOutput()
+	defer restore()
+
+	SetRules(nil)
+	sb := New()
+
+	exitCode, err := sb.Wrap([]string{"/nonexistent/command/that/does/not/exist"})
+	// Rust should attempt to exec and fail — Go should get a non-zero exit code.
+	// The exact behavior depends on Rust: it may return exit code 127 or an error.
+	if err == nil && exitCode == 0 {
+		t.Error("expected failure for nonexistent command, got exit code 0 with no error")
+	}
+}
+
+// --- Policy JSON structure (pure Go, no Rust needed) ---
+
+// TestE2E_PolicyJSONStructure verifies the serialized policy matches the Rust schema.
+func TestE2E_PolicyJSONStructure(t *testing.T) {
+	SetRules([]SecurityRule{
+		&testRule{
+			name:       "test-fs",
+			paths:      []string{"**/.env"},
+			except:     []string{"**/.env.example"},
+			operations: []string{"read", "write"},
+		},
+		&testRule{
+			name:       "test-net",
+			hosts:      []string{"127.0.0.1"},
+			operations: []string{"network"},
+		},
+	})
+	defer SetRules(nil)
+
+	policyJSON, err := buildPolicy([]string{"echo", "hello"})
+	if err != nil {
+		t.Fatalf("buildPolicy() error: %v", err)
+	}
+
+	// Verify it round-trips through JSON correctly
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(policyJSON, &raw); err != nil {
+		t.Fatalf("invalid JSON: %v", err)
+	}
+
+	// Must have exactly: version, command, rules (no extra fields — Rust uses deny_unknown_fields)
+	allowedKeys := map[string]bool{"version": true, "command": true, "rules": true}
+	for key := range raw {
+		if !allowedKeys[key] {
+			t.Errorf("SECURITY: unexpected top-level key %q in policy JSON (Rust uses deny_unknown_fields)", key)
+		}
+	}
+	for key := range allowedKeys {
+		if _, ok := raw[key]; !ok {
+			t.Errorf("missing required key %q in policy JSON", key)
+		}
+	}
+
+	// Verify version is 1
+	var version int
+	if err := json.Unmarshal(raw["version"], &version); err != nil {
+		t.Fatalf("unmarshal version: %v", err)
+	}
+	if version != 1 {
+		t.Errorf("version = %d, want 1", version)
+	}
+
+	// Verify command is preserved
+	var command []string
+	if err := json.Unmarshal(raw["command"], &command); err != nil {
+		t.Fatalf("unmarshal command: %v", err)
+	}
+	if len(command) != 2 || command[0] != "echo" || command[1] != "hello" {
+		t.Errorf("command = %v, want [echo hello]", command)
+	}
+
+	// Verify rule structure
+	var rules []map[string]json.RawMessage
+	if err := json.Unmarshal(raw["rules"], &rules); err != nil {
+		t.Fatalf("unmarshal rules: %v", err)
+	}
+
+	// First rule: filesystem rule
+	allowedRuleKeys := map[string]bool{
+		"name": true, "patterns": true, "except": true,
+		"operations": true, "hosts": true,
+	}
+	for _, rule := range rules {
+		for key := range rule {
+			if !allowedRuleKeys[key] {
+				t.Errorf("SECURITY: unexpected key %q in deny rule (Rust uses deny_unknown_fields)", key)
+			}
+		}
+	}
+}
+
+// ==================== Sandbox Overhead Benchmarks (require Rust binary) ====================
+
+// commandTiming holds timing results for a command.
+type commandTiming struct {
+	name     string
+	category string // "valid" or "malicious"
+	cmd      []string
+	samples  []time.Duration
+	mean     time.Duration
+	min      time.Duration
+	max      time.Duration
+}
+
+// truncate truncates a string to maxLen characters.
+func truncate(s string, maxLen int) string {
+	if len(s) <= maxLen {
+		return s
+	}
+	return s[:maxLen-3] + "..."
+}
+
+// TestSandboxCostReport runs both valid and malicious commands and prints a cost report.
+// Measures Rust sandbox overhead per command type.
+// Run with: go test -v -tags=sandbox_e2e -run TestSandboxCostReport ./internal/sandbox/
+func TestSandboxCostReport(t *testing.T) {
+	if !IsSupported() {
+		t.Skip("Sandbox not supported: bakelens-sandbox binary not found")
+	}
+
+	helperPath := setupBakelensSandboxPath(t)
+	t.Logf("Using bakelens-sandbox helper: %s", helperPath)
+
+	restore := suppressOutput()
+
 	loader := rules.NewLoader("")
 	builtinRules, err := loader.LoadBuiltin()
 	if err != nil {
-		t.Fatalf("Failed to load builtin rules: %v", err)
+		t.Fatalf("Failed to load rules: %v", err)
 	}
 
-	// Add rules to mapper (all path-based rules are blocking rules)
+	var blockRules int
+	for _, r := range builtinRules {
+		if r.IsEnabled() {
+			blockRules++
+		}
+	}
+
+	var secRules []SecurityRule
 	for i := range builtinRules {
 		if builtinRules[i].IsEnabled() {
-			_ = mapper.AddRule(&builtinRules[i])
+			secRules = append(secRules, &builtinRules[i])
 		}
 	}
+	SetRules(secRules)
+	sb := New()
 
-	return New(mapper)
+	fixtureDir := t.TempDir()
+	_ = os.MkdirAll(filepath.Join(fixtureDir, ".ssh"), 0755)
+	fixtures := map[string]string{
+		".env":             "TEST_VAR=value1\nANOTHER_VAR=value2",
+		".ssh/id_rsa":      "fake ssh key content for testing",
+		".ssh/id_ed25519":  "fake ed25519 key content for testing",
+		"credentials.json": `{"test": "data", "for": "benchmarking"}`,
+		"secrets.yaml":     "test: data\nfor: benchmarking",
+	}
+	for name, content := range fixtures {
+		_ = os.WriteFile(filepath.Join(fixtureDir, name), []byte(content), 0644)
+	}
+
+	commands := []commandTiming{
+		{name: "echo hello", category: "valid", cmd: []string{"echo", "hello"}},
+		{name: "ls /tmp", category: "valid", cmd: []string{"ls", "/tmp"}},
+		{name: "true", category: "valid", cmd: []string{"true"}},
+		{name: "cat /etc/hostname", category: "valid", cmd: []string{"cat", "/etc/hostname"}},
+		{name: "pwd", category: "valid", cmd: []string{"pwd"}},
+		{name: "cat .env", category: "malicious", cmd: []string{"cat", filepath.Join(fixtureDir, ".env")}},
+		{name: "cat .ssh/id_rsa", category: "malicious", cmd: []string{"cat", filepath.Join(fixtureDir, ".ssh/id_rsa")}},
+		{name: "cat .ssh/id_ed25519", category: "malicious", cmd: []string{"cat", filepath.Join(fixtureDir, ".ssh/id_ed25519")}},
+		{name: "cat credentials.json", category: "malicious", cmd: []string{"cat", filepath.Join(fixtureDir, "credentials.json")}},
+		{name: "cat secrets.yaml", category: "malicious", cmd: []string{"cat", filepath.Join(fixtureDir, "secrets.yaml")}},
+		{name: "cat /proc/1/cmdline", category: "malicious", cmd: []string{"cat", "/proc/1/cmdline"}},
+	}
+
+	const iterations = 50
+
+	for i := range commands {
+		cmd := &commands[i]
+		cmd.samples = make([]time.Duration, iterations)
+
+		exitCode, err := sb.Wrap(cmd.cmd)
+		if err != nil {
+			t.Fatalf("Wrap failed for %q: %v", cmd.name, err)
+		}
+		_ = exitCode
+
+		for j := range iterations {
+			start := time.Now()
+			_, _ = sb.Wrap(cmd.cmd)
+			cmd.samples[j] = time.Since(start)
+		}
+
+		slices.Sort(cmd.samples)
+		cmd.min = cmd.samples[0]
+		cmd.max = cmd.samples[len(cmd.samples)-1]
+
+		var total time.Duration
+		for _, s := range cmd.samples {
+			total += s
+		}
+		cmd.mean = total / time.Duration(len(cmd.samples))
+	}
+
+	var bareMean time.Duration
+	{
+		samples := make([]time.Duration, iterations)
+		for j := range iterations {
+			start := time.Now()
+			c := exec.Command("echo", "hello")
+			c.Stdout = io.Discard
+			c.Stderr = io.Discard
+			_ = c.Run()
+			samples[j] = time.Since(start)
+		}
+		var total time.Duration
+		for _, s := range samples {
+			total += s
+		}
+		bareMean = total / time.Duration(len(samples))
+	}
+
+	restore()
+
+	fmt.Println()
+	fmt.Println("╔══════════════════════════════════════════════════════════════════════════════╗")
+	fmt.Println("║                        SANDBOX COST REPORT                                   ║")
+	fmt.Println("╠══════════════════════════════════════════════════════════════════════════════╣")
+	fmt.Printf("║ Platform: %-67s ║\n", Platform())
+	fmt.Printf("║ Block Rules Loaded: %-57d ║\n", blockRules)
+	fmt.Printf("║ Iterations per Command: %-53d ║\n", iterations)
+	fmt.Printf("║ Bare Execution (no sandbox): %-48s ║\n", bareMean.String())
+	fmt.Println("╠══════════════════════════════════════════════════════════════════════════════╣")
+
+	fmt.Println("║                              VALID COMMANDS                                  ║")
+	fmt.Println("╟──────────────────────────────────────────────────────────────────────────────╢")
+	fmt.Println("║ Command                    │ Mean       │ Min        │ Max        │ Overhead ║")
+	fmt.Println("╟────────────────────────────┼────────────┼────────────┼────────────┼──────────╢")
+
+	var validTotal time.Duration
+	var validCount int
+	for _, cmd := range commands {
+		if cmd.category == "valid" {
+			overhead := float64(cmd.mean-bareMean) / float64(bareMean) * 100
+			fmt.Printf("║ %-26s │ %10s │ %10s │ %10s │ %+6.1f%% ║\n",
+				truncate(cmd.name, 26), cmd.mean.Truncate(time.Microsecond),
+				cmd.min.Truncate(time.Microsecond), cmd.max.Truncate(time.Microsecond), overhead)
+			validTotal += cmd.mean
+			validCount++
+		}
+	}
+	validAvg := validTotal / time.Duration(validCount)
+
+	fmt.Println("╠══════════════════════════════════════════════════════════════════════════════╣")
+
+	fmt.Println("║                            MALICIOUS COMMANDS                                ║")
+	fmt.Println("║ (These pass Layer 2 sandbox but would be blocked by Layer 1 rules engine)   ║")
+	fmt.Println("╟──────────────────────────────────────────────────────────────────────────────╢")
+	fmt.Println("║ Command                    │ Mean       │ Min        │ Max        │ Overhead ║")
+	fmt.Println("╟────────────────────────────┼────────────┼────────────┼────────────┼──────────╢")
+
+	var maliciousTotal time.Duration
+	var maliciousCount int
+	for _, cmd := range commands {
+		if cmd.category == "malicious" {
+			overhead := float64(cmd.mean-bareMean) / float64(bareMean) * 100
+			fmt.Printf("║ %-26s │ %10s │ %10s │ %10s │ %+6.1f%% ║\n",
+				truncate(cmd.name, 26), cmd.mean.Truncate(time.Microsecond),
+				cmd.min.Truncate(time.Microsecond), cmd.max.Truncate(time.Microsecond), overhead)
+			maliciousTotal += cmd.mean
+			maliciousCount++
+		}
+	}
+	maliciousAvg := maliciousTotal / time.Duration(maliciousCount)
+
+	fmt.Println("╠══════════════════════════════════════════════════════════════════════════════╣")
+	fmt.Println("║                               SUMMARY                                        ║")
+	fmt.Println("╟──────────────────────────────────────────────────────────────────────────────╢")
+	fmt.Printf("║ Valid Commands Average:     %-50s ║\n", validAvg.Truncate(time.Microsecond).String())
+	fmt.Printf("║ Malicious Commands Average: %-50s ║\n", maliciousAvg.Truncate(time.Microsecond).String())
+	fmt.Printf("║ Sandbox Overhead (vs bare): %-50s ║\n", (validAvg - bareMean).Truncate(time.Microsecond).String())
+	fmt.Println("╟──────────────────────────────────────────────────────────────────────────────╢")
+	fmt.Println("║ NOTE: Layer 1 (rules engine) adds ~30μs and blocks malicious commands       ║")
+	fmt.Println("║       Layer 2 (sandbox) adds ~300-500μs kernel-level protection             ║")
+	fmt.Println("╚══════════════════════════════════════════════════════════════════════════════╝")
+	fmt.Println()
 }
 
-// runCommand executes a command inside the sandbox and captures output.
-func runCommand(sb *Sandbox, args ...string) (exitCode int, stdout, stderr string) {
-	// Create command
-	cmd := exec.Command(args[0], args[1:]...)
+// BenchmarkCommandExecution benchmarks actual command execution.
+// Compares execution with and without sandbox wrapper to measure Rust overhead.
+func BenchmarkCommandExecution(b *testing.B) {
+	b.ReportAllocs()
+	if !IsSupported() {
+		b.Skip("Sandbox not supported: bakelens-sandbox binary not found")
+	}
 
-	var stdoutBuf, stderrBuf bytes.Buffer
-	cmd.Stdout = &stdoutBuf
-	cmd.Stderr = &stderrBuf
+	setupBakelensSandboxPath(b)
 
-	// For E2E tests, we run without the sandbox wrapper to test individual components
-	// The actual sandbox enforcement is tested via the Wrap method
-	err := cmd.Run()
+	restore := suppressOutput()
+	defer restore()
 
-	exitCode = 0
+	loader := rules.NewLoader("")
+	builtinRules, _ := loader.LoadBuiltin()
+	var secRules []SecurityRule
+	for i := range builtinRules {
+		if builtinRules[i].IsEnabled() {
+			secRules = append(secRules, &builtinRules[i])
+		}
+	}
+	SetRules(secRules)
+
+	sb := New()
+
+	b.Run("without_sandbox", func(b *testing.B) {
+		b.ReportAllocs()
+		for range b.N {
+			cmd := exec.Command("echo", "hello")
+			cmd.Stdout = io.Discard
+			cmd.Stderr = io.Discard
+			_ = cmd.Run()
+		}
+	})
+
+	b.Run("with_sandbox_all_rules", func(b *testing.B) {
+		b.ReportAllocs()
+		for range b.N {
+			_, _ = sb.Wrap([]string{"echo", "hello"})
+		}
+	})
+}
+
+// BenchmarkAllBuiltinRules benchmarks sandbox with all builtin rules loaded.
+// Measures Rust overhead for both valid and malicious commands.
+func BenchmarkAllBuiltinRules(b *testing.B) {
+	b.ReportAllocs()
+	if !IsSupported() {
+		b.Skip("Sandbox not supported: bakelens-sandbox binary not found")
+	}
+
+	setupBakelensSandboxPath(b)
+
+	restore := suppressOutput()
+	defer restore()
+
+	loader := rules.NewLoader("")
+	builtinRules, err := loader.LoadBuiltin()
 	if err != nil {
-		if exitErr, ok := err.(*exec.ExitError); ok {
-			exitCode = exitErr.ExitCode()
-		} else {
-			exitCode = 1
+		b.Fatalf("Failed to load rules: %v", err)
+	}
+
+	var secRules []SecurityRule
+	for i := range builtinRules {
+		if builtinRules[i].IsEnabled() {
+			secRules = append(secRules, &builtinRules[i])
 		}
 	}
+	SetRules(secRules)
+	sb := New()
 
-	return exitCode, stdoutBuf.String(), stderrBuf.String()
-}
-
-// runInSandbox executes a command inside the sandbox.
-func runInSandbox(t *testing.T, sb *Sandbox, args ...string) (exitCode int, stdout, stderr string) {
-	t.Helper()
-
-	// Capture stdout/stderr by redirecting to temp files
-	stdoutFile := filepath.Join(t.TempDir(), "stdout")
-	stderrFile := filepath.Join(t.TempDir(), "stderr")
-
-	// Build command that redirects output
-	shellCmd := strings.Join(args, " ") + " >" + stdoutFile + " 2>" + stderrFile
-
-	exitCode, err := sb.Wrap([]string{"sh", "-c", shellCmd})
-	if err != nil {
-		t.Logf("Sandbox error: %v", err)
-	}
-
-	stdoutBytes, _ := os.ReadFile(stdoutFile)
-	stderrBytes, _ := os.ReadFile(stderrFile)
-
-	return exitCode, string(stdoutBytes), string(stderrBytes)
-}
-
-// assertBlocked verifies that a command was blocked by the sandbox.
-func assertBlocked(t *testing.T, name string, exitCode int, stderr string) {
-	t.Helper()
-
-	if exitCode == 0 {
-		t.Errorf("%s: expected to be BLOCKED (non-zero exit), but succeeded", name)
-		return
-	}
-
-	// Check for permission denied indicators
-	blockedIndicators := []string{
-		"Permission denied",
-		"Operation not permitted",
-		"not permitted",
-		"denied",
-	}
-
-	found := false
-	for _, indicator := range blockedIndicators {
-		if strings.Contains(strings.ToLower(stderr), strings.ToLower(indicator)) {
-			found = true
-			break
-		}
-	}
-
-	if !found && stderr != "" {
-		t.Logf("%s: blocked with unexpected error: %s", name, stderr)
-	}
-
-	t.Logf("%s: correctly BLOCKED (exit=%d)", name, exitCode)
-}
-
-// assertAllowed verifies that a command was allowed by the sandbox.
-func assertAllowed(t *testing.T, name string, exitCode int, stderr string) {
-	t.Helper()
-
-	if exitCode != 0 {
-		t.Errorf("%s: expected to be ALLOWED (exit=0), but failed with exit=%d, stderr=%s",
-			name, exitCode, stderr)
-		return
-	}
-
-	t.Logf("%s: correctly ALLOWED", name)
-}
-
-// checkTestDataExists verifies the test data directory is set up.
-func checkTestDataExists(t *testing.T) {
-	t.Helper()
-
-	if _, err := os.Stat(getTestDataDir()); os.IsNotExist(err) {
-		t.Skipf("Test data directory %s does not exist. Run in Docker or create test files.", getTestDataDir())
-	}
-}
-
-// checkBlockedDataExists verifies the blocked data directory is set up.
-func checkBlockedDataExists(t *testing.T) {
-	t.Helper()
-
-	if _, err := os.Stat(getBlockedDataDir()); os.IsNotExist(err) {
-		t.Skipf("Blocked data directory %s does not exist. Run in Docker or create test files.", getBlockedDataDir())
-	}
-}
-
-// TestSandboxPlatformSupport verifies sandbox is available.
-func TestSandboxPlatformSupport(t *testing.T) {
-	if !IsSupported() {
-		t.Skipf("Sandbox not supported on this platform: %s", Platform())
-	}
-
-	t.Logf("Sandbox platform: %s", Platform())
-}
-
-// TestSandbox_BlocksEnvFile tests that .env files are blocked.
-func TestSandbox_BlocksEnvFile(t *testing.T) {
-	checkBlockedDataExists(t)
-
-	if !IsSupported() {
-		t.Skip("Sandbox not supported")
-	}
-
-	sb := setupTestSandbox(t)
-
-	tests := []struct {
+	validCmds := []struct {
 		name string
-		file string
+		cmd  []string
 	}{
-		{"read .env", filepath.Join(getBlockedDataDir(), ".env")},
-		{"read .env.local", filepath.Join(getBlockedDataDir(), ".env.local")},
+		{"valid_echo", []string{"echo", "hello"}},
+		{"valid_ls_tmp", []string{"ls", "/tmp"}},
+		{"valid_true", []string{"true"}},
 	}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if _, err := os.Stat(tt.file); os.IsNotExist(err) {
-				t.Skipf("Test file %s does not exist", tt.file)
+	for _, tc := range validCmds {
+		b.Run(tc.name, func(b *testing.B) {
+			b.ReportAllocs()
+			for range b.N {
+				_, _ = sb.Wrap(tc.cmd)
 			}
-
-			exitCode, _, stderr := runInSandbox(t, sb, "cat", tt.file)
-			assertBlocked(t, tt.name, exitCode, stderr)
 		})
 	}
-}
 
-// TestSandbox_BlocksSSHKeys tests that SSH private keys are blocked.
-func TestSandbox_BlocksSSHKeys(t *testing.T) {
-	checkBlockedDataExists(t)
-
-	if !IsSupported() {
-		t.Skip("Sandbox not supported")
-	}
-
-	sb := setupTestSandbox(t)
-
-	sshDir := filepath.Join(getBlockedDataDir(), ".ssh")
-	tests := []struct {
+	maliciousCmds := []struct {
 		name string
-		file string
+		cmd  []string
 	}{
-		{"read id_rsa", filepath.Join(sshDir, "id_rsa")},
-		{"read id_ed25519", filepath.Join(sshDir, "id_ed25519")},
+		{"malicious_cat_env", []string{"cat", ".env"}},
+		{"malicious_cat_ssh", []string{"cat", "/root/.ssh/id_rsa"}},
+		{"malicious_ls_passwd", []string{"ls", "/etc/passwd"}},
 	}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if _, err := os.Stat(tt.file); os.IsNotExist(err) {
-				t.Skipf("Test file %s does not exist", tt.file)
+	for _, tc := range maliciousCmds {
+		b.Run(tc.name, func(b *testing.B) {
+			b.ReportAllocs()
+			for range b.N {
+				_, _ = sb.Wrap(tc.cmd)
 			}
-
-			exitCode, _, stderr := runInSandbox(t, sb, "cat", tt.file)
-			assertBlocked(t, tt.name, exitCode, stderr)
-		})
-	}
-}
-
-// TestSandbox_BlocksCredentialFiles tests that credential files are blocked.
-func TestSandbox_BlocksCredentialFiles(t *testing.T) {
-	checkBlockedDataExists(t)
-
-	if !IsSupported() {
-		t.Skip("Sandbox not supported")
-	}
-
-	sb := setupTestSandbox(t)
-
-	secretsDir := filepath.Join(getBlockedDataDir(), "secrets")
-	tests := []struct {
-		name string
-		file string
-	}{
-		{"read credentials.json", filepath.Join(secretsDir, "credentials.json")},
-		{"read secrets.yaml", filepath.Join(secretsDir, "secrets.yaml")},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if _, err := os.Stat(tt.file); os.IsNotExist(err) {
-				t.Skipf("Test file %s does not exist", tt.file)
-			}
-
-			exitCode, _, stderr := runInSandbox(t, sb, "cat", tt.file)
-			assertBlocked(t, tt.name, exitCode, stderr)
-		})
-	}
-}
-
-// TestSandbox_BlocksDeletion tests that destructive commands are blocked.
-func TestSandbox_BlocksDeletion(t *testing.T) {
-	checkTestDataExists(t)
-
-	if !IsSupported() {
-		t.Skip("Sandbox not supported")
-	}
-
-	sb := setupTestSandbox(t)
-
-	// Create a temp file to try to delete
-	tmpFile := filepath.Join(t.TempDir(), "delete-me.txt")
-	if err := os.WriteFile(tmpFile, []byte("test"), 0644); err != nil {
-		t.Fatalf("Failed to create temp file: %v", err)
-	}
-
-	tests := []struct {
-		name string
-		args []string
-	}{
-		{"rm system dir", []string{"rm", "-rf", "/etc"}},
-		{"rm usr", []string{"rm", "-rf", "/usr"}},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			exitCode, _, stderr := runInSandbox(t, sb, tt.args...)
-			assertBlocked(t, tt.name, exitCode, stderr)
-		})
-	}
-}
-
-// TestSandbox_AllowsNormalFiles tests that normal file access works.
-func TestSandbox_AllowsNormalFiles(t *testing.T) {
-	checkTestDataExists(t)
-
-	if !IsSupported() {
-		t.Skip("Sandbox not supported")
-	}
-
-	sb := setupTestSandbox(t)
-
-	projectDir := filepath.Join(getTestDataDir(), "project")
-	tests := []struct {
-		name string
-		file string
-	}{
-		{"read main.go", filepath.Join(projectDir, "main.go")},
-		{"read README.md", filepath.Join(projectDir, "README.md")},
-		{"read data.txt", filepath.Join(projectDir, "data.txt")},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if _, err := os.Stat(tt.file); os.IsNotExist(err) {
-				t.Skipf("Test file %s does not exist", tt.file)
-			}
-
-			exitCode, _, stderr := runInSandbox(t, sb, "cat", tt.file)
-			assertAllowed(t, tt.name, exitCode, stderr)
-		})
-	}
-}
-
-// TestSandbox_AllowsBasicCommands tests that basic commands work.
-func TestSandbox_AllowsBasicCommands(t *testing.T) {
-	if !IsSupported() {
-		t.Skip("Sandbox not supported")
-	}
-
-	sb := setupTestSandbox(t)
-
-	tests := []struct {
-		name string
-		args []string
-	}{
-		{"echo", []string{"echo", "hello world"}},
-		{"pwd", []string{"pwd"}},
-		{"ls tmp", []string{"ls", "/tmp"}},
-		{"date", []string{"date"}},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			exitCode, _, stderr := runInSandbox(t, sb, tt.args...)
-			assertAllowed(t, tt.name, exitCode, stderr)
-		})
-	}
-}
-
-// TestSandbox_BlocksExecuteFromTmp tests that executing binaries from /tmp is blocked.
-// This is the core security property of the rw/rx split: /tmp is rw (no execute).
-func TestSandbox_BlocksExecuteFromTmp(t *testing.T) {
-	if !IsSupported() {
-		t.Skip("Sandbox not supported")
-	}
-	if !isLandlockSupported() {
-		t.Skip("Requires Landlock for execute enforcement")
-	}
-
-	sb := setupTestSandbox(t)
-
-	// Copy a binary to /tmp and try to execute it directly
-	tmpBin := "/tmp/test-exec-blocked-" + t.Name()
-	defer os.Remove(tmpBin)
-
-	// Copy /usr/bin/true to /tmp
-	exitCode, _, stderr := runInSandbox(t, sb, "cp", "/usr/bin/true", tmpBin)
-	if exitCode != 0 {
-		t.Skipf("Cannot copy binary to /tmp (exit=%d stderr=%s)", exitCode, stderr)
-	}
-
-	// Make it executable (chmod works at filesystem level)
-	exitCode, _, stderr = runInSandbox(t, sb, "chmod", "+x", tmpBin)
-	if exitCode != 0 {
-		t.Skipf("Cannot chmod (exit=%d stderr=%s)", exitCode, stderr)
-	}
-
-	// Try to execute it — should fail because /tmp has rw mode (no execute)
-	exitCode, _, stderr = runInSandbox(t, sb, tmpBin)
-	assertBlocked(t, "execute from /tmp", exitCode, stderr)
-}
-
-// TestSandbox_AllowsExecuteFromUsr tests that executing binaries from /usr works.
-// /usr has rx mode — execute is allowed.
-func TestSandbox_AllowsExecuteFromUsr(t *testing.T) {
-	if !IsSupported() {
-		t.Skip("Sandbox not supported")
-	}
-
-	sb := setupTestSandbox(t)
-
-	exitCode, _, stderr := runInSandbox(t, sb, "/usr/bin/ls", "/tmp")
-	assertAllowed(t, "execute from /usr", exitCode, stderr)
-}
-
-// TestSandbox_BlocksWriteToUsr tests that writing to /usr is blocked.
-// /usr has rx mode — write is denied.
-func TestSandbox_BlocksWriteToUsr(t *testing.T) {
-	if !IsSupported() {
-		t.Skip("Sandbox not supported")
-	}
-	if !isLandlockSupported() {
-		t.Skip("Requires Landlock for write enforcement")
-	}
-
-	sb := setupTestSandbox(t)
-
-	exitCode, _, stderr := runInSandbox(t, sb, "touch", "/usr/bin/evil-test-file")
-	assertBlocked(t, "write to /usr", exitCode, stderr)
-}
-
-// TestSandbox_AllowsWriteToTmp tests that writing to /tmp works.
-// /tmp has rw mode — write is allowed.
-func TestSandbox_AllowsWriteToTmp(t *testing.T) {
-	if !IsSupported() {
-		t.Skip("Sandbox not supported")
-	}
-
-	sb := setupTestSandbox(t)
-
-	tmpFile := "/tmp/test-write-" + t.Name()
-	defer os.Remove(tmpFile)
-
-	exitCode, _, stderr := runInSandbox(t, sb, "touch", tmpFile)
-	assertAllowed(t, "write to /tmp", exitCode, stderr)
-}
-
-// TestSandbox_BlocksWriteToEtc tests that writing to /etc is blocked.
-// /etc has ro mode — write is denied.
-func TestSandbox_BlocksWriteToEtc(t *testing.T) {
-	if !IsSupported() {
-		t.Skip("Sandbox not supported")
-	}
-	if !isLandlockSupported() {
-		t.Skip("Requires Landlock for write enforcement")
-	}
-
-	sb := setupTestSandbox(t)
-
-	exitCode, _, stderr := runInSandbox(t, sb, "touch", "/etc/evil-test-file")
-	assertBlocked(t, "write to /etc", exitCode, stderr)
-}
-
-// TestSandbox_AllowsReadFromEtc tests that reading from /etc works.
-// /etc has ro mode — read is allowed.
-func TestSandbox_AllowsReadFromEtc(t *testing.T) {
-	if !IsSupported() {
-		t.Skip("Sandbox not supported")
-	}
-
-	sb := setupTestSandbox(t)
-
-	exitCode, _, stderr := runInSandbox(t, sb, "cat", "/etc/hostname")
-	assertAllowed(t, "read from /etc", exitCode, stderr)
-}
-
-// TestSandbox_BinaryPlantingBlocked tests the binary planting attack scenario.
-// Agent writes a binary to /tmp and tries to execute it — must fail.
-func TestSandbox_BinaryPlantingBlocked(t *testing.T) {
-	if !IsSupported() {
-		t.Skip("Sandbox not supported")
-	}
-	if !isLandlockSupported() {
-		t.Skip("Requires Landlock for execute enforcement")
-	}
-
-	sb := setupTestSandbox(t)
-
-	// Simulate: agent copies echo to /tmp and tries to run it
-	tmpBin := "/tmp/test-planted-" + t.Name()
-	defer os.Remove(tmpBin)
-
-	exitCode, _, stderr := runInSandbox(t, sb, "sh", "-c",
-		"cp /usr/bin/echo "+tmpBin+" && chmod +x "+tmpBin+" && "+tmpBin+" pwned")
-	if exitCode == 0 {
-		t.Error("binary planting attack succeeded — /tmp execute should be blocked")
-	} else {
-		t.Logf("binary planting correctly blocked (exit=%d)", exitCode)
-	}
-	_ = stderr
-}
-
-// TestSandbox_InterpreterFromRXDir tests that interpreted scripts work.
-// The interpreter (e.g., sh) runs from /usr (rx), reading a script from /tmp (rw).
-func TestSandbox_InterpreterFromRXDir(t *testing.T) {
-	if !IsSupported() {
-		t.Skip("Sandbox not supported")
-	}
-
-	sb := setupTestSandbox(t)
-
-	// Write a script to /tmp, run it via sh (from /usr/bin)
-	tmpScript := "/tmp/test-script-" + t.Name() + ".sh"
-	defer os.Remove(tmpScript)
-
-	if err := os.WriteFile(tmpScript, []byte("#!/bin/sh\necho hello\n"), 0644); err != nil {
-		t.Fatalf("Cannot write test script: %v", err)
-	}
-
-	// Run via interpreter (sh reads the script as data from /tmp rw)
-	exitCode, stdout, stderr := runInSandbox(t, sb, "sh", tmpScript)
-	assertAllowed(t, "interpreter from rx dir", exitCode, stderr)
-	if !strings.Contains(stdout, "hello") {
-		t.Errorf("expected 'hello' in stdout, got: %s", stdout)
-	}
-}
-
-// TestSandbox_SharedLibsLoadWithRO tests that dynamically linked binaries work.
-// /lib is ro — shared libraries are loaded via mmap (not execve), so ro is sufficient.
-func TestSandbox_SharedLibsLoadWithRO(t *testing.T) {
-	if !IsSupported() {
-		t.Skip("Sandbox not supported")
-	}
-
-	sb := setupTestSandbox(t)
-
-	// ls is dynamically linked and needs /lib for libc.so
-	exitCode, _, stderr := runInSandbox(t, sb, "ls", "/tmp")
-	assertAllowed(t, "shared libs load with ro on /lib", exitCode, stderr)
-}
-
-// TestSandbox_BlocksProcAccess tests that /proc access is blocked.
-// NOTE: Landlock (Layer 2) cannot block specific files within allowed directories.
-// /proc is in the allowlist because many commands need it. Blocking /proc/*/cmdline
-// is a Layer 1 (rules engine) responsibility, not Layer 2 (sandbox).
-// This test is skipped on Linux because Landlock can't provide this protection.
-func TestSandbox_BlocksProcAccess(t *testing.T) {
-	if !IsSupported() {
-		t.Skip("Sandbox not supported")
-	}
-
-	// /proc only exists on Linux
-	if _, err := os.Stat("/proc"); os.IsNotExist(err) {
-		t.Skip("/proc does not exist on this platform")
-	}
-
-	// Skip on Linux: Landlock can't block specific files within allowed directories.
-	// /proc must be in the allowlist for commands to work, so /proc/*/cmdline is accessible.
-	// Blocking these paths is done by Layer 1 (rules engine), not Layer 2 (sandbox).
-	if isLandlockSupported() {
-		t.Skip("Landlock cannot block specific files within allowed directories; /proc access is blocked by Layer 1 rules engine")
-	}
-
-	sb := setupTestSandbox(t)
-
-	tests := []struct {
-		name string
-		file string
-	}{
-		{"read /proc/1/cmdline", "/proc/1/cmdline"},
-		{"read /proc/1/environ", "/proc/1/environ"},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			exitCode, _, stderr := runInSandbox(t, sb, "cat", tt.file)
-			assertBlocked(t, tt.name, exitCode, stderr)
 		})
 	}
 }

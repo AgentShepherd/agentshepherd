@@ -12,6 +12,11 @@ LIMIT 1;
 INSERT INTO traces (trace_id, session_id, start_time)
 VALUES (?, ?, ?);
 
+-- name: UpsertTrace :execlastid
+INSERT INTO traces (trace_id, session_id, start_time)
+VALUES (?, ?, ?)
+ON CONFLICT(trace_id) DO UPDATE SET session_id = COALESCE(excluded.session_id, traces.session_id);
+
 -- name: UpdateTraceEndTime :exec
 UPDATE traces
 SET end_time = ?
@@ -69,13 +74,13 @@ ORDER BY count DESC;
 -- name: LogToolCall :exec
 INSERT INTO tool_call_logs (
     trace_id, session_id, tool_name, tool_arguments,
-    api_type, was_blocked, blocked_by_rule, model
+    api_type, was_blocked, blocked_by_rule, model, layer
 )
-VALUES (?, ?, ?, ?, ?, ?, ?, ?);
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);
 
 -- name: GetRecentToolCallLogs :many
 SELECT id, timestamp, trace_id, session_id, tool_name, tool_arguments,
-    api_type, was_blocked, blocked_by_rule, model
+    api_type, was_blocked, blocked_by_rule, model, layer
 FROM tool_call_logs
 WHERE timestamp > datetime('now', ?)
 ORDER BY timestamp DESC
@@ -89,7 +94,7 @@ FROM tool_call_logs;
 -- name: GetTopBlockedTools :many
 SELECT tool_name,
        COUNT(*) as total_calls,
-       SUM(CASE WHEN was_blocked THEN 1 ELSE 0 END) as blocked_calls
+       CAST(COALESCE(SUM(CASE WHEN was_blocked THEN 1 ELSE 0 END), 0) AS INTEGER) as blocked_calls
 FROM tool_call_logs
 GROUP BY tool_name
 ORDER BY blocked_calls DESC

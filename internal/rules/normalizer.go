@@ -2,17 +2,11 @@ package rules
 
 import (
 	"os"
+	"path"
 	"path/filepath"
-	"regexp"
 	"strings"
 
 	"golang.org/x/text/unicode/norm"
-)
-
-// Pre-compiled regexes for environment variable expansion (performance)
-var (
-	bracedVarRe = regexp.MustCompile(`\$\{([A-Za-z_][A-Za-z0-9_]*)\}`)
-	simpleVarRe = regexp.MustCompile(`\$([A-Za-z_][A-Za-z0-9_]*)`)
 )
 
 // Normalizer normalizes paths for consistent matching.
@@ -38,14 +32,14 @@ func NewNormalizer() *Normalizer {
 	// Build environment map
 	env := make(map[string]string)
 	for _, e := range os.Environ() {
-		if idx := strings.Index(e, "="); idx > 0 {
-			env[e[:idx]] = e[idx+1:]
+		if key, value, ok := strings.Cut(e, "="); ok {
+			env[key] = value
 		}
 	}
 
 	return &Normalizer{
-		homeDir: homeDir,
-		workDir: workDir,
+		homeDir: filepath.ToSlash(homeDir),
+		workDir: filepath.ToSlash(workDir),
 		env:     env,
 	}
 }
@@ -57,8 +51,8 @@ func NewNormalizerWithEnv(homeDir, workDir string, env map[string]string) *Norma
 		env = make(map[string]string)
 	}
 	return &Normalizer{
-		homeDir: homeDir,
-		workDir: workDir,
+		homeDir: filepath.ToSlash(homeDir),
+		workDir: filepath.ToSlash(workDir),
 		env:     env,
 	}
 }
@@ -77,6 +71,10 @@ func (n *Normalizer) Normalize(path string) string {
 		return ""
 	}
 
+	// SECURITY: Trim leading/trailing whitespace — paths like " /etc/passwd "
+	// could bypass pattern matching while still resolving to the real path.
+	path = strings.TrimSpace(path)
+
 	// SECURITY: Strip null bytes — C-level syscalls truncate at \x00,
 	// so "/etc/passwd\x00.txt" would access "/etc/passwd" while bypassing
 	// pattern matching on the full string.
@@ -85,15 +83,35 @@ func (n *Normalizer) Normalize(path string) string {
 		return ""
 	}
 
+	// Normalize path separators: both \ and / are valid on Windows.
+	// Convert to forward slashes early so all subsequent checks (~/,  ./, etc.) work.
+	path = filepath.ToSlash(path)
+
+	// SECURITY: Sanitize invalid UTF-8 before NFKC — invalid bytes (e.g., 0xF5)
+	// can corrupt NFKC processing of subsequent valid runes, breaking idempotency.
+	path = strings.ToValidUTF8(path, "\uFFFD")
+
 	// SECURITY: NFKC normalization — maps fullwidth, compatibility, and
 	// decomposed forms to their canonical equivalents. Prevents bypass via
 	// Unicode encoding tricks like fullwidth "/ｅｔｃ/ｐａｓｓｗｄ".
 	path = norm.NFKC.String(path)
 
+	// SECURITY: Strip invisible Unicode characters — zero-width joiners,
+	// soft hyphens, and other formatting chars that are invisible but
+	// prevent glob matching. E.g., ".e\u200dnv" looks like ".env" but
+	// doesn't match the "**/.env" pattern without stripping.
+	path = stripInvisible(path)
+
 	// SECURITY: Strip cross-script confusables — maps Cyrillic/Greek
 	// lookalikes to ASCII. Prevents bypass via homoglyph substitution
 	// like "/etc/pаsswd" (Cyrillic а U+0430).
 	path = stripConfusables(path)
+
+	// SECURITY: Re-normalize after confusable replacement — replacing a
+	// non-Latin base char (e.g., Greek τ → t) can create new NFKC
+	// composition pairs with existing combining marks (e.g., t + ̈ + ́),
+	// breaking idempotency without this second pass.
+	path = norm.NFKC.String(path)
 
 	// Step 1: Expand tilde (~)
 	path = n.expandTilde(path)
@@ -101,13 +119,42 @@ func (n *Normalizer) Normalize(path string) string {
 	// Step 2 & 3: Expand environment variables ($HOME, ${HOME}, $VAR, ${VAR})
 	path = n.expandEnvVars(path)
 
+	// SECURITY: Re-normalize after variable expansion — removing $VAR can
+	// merge a base character with combining marks that were separated by
+	// the variable reference (e.g., "A$EMPTŸ" → "Ä" after expansion).
+	path = norm.NFKC.String(path)
+
 	// Step 4: Convert relative paths to absolute
 	path = n.makeAbsolute(path)
+
+	// Step 4.5: Resolve well-known symlinks BEFORE path cleaning so that
+	// ".." traversals resolve correctly (e.g., /dev/fd/../environ →
+	// /proc/self/fd/../environ → clean → /proc/self/environ).
+	// On Linux, /dev/fd is a symlink to /proc/self/fd.
+	if strings.HasPrefix(path, "/dev/fd/") {
+		path = "/proc/self/fd/" + path[len("/dev/fd/"):]
+	} else if path == "/dev/fd" {
+		path = "/proc/self/fd"
+	}
 
 	// Step 5: Resolve parent directory references
 	// Step 6: Remove duplicate slashes
 	// Step 7: Clean the path
 	path = n.cleanPath(path)
+
+	// Final trim: path cleaning can expose trailing whitespace from segments
+	// like ". " (dot-space) that becomes meaningful after filepath.Clean.
+	// Loop because Clean may reveal new trailing whitespace from inner
+	// components (e.g., "0 / /" → Clean → "0 / " → Trim+Clean → "0 " → Trim+Clean → "0").
+	// Unbounded loop is safe: each iteration strictly shortens the string
+	// (TrimSpace removes ≥1 char, cleanPath never adds chars).
+	for {
+		trimmed := strings.TrimSpace(path)
+		if trimmed == path {
+			break
+		}
+		path = n.cleanPath(trimmed)
+	}
 
 	return path
 }
@@ -138,7 +185,10 @@ func (n *Normalizer) NormalizePattern(pattern string) string {
 	if pattern == "" {
 		return ""
 	}
+	// Normalize path separators: both \ and / are valid on Windows.
+	pattern = filepath.ToSlash(pattern)
 	pattern = norm.NFKC.String(pattern)
+	pattern = stripInvisible(pattern)
 	pattern = stripConfusables(pattern)
 	pattern = n.expandTilde(pattern)
 	pattern = n.expandEnvVars(pattern)
@@ -163,38 +213,24 @@ func (n *Normalizer) expandTilde(path string) string {
 }
 
 // expandEnvVars expands environment variables in a path.
-// Supports both $VAR and ${VAR} syntax.
+// Supports both $VAR and ${VAR} syntax via os.Expand.
 // If a variable doesn't exist, it becomes empty (consistent with shell behavior).
 // SECURITY: Expansion is repeated until stable to prevent nested variable attacks
 // (e.g., "${${A$A}" creating new ${...} patterns after partial expansion).
 func (n *Normalizer) expandEnvVars(path string) string {
 	const maxIterations = 5
-	for i := 0; i < maxIterations; i++ {
+	for range maxIterations {
 		prev := path
-
-		// Process ${VAR} first, then $VAR to avoid conflicts
-		path = bracedVarRe.ReplaceAllStringFunc(path, func(match string) string {
-			varName := match[2 : len(match)-1]
-			if val, ok := n.env[varName]; ok {
+		path = os.Expand(path, func(key string) string {
+			if val, ok := n.env[key]; ok {
 				return val
 			}
 			return ""
 		})
-
-		// Pattern for $VAR syntax
-		path = simpleVarRe.ReplaceAllStringFunc(path, func(match string) string {
-			varName := match[1:]
-			if val, ok := n.env[varName]; ok {
-				return val
-			}
-			return ""
-		})
-
 		if path == prev {
 			break
 		}
 	}
-
 	return path
 }
 
@@ -204,8 +240,8 @@ func (n *Normalizer) makeAbsolute(path string) string {
 		return path
 	}
 
-	// Already absolute
-	if filepath.IsAbs(path) {
+	// Already absolute (filepath.IsAbs, or Unix-style / which Windows doesn't recognize)
+	if filepath.IsAbs(path) || strings.HasPrefix(path, "/") {
 		return path
 	}
 
@@ -224,20 +260,28 @@ func (n *Normalizer) makeAbsolute(path string) string {
 }
 
 // cleanPath cleans the path by resolving .., removing duplicate slashes, etc.
-func (n *Normalizer) cleanPath(path string) string {
-	if path == "" {
+// Always returns forward slashes for consistent cross-platform matching.
+// Uses path.Clean (forward-slash aware) instead of filepath.Clean to avoid
+// Windows UNC path confusion (filepath.Clean treats // as UNC prefix).
+func (n *Normalizer) cleanPath(p string) string {
+	if p == "" {
 		return ""
 	}
 
-	// filepath.Clean handles:
+	// Ensure forward slashes before cleaning (filepath.Join may produce \ on Windows).
+	p = filepath.ToSlash(p)
+
+	// path.Clean handles:
 	// - Multiple slashes (// -> /)
 	// - . and .. references
 	// - Trailing slashes (except for root)
-	cleaned := filepath.Clean(path)
+	// Unlike filepath.Clean, it always uses forward slashes and does not
+	// interpret // as a Windows UNC path prefix.
+	cleaned := path.Clean(p)
 
 	// Ensure absolute paths stay absolute
-	// (filepath.Clean might produce "." for some edge cases)
-	if strings.HasPrefix(path, "/") && !strings.HasPrefix(cleaned, "/") {
+	// (path.Clean might produce "." for some edge cases)
+	if strings.HasPrefix(p, "/") && !strings.HasPrefix(cleaned, "/") {
 		cleaned = "/" + cleaned
 	}
 
@@ -270,7 +314,16 @@ func (n *Normalizer) ResolveSymlink(path string) string {
 		return path
 	}
 
-	return resolved
+	return filepath.ToSlash(resolved)
+}
+
+// resolveSymlinks resolves symlinks for multiple already-normalized paths.
+func (n *Normalizer) resolveSymlinks(paths []string) []string {
+	result := make([]string, len(paths))
+	for i, p := range paths {
+		result[i] = n.ResolveSymlink(p)
+	}
+	return result
 }
 
 // NormalizeWithSymlinks normalizes a path AND resolves symlinks.
@@ -342,6 +395,70 @@ var confusableMap = map[rune]rune{
 	'\u03a7': 'X', // Χ
 	'\u03a5': 'Y', // Υ
 	'\u0396': 'Z', // Ζ
+	// Latin small capitals (U+1D00 block) — survive NFKC normalization
+	'\u1D00': 'a', // ᴀ
+	'\u1D04': 'c', // ᴄ
+	'\u1D05': 'd', // ᴅ
+	'\u1D07': 'e', // ᴇ
+	'\u0262': 'g', // ɢ
+	'\u029C': 'h', // ʜ
+	'\u026A': 'i', // ɪ
+	'\u1D0A': 'j', // ᴊ
+	'\u1D0B': 'k', // ᴋ
+	'\u029F': 'l', // ʟ
+	'\u1D0D': 'm', // ᴍ
+	'\u0274': 'n', // ɴ
+	'\u1D0F': 'o', // ᴏ
+	'\u1D18': 'p', // ᴘ
+	'\u0280': 'r', // ʀ
+	'\uA731': 's', // ꜱ
+	'\u1D1B': 't', // ᴛ
+	'\u1D1C': 'u', // ᴜ
+	'\u1D20': 'v', // ᴠ
+	'\u1D21': 'w', // ᴡ
+}
+
+// invisibleRunes is the set of zero-width and formatting Unicode characters
+// that should be stripped from paths. These are invisible but prevent pattern
+// matching — e.g., ".e\u200dnv" looks like ".env" to a human but doesn't
+// match the glob "**/.env".
+var invisibleRunes = map[rune]bool{
+	'\u200B': true, // zero-width space
+	'\u200C': true, // zero-width non-joiner
+	'\u200D': true, // zero-width joiner
+	'\uFEFF': true, // zero-width no-break space (BOM)
+	'\u00AD': true, // soft hyphen
+	'\u034F': true, // combining grapheme joiner
+	'\u061C': true, // arabic letter mark
+	'\u180E': true, // mongolian vowel separator
+	'\u2060': true, // word joiner
+	'\u2061': true, // function application
+	'\u2062': true, // invisible times
+	'\u2063': true, // invisible separator
+	'\u2064': true, // invisible plus
+	'\u206A': true, // inhibit symmetric swapping
+	'\u206B': true, // activate symmetric swapping
+	'\u206C': true, // inhibit arabic form shaping
+	'\u206D': true, // activate arabic form shaping
+	'\u206E': true, // national digit shapes
+	'\u206F': true, // nominal digit shapes
+	'\u200E': true, // left-to-right mark
+	'\u200F': true, // right-to-left mark
+	'\u202A': true, // left-to-right embedding
+	'\u202B': true, // right-to-left embedding
+	'\u202C': true, // pop directional formatting
+	'\u202D': true, // left-to-right override
+	'\u202E': true, // right-to-left override
+}
+
+// stripInvisible removes zero-width and formatting Unicode characters from a string.
+func stripInvisible(s string) string {
+	return strings.Map(func(r rune) rune {
+		if invisibleRunes[r] {
+			return -1 // drop
+		}
+		return r
+	}, s)
 }
 
 // stripConfusables replaces cross-script homoglyphs with ASCII equivalents.

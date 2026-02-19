@@ -175,14 +175,14 @@ func TestRule_GetPriority(t *testing.T) {
 func TestRule_GetSeverity(t *testing.T) {
 	t.Run("default is critical", func(t *testing.T) {
 		r := Rule{}
-		if r.GetSeverity() != "critical" {
+		if r.GetSeverity() != SeverityCritical {
 			t.Errorf("expected default severity critical, got %s", r.GetSeverity())
 		}
 	})
 
 	t.Run("explicit severity", func(t *testing.T) {
-		r := Rule{Severity: "warning"}
-		if r.GetSeverity() != "warning" {
+		r := Rule{Severity: SeverityWarning}
+		if r.GetSeverity() != SeverityWarning {
 			t.Errorf("expected severity warning, got %s", r.GetSeverity())
 		}
 	})
