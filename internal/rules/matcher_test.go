@@ -1,6 +1,8 @@
 package rules
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 )
 
@@ -479,165 +481,113 @@ func TestMatcherEdgeCases(t *testing.T) {
 // that catches paths containing glob characters (e.g., "cat /home/user/.e*").
 // When the shell extractor can't expand globs at static analysis time,
 // the matcher must detect that the glob could match a protected file.
-func TestMatcher_ReverseGlobMatching(t *testing.T) {
+// TestExpandFileGlobs verifies that filesystem glob expansion resolves
+// glob patterns to actual files, replacing heuristic reverse-glob matching.
+func TestExpandFileGlobs(t *testing.T) {
+	// Create a temp directory with test files
+	home := t.TempDir()
+	os.WriteFile(filepath.Join(home, ".env"), []byte("x"), 0o600)
+	os.WriteFile(filepath.Join(home, ".env.local"), []byte("x"), 0o600)
+	os.WriteFile(filepath.Join(home, ".env.example"), []byte("x"), 0o600)
+	os.WriteFile(filepath.Join(home, ".bashrc"), []byte("x"), 0o600)
+	os.MkdirAll(filepath.Join(home, ".ssh"), 0o700)
+	os.WriteFile(filepath.Join(home, ".ssh", "id_rsa"), []byte("x"), 0o600)
+	os.WriteFile(filepath.Join(home, ".ssh", "id_rsa.pub"), []byte("x"), 0o600)
+	os.MkdirAll(filepath.Join(home, ".aws"), 0o700)
+	os.WriteFile(filepath.Join(home, ".aws", "credentials"), []byte("x"), 0o600)
+
 	tests := []struct {
-		name     string
-		patterns []string
-		excepts  []string
-		path     string
-		want     bool
+		name       string
+		input      []string
+		wantEmpty  bool   // true if result should be empty
+		wantSubstr string // expected substring in at least one result
 	}{
-		// === Star glob in filename ===
 		{
-			name:     "star glob matches .env",
-			patterns: []string{"**/.env"},
-			path:     "/home/user/.e*",
-			want:     true,
+			name:       "non-glob path passes through",
+			input:      []string{filepath.Join(home, ".env")},
+			wantSubstr: ".env",
 		},
 		{
-			name:     "star glob matches .env.local",
-			patterns: []string{"**/.env.*"},
-			path:     "/home/user/.env.*",
-			want:     true,
+			name:       "star glob expands to matching files",
+			input:      []string{filepath.Join(home, ".e*")},
+			wantSubstr: ".env",
 		},
 		{
-			name:     "star glob matches SSH key",
-			patterns: []string{"**/.ssh/id_*"},
-			path:     "/home/user/.ssh/id_*",
-			want:     true,
+			name:       "question mark glob expands",
+			input:      []string{filepath.Join(home, ".en?")},
+			wantSubstr: ".env",
 		},
 		{
-			name:     "star glob too narrow — .x* does not match .env",
-			patterns: []string{"**/.env"},
-			path:     "/home/user/.x*",
-			want:     false,
-		},
-
-		// === Question mark glob in filename ===
-		{
-			name:     "question mark matches .env (4 chars)",
-			patterns: []string{"**/.env"},
-			path:     "/home/user/.en?",
-			want:     true,
+			name:       "bracket glob expands",
+			input:      []string{filepath.Join(home, ".[e]nv")},
+			wantSubstr: ".env",
 		},
 		{
-			name:     "question mark no match — wrong length",
-			patterns: []string{"**/.env"},
-			path:     "/home/user/.e?",
-			want:     false,
-		},
-
-		// === Bracket glob in filename ===
-		{
-			name:     "bracket glob matches .env",
-			patterns: []string{"**/.env"},
-			path:     "/home/user/.[e]nv",
-			want:     true,
+			name:       "ssh key glob expands",
+			input:      []string{filepath.Join(home, ".ssh", "id_r*")},
+			wantSubstr: "id_rsa",
 		},
 		{
-			name:     "bracket glob no match",
-			patterns: []string{"**/.env"},
-			path:     "/home/user/.[x]nv",
-			want:     false,
-		},
-
-		// === Directory compatibility ===
-		{
-			name:     "glob in correct directory",
-			patterns: []string{"**/.ssh/id_*"},
-			path:     "/home/user/.ssh/id_*",
-			want:     true,
+			name:       "aws cred glob expands",
+			input:      []string{filepath.Join(home, ".aws", "cred*")},
+			wantSubstr: "credentials",
 		},
 		{
-			name:     "glob in wrong directory",
-			patterns: []string{"**/.ssh/id_*"},
-			path:     "/tmp/id_*",
-			want:     false,
-		},
-
-		// === Except patterns respected ===
-		{
-			name:     "glob matches but excepted",
-			patterns: []string{"**/.env*"},
-			excepts:  []string{"**/.env.example"},
-			path:     "/home/user/.env.exampl?",
-			want:     true, // .env.exampl? could match .env.example, but also .env.examplX — block conservatively
+			name:      "no-match glob produces empty result",
+			input:     []string{filepath.Join(home, ".x*")},
+			wantEmpty: true,
 		},
 		{
-			name:     "glob with except — concrete file excepted",
-			patterns: []string{"**/.env"},
-			excepts:  []string{"/home/user/.env"},
-			path:     "/home/user/.e*",
-			want:     false, // the concrete test path /home/user/.env IS excepted
-		},
-
-		// === Multiple patterns ===
-		{
-			name:     "glob matches second pattern",
-			patterns: []string{"**/config.yaml", "**/.env"},
-			path:     "/app/.e*",
-			want:     true,
-		},
-
-		// === Non-glob paths unaffected ===
-		{
-			name:     "normal path still works",
-			patterns: []string{"**/.env"},
-			path:     "/home/user/.env",
-			want:     true,
+			name:      "nonexistent directory glob produces empty",
+			input:     []string{filepath.Join(home, "nonexistent", "*.txt")},
+			wantEmpty: true,
 		},
 		{
-			name:     "normal path no match",
-			patterns: []string{"**/.env"},
-			path:     "/home/user/safe.txt",
-			want:     false,
-		},
-
-		// === Glob only in directory (not filename) ===
-		{
-			name:     "glob only in directory part — not handled by reverse-glob",
-			patterns: []string{"**/.env"},
-			path:     "/home/*/.env",
-			want:     true, // standard match handles this via compiled glob
-		},
-
-		// === Real-world bypass patterns ===
-		{
-			name:     "cat /home/user/.e* (actual bypass)",
-			patterns: []string{"**/.env", "**/.env.*"},
-			excepts:  []string{"**/.env.example"},
-			path:     "/home/user/.e*",
-			want:     true,
-		},
-		{
-			name:     "cat ~/.ssh/id_r* (SSH key glob)",
-			patterns: []string{"**/.ssh/id_*"},
-			excepts:  []string{"**/.ssh/id_*.pub"},
-			path:     "/home/user/.ssh/id_r*",
-			want:     true,
-		},
-		{
-			name:     "cat ~/.aws/cred* (AWS creds glob)",
-			patterns: []string{"**/.aws/credentials", "**/.aws/config"},
-			path:     "/home/user/.aws/cred*",
-			want:     true,
+			name:       "bashrc glob expands (not a false positive)",
+			input:      []string{filepath.Join(home, ".b*")},
+			wantSubstr: ".bashrc",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			m, err := NewMatcher(tt.patterns, tt.excepts)
-			if err != nil {
-				t.Fatalf("NewMatcher() error = %v", err)
+			result := expandFileGlobs(tt.input)
+			if tt.wantEmpty {
+				if len(result) != 0 {
+					t.Errorf("expandFileGlobs(%v) = %v, want empty", tt.input, result)
+				}
+				return
 			}
-
-			got := m.Match(tt.path)
-			if got != tt.want {
-				t.Errorf("Match(%q) = %v, want %v (patterns=%v, excepts=%v)",
-					tt.path, got, tt.want, tt.patterns, tt.excepts)
+			if len(result) == 0 {
+				t.Errorf("expandFileGlobs(%v) = empty, want results containing %q", tt.input, tt.wantSubstr)
+				return
+			}
+			found := false
+			for _, r := range result {
+				if filepath.Base(r) == tt.wantSubstr || contains(r, tt.wantSubstr) {
+					found = true
+					break
+				}
+			}
+			if !found {
+				t.Errorf("expandFileGlobs(%v) = %v, none contain %q", tt.input, result, tt.wantSubstr)
 			}
 		})
 	}
+}
+
+func contains(s, substr string) bool {
+	return len(s) >= len(substr) && (s == substr || len(substr) == 0 ||
+		(len(s) > len(substr) && searchSubstr(s, substr)))
+}
+
+func searchSubstr(s, sub string) bool {
+	for i := 0; i <= len(s)-len(sub); i++ {
+		if s[i:i+len(sub)] == sub {
+			return true
+		}
+	}
+	return false
 }
 
 // TestContainsGlob verifies the glob metacharacter detection helper.
