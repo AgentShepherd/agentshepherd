@@ -243,6 +243,7 @@ func runStart(args []string) {
 	noColor := startFlags.Bool("no-color", false, "Disable colored log output")
 	disableBuiltin := startFlags.Bool("disable-builtin", false, "Disable builtin security rules")
 	daemonMode := startFlags.Bool("daemon-mode", false, "Internal: indicates running as daemon")
+	foreground := startFlags.Bool("foreground", false, "Run in foreground (don't daemonize); useful for containers")
 
 	// Allow passing secrets via flags (for scripting)
 	// SECURITY: Environment variables are preferred over CLI flags for secrets
@@ -290,6 +291,13 @@ func runStart(args []string) {
 	// Check if we're in daemon mode (re-executed process)
 	if *daemonMode || daemon.IsDaemonMode() {
 		// We're the daemon process - run the server
+		runDaemon(cfg, *logLevel, *disableBuiltin, *endpoint, *apiKey, *dbKey,
+			*proxyPort, *telemetryEnabled, *retentionDays, *blockMode, *autoMode)
+		return
+	}
+
+	// Foreground mode - run server directly without daemonizing (for Docker/containers)
+	if *foreground {
 		runDaemon(cfg, *logLevel, *disableBuiltin, *endpoint, *apiKey, *dbKey,
 			*proxyPort, *telemetryEnabled, *retentionDays, *blockMode, *autoMode)
 		return
