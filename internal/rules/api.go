@@ -2,12 +2,12 @@ package rules
 
 import (
 	"net/http"
-	"os"
 	"strings"
 
 	"github.com/gin-gonic/gin"
 
 	"github.com/BakeLens/crust/internal/api"
+	"github.com/BakeLens/crust/internal/fileutil"
 )
 
 // APIHandler provides HTTP handlers for rules management
@@ -193,14 +193,14 @@ func (h *APIHandler) HandleAddFile(c *gin.Context) {
 
 	// Ensure directory exists
 	userDir := h.engine.GetLoader().GetUserDir()
-	if err := os.MkdirAll(userDir, 0700); err != nil {
+	if err := fileutil.SecureMkdirAll(userDir); err != nil {
 		log.Error("Failed to create rules directory: %v", err)
 		api.Error(c, http.StatusInternalServerError, "Failed to create rules directory")
 		return
 	}
 
 	// Write file
-	if err := os.WriteFile(destPath, body, 0600); err != nil {
+	if err := fileutil.SecureWriteFile(destPath, body); err != nil {
 		log.Error("Failed to write rule file: %v", err)
 		api.Error(c, http.StatusInternalServerError, "Failed to write rule file")
 		return
