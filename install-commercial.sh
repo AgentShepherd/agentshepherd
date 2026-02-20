@@ -10,6 +10,7 @@
 #
 # Or with options:
 #   curl -fsSL https://raw.githubusercontent.com/BakeLens/crust/main/install-commercial.sh | bash -s -- --version v2.0.0
+#   curl -fsSL https://raw.githubusercontent.com/BakeLens/crust/main/install-commercial.sh | bash -s -- --version main
 #
 
 set -e

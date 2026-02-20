@@ -8,7 +8,7 @@
     Installs the Crust Go binary to %LOCALAPPDATA%\Crust\.
 
 .PARAMETER Version
-    Install a specific version (default: latest).
+    Install a specific version or branch (e.g. v2.0.0, main). Default: latest.
 
 .PARAMETER NoTUI
     Build without TUI dependencies (plain text only). Also skips font install.
@@ -27,6 +27,7 @@
 
 .EXAMPLE
     .\install.ps1 -Version v2.0.0
+    .\install.ps1 -Version main
 #>
 param(
     [string]$Version = "latest",
@@ -50,7 +51,7 @@ if ($Help) {
     Write-Host "Crust Installer (Open Source)" -ForegroundColor Cyan
     Write-Host ""
     Write-Host "Options:"
-    Write-Host "  -Version <ver>   Install specific version (default: latest)"
+    Write-Host "  -Version <ver>   Install specific version or branch (e.g. v2.0.0, main)"
     Write-Host "  -NoTUI           Build without TUI dependencies (plain text only)"
     Write-Host "  -NoFont          Skip Nerd Font installation"
     Write-Host "  -Uninstall       Uninstall crust completely"
