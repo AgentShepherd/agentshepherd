@@ -1,7 +1,8 @@
-FROM golang:1.24-alpine
+FROM golang:1.24
 
-RUN apk add --no-cache bash curl && \
-    /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/BakeLens/crust/main/install.sh)"
+RUN apt-get update && apt-get install -y --no-install-recommends bash curl git sqlite3 && \
+    rm -rf /var/lib/apt/lists/* && \
+    curl -fsSL https://raw.githubusercontent.com/BakeLens/crust/main/install.sh | bash -s -- --no-font
 
 EXPOSE 9090
 ENTRYPOINT ["/root/.local/bin/crust", "start", "--foreground", "--auto", "--listen-address", "0.0.0.0"]

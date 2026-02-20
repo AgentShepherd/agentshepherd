@@ -213,7 +213,7 @@ Point your agents to `http://<docker-host>:9090` instead of `localhost`.
 
 The `--foreground` flag keeps the process in the foreground so the container stays alive. `--listen-address 0.0.0.0` binds to all interfaces so the host can reach the container.
 
-**What works in Docker:** All rule-based blocking, tool call inspection (Layers 0 & 1), content scanning, and telemetry. These operate on API traffic passing through the proxy and work regardless of where Crust runs.
+**What works in Docker:** All rule-based blocking, tool call inspection (Layers 0 & 1), content scanning, telemetry, and auto-mode provider resolution. These operate on API traffic passing through the proxy and work regardless of where Crust runs.
 
 </details>
 
