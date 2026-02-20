@@ -304,6 +304,13 @@ func runStart(args []string) {
 		return
 	}
 
+	// Foreground mode - run server directly without daemonizing (for Docker/containers)
+	if *foreground {
+		runDaemon(cfg, *logLevel, *disableBuiltin, *endpoint, *apiKey, *dbKey,
+			*proxyPort, *telemetryEnabled, *retentionDays, *blockMode, *autoMode)
+		return
+	}
+
 	// Interactive mode - collect configuration via TUI
 	var startupCfg startup.Config
 
