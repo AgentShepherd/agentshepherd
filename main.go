@@ -307,7 +307,7 @@ func runStart(args []string) {
 	// Foreground mode - run server directly without daemonizing (for Docker/containers)
 	if *foreground {
 		runDaemon(cfg, *logLevel, *disableBuiltin, *endpoint, *apiKey, *dbKey,
-			*proxyPort, *telemetryEnabled, *retentionDays, *blockMode, *autoMode)
+			*proxyPort, *listenAddr, *telemetryEnabled, *retentionDays, *blockMode, *autoMode)
 		return
 	}
 
