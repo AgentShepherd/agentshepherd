@@ -245,6 +245,13 @@ func (n *Normalizer) makeAbsolute(path string) string {
 		return path
 	}
 
+	// Windows-style drive letter path (e.g., "C:", "C:foo") — already rooted,
+	// not a relative path. On MSYS/Cygwin, filepath.IsAbs may not recognize
+	// bare "X:" without trailing slash, but prepending workDir is wrong.
+	if len(path) >= 2 && path[1] == ':' {
+		return path
+	}
+
 	// No working directory, can't make absolute
 	if n.workDir == "" {
 		return path

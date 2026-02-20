@@ -62,6 +62,7 @@ Point your agent to Crust:
 | **Cursor** | Settings → Models → Override OpenAI Base URL → `http://localhost:9090/v1` |
 | **Cline** | Settings → API Configuration → Base URL → `http://localhost:9090/v1` |
 | **Windsurf** | Settings → AI → Provider Base URL → `http://localhost:9090/v1` |
+| **Open Claw** | Set `baseUrl` to `http://localhost:9090` in `~/.openclaw/openclaw.json` |
 | **OpenCode** | `OPENAI_BASE_URL=http://localhost:9090/v1` |
 | **Any OpenAI-compatible agent** | Set your LLM base URL to `http://localhost:9090/v1` |
 
