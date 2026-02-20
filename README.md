@@ -135,6 +135,7 @@ crust add-rule my-rules.yaml    # Rules active immediately (hot reload)
 crust start --auto                          # Auto mode (recommended)
 crust start --endpoint URL --api-key KEY    # Manual mode
 crust start --auto --block-mode replace     # Show block messages to agent
+crust start --foreground --auto             # Foreground mode (for Docker)
 crust stop                                  # Stop the gateway
 crust status                                # Check if running
 crust logs [-f]                             # View logs
@@ -183,6 +184,36 @@ sandbox:
 ```
 
 In auto mode (`--auto`), the gateway resolves providers from the model name using a [built-in registry](internal/proxy/providers.go) (Anthropic, OpenAI, DeepSeek, Gemini, Mistral, Groq, and more). Clients bring their own API keys. User-defined providers take priority.
+
+</details>
+
+<details>
+<summary><strong>Docker</strong></summary>
+
+A [`Dockerfile`](Dockerfile) is included in the repo. Build and run:
+
+```bash
+docker build -t crust .
+docker run -p 9090:9090 crust
+```
+
+Or with docker-compose:
+
+```yaml
+# docker-compose.yml
+services:
+  crust:
+    build: .
+    ports:
+      - "9090:9090"
+    restart: always
+```
+
+Point your agents to `http://<docker-host>:9090` instead of `localhost`.
+
+The `--foreground` flag keeps the process in the foreground so the container stays alive. `--listen-address 0.0.0.0` binds to all interfaces so the host can reach the container.
+
+**What works in Docker:** All rule-based blocking, tool call inspection (Layers 0 & 1), content scanning, and telemetry. These operate on API traffic passing through the proxy and work regardless of where Crust runs.
 
 </details>
 
