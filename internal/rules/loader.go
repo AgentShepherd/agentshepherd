@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/BakeLens/crust/internal/fileutil"
 	"golang.org/x/crypto/sha3"
 	"gopkg.in/yaml.v3"
 )
@@ -97,7 +98,11 @@ func (l *Loader) LoadUser() ([]Rule, error) {
 
 	log.Trace("Loading user path-based rules from: %s", l.userDir)
 
-	// Create directory if it doesn't exist
+	// Ensure directory exists. Use plain MkdirAll here — the directory's
+	// DACL is secured by SecureMkdirAll when rules are written via the API
+	// or WriteUserRule. Re-applying PROTECTED_DACL on every load would
+	// break files written before the DACL change (Windows does not
+	// retroactively propagate new DACLs to existing children).
 	if err := os.MkdirAll(l.userDir, 0700); err != nil {
 		return nil, fmt.Errorf("failed to create rules directory: %w", err)
 	}
@@ -211,7 +216,7 @@ func (l *Loader) AddRuleFile(srcPath string) (string, error) {
 	}
 
 	// Create directory if needed
-	if err := os.MkdirAll(l.userDir, 0700); err != nil {
+	if err := fileutil.SecureMkdirAll(l.userDir); err != nil {
 		return "", fmt.Errorf("failed to create rules directory: %w", err)
 	}
 
@@ -235,7 +240,7 @@ func (l *Loader) AddRuleFile(srcPath string) (string, error) {
 	}
 
 	// Write to destination
-	if err := os.WriteFile(destPath, data, 0600); err != nil {
+	if err := fileutil.SecureWriteFile(destPath, data); err != nil {
 		return "", fmt.Errorf("failed to write rule file: %w", err)
 	}
 

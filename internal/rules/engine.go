@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"regexp"
 	"slices"
 	"strings"
@@ -394,8 +395,26 @@ func (e *Engine) Evaluate(call ToolCall) MatchResult {
 	rules := e.merged
 	e.mu.RUnlock()
 
+	// Step 1.9: Filter out bare shell globs from extracted paths.
+	// The shell parser may extract glob patterns (*, ?, *.txt) from
+	// redirections like "<*" or arguments. These are not real file paths —
+	// the shell expands them before any file operation. Without filtering,
+	// a bare "*" normalizes to "/cwd/*" which matches any protected glob
+	// pattern (e.g., **/.env), causing false positives.
+	info.Paths = filterShellGlobs(info.Paths)
+
 	// Step 2: Normalize extracted paths (without symlink resolution yet)
 	normalizedPaths := e.normalizer.NormalizeAll(info.Paths)
+
+	// Step 2.1: Expand glob patterns against the real filesystem.
+	// Crust runs on the same host as the agent and can check what files
+	// actually exist. When a command uses a glob (e.g., "cat ~/.e*"), the
+	// shell extractor preserves the literal glob since it can't expand it
+	// in dry-run mode. We expand it here using filepath.Glob so that
+	// "~/.e*" resolves to "~/.env" (if it exists) and the normal matcher
+	// catches it precisely — no heuristic reverse-glob needed.
+	// If the glob matches nothing, the path is dropped (nothing to protect).
+	normalizedPaths = expandFileGlobs(normalizedPaths)
 
 	// Step 2.5: Block /proc access (Linux-only, no-op on other platforms).
 	// /proc exposes process environ, cmdline, memory — all sensitive.
@@ -1068,4 +1087,78 @@ func (e *Engine) incrementHitCount(name string) {
 	if count != nil {
 		atomic.AddInt64(count, 1)
 	}
+}
+
+// expandFileGlobs expands paths containing glob metacharacters against the
+// real filesystem. Crust runs locally on the same host as the agent, so it
+// can resolve globs to actual files. This replaces the heuristic reverse-glob
+// matcher with precise filesystem checks:
+//   - "cat /home/user/.e*" → filepath.Glob finds /home/user/.env → blocked
+//   - "tar -C /tmp/*" → filepath.Glob finds /tmp/foo, /tmp/bar → not protected → allowed
+//   - "cat /home/user/.b*" → filepath.Glob finds /home/user/.bashrc → not protected → allowed
+//
+// If a glob matches no files, the path is dropped — there's nothing to protect.
+// Non-glob paths pass through unchanged.
+func expandFileGlobs(paths []string) []string {
+	result := make([]string, 0, len(paths))
+	for _, p := range paths {
+		if !containsGlob(p) {
+			result = append(result, p)
+			continue
+		}
+		matches, err := filepath.Glob(p)
+		if err != nil || len(matches) == 0 {
+			continue
+		}
+		result = append(result, matches...)
+	}
+	return result
+}
+
+// filterShellGlobs removes bare shell glob patterns from a path list.
+// The shell parser may extract glob patterns (e.g., "*" from "<*" redirections)
+// as file paths. These are not real paths — the shell would expand them before
+// any file operation. A bare "*" normalized to "/cwd/*" falsely matches any
+// protected glob pattern like "**/.env".
+//
+// Only filters paths that consist entirely of glob metacharacters and digits
+// (e.g., "*", "?", "0000", "*.txt"). Real file paths with glob chars in
+// directory components (already quoted in shell) are unaffected because they
+// contain non-glob path characters like "/".
+func filterShellGlobs(paths []string) []string {
+	result := paths[:0] // reuse backing array
+	for _, p := range paths {
+		if isShellGlob(p) {
+			continue
+		}
+		result = append(result, p)
+	}
+	return result
+}
+
+// isShellGlob returns true if the path is a bare shell glob pattern
+// (no path separators) that should not be treated as a real file path.
+// The shell parser may extract glob patterns (e.g., "*" from "<*"
+// redirections) as file paths. These are not real paths — the shell
+// would expand them before any file operation.
+//
+// Only filters paths WITHOUT path separators (e.g., "*", "?.txt").
+// Paths WITH separators like "/home/user/.ssh/id_*" are kept because
+// they reference real file system locations and must be checked.
+func isShellGlob(p string) bool {
+	if p == "" {
+		return false
+	}
+	// If it contains a path separator, it's a real path reference
+	if strings.ContainsRune(p, '/') || strings.ContainsRune(p, '\\') {
+		return false
+	}
+	// Must contain at least one glob metacharacter
+	for _, r := range p {
+		switch r {
+		case '*', '?', '[':
+			return true
+		}
+	}
+	return false
 }

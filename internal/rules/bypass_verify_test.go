@@ -3,6 +3,8 @@ package rules
 import (
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"testing"
 )
 
@@ -156,14 +158,32 @@ func TestBypassVerification(t *testing.T) {
 }
 
 // TestBypassFix_GlobInPath verifies that glob characters in file paths
-// are caught by the reverse-glob matcher. This is an integration test that
-// goes through the full pipeline: extractor → engine evaluation.
+// are caught by filesystem glob expansion. This is an integration test that
+// goes through the full pipeline: extractor → glob expansion → engine evaluation.
 //
 // Root cause: shell extractor can't expand globs in dry-run mode, so
 // "cat /home/user/.e*" yields the literal path "/home/user/.e*" which
-// didn't match rule pattern "**/.env". Fixed in matcher.go with reverse-glob.
+// didn't match rule pattern "**/.env". Fixed by expanding globs against
+// the real filesystem in engine.go before matching.
 func TestBypassFix_GlobInPath(t *testing.T) {
-	normalizer := NewNormalizerWithEnv("/home/user", "/home/user/project", nil)
+	// Create a real temp directory with protected files so filepath.Glob works.
+	home := t.TempDir()
+	project := filepath.Join(home, "project")
+	os.MkdirAll(project, 0o755)
+
+	// Create protected files that glob patterns should resolve to
+	os.WriteFile(filepath.Join(home, ".env"), []byte("SECRET=x"), 0o600)
+	os.WriteFile(filepath.Join(home, ".env.local"), []byte("SECRET=x"), 0o600)
+	os.WriteFile(filepath.Join(home, ".env.example"), []byte("EXAMPLE=x"), 0o600)
+	os.MkdirAll(filepath.Join(home, ".ssh"), 0o700)
+	os.WriteFile(filepath.Join(home, ".ssh", "id_rsa"), []byte("key"), 0o600)
+	os.MkdirAll(filepath.Join(home, ".aws"), 0o700)
+	os.WriteFile(filepath.Join(home, ".aws", "credentials"), []byte("creds"), 0o600)
+
+	// Use forward slashes for shell commands (extractor expects Unix-style)
+	homeSlash := filepath.ToSlash(home)
+
+	normalizer := NewNormalizerWithEnv(home, project, nil)
 	engine, err := NewEngineWithNormalizer(EngineConfig{}, normalizer)
 	if err != nil {
 		t.Fatalf("setup engine: %v", err)
@@ -180,25 +200,25 @@ func TestBypassFix_GlobInPath(t *testing.T) {
 		// .env glob patterns → protect-env-files
 		{
 			"glob-star-env", "Bash",
-			map[string]any{"command": "cat /home/user/.e*"},
+			map[string]any{"command": "cat " + homeSlash + "/.e*"},
 			true, "protect-env-files",
 			"star glob on .env",
 		},
 		{
 			"glob-question-env", "Bash",
-			map[string]any{"command": "cat /home/user/.en?"},
+			map[string]any{"command": "cat " + homeSlash + "/.en?"},
 			true, "protect-env-files",
 			"question mark glob on .env",
 		},
 		{
 			"glob-bracket-env", "Bash",
-			map[string]any{"command": "cat /home/user/.[e]nv"},
+			map[string]any{"command": "cat " + homeSlash + "/.[e]nv"},
 			true, "protect-env-files",
 			"bracket glob on .env",
 		},
 		{
 			"glob-env-local", "Bash",
-			map[string]any{"command": "cat /home/user/.env.*"},
+			map[string]any{"command": "cat " + homeSlash + "/.env.*"},
 			true, "protect-env-files",
 			"glob on .env.* variants",
 		},
@@ -206,7 +226,7 @@ func TestBypassFix_GlobInPath(t *testing.T) {
 		// SSH key glob patterns → protect-ssh-keys
 		{
 			"glob-ssh-key", "Bash",
-			map[string]any{"command": "cat /home/user/.ssh/id_r*"},
+			map[string]any{"command": "cat " + homeSlash + "/.ssh/id_r*"},
 			true, "protect-ssh-keys",
 			"glob on SSH key",
 		},
@@ -214,7 +234,7 @@ func TestBypassFix_GlobInPath(t *testing.T) {
 		// AWS credentials glob → protect-cloud-credentials
 		{
 			"glob-aws-creds", "Bash",
-			map[string]any{"command": "cat /home/user/.aws/cred*"},
+			map[string]any{"command": "cat " + homeSlash + "/.aws/cred*"},
 			true, "protect-cloud-credentials",
 			"glob on AWS credentials",
 		},
@@ -222,15 +242,15 @@ func TestBypassFix_GlobInPath(t *testing.T) {
 		// Negative: glob that doesn't match any protected file
 		{
 			"glob-safe-file", "Bash",
-			map[string]any{"command": "cat /tmp/safe*"},
+			map[string]any{"command": "cat " + homeSlash + "/safe*"},
 			false, "",
-			"glob on non-protected path",
+			"glob on non-protected path (no files match)",
 		},
 
 		// Negative: .env.example is excepted
 		{
 			"glob-env-example-exact", "Bash",
-			map[string]any{"command": "cat /home/user/.env.example"},
+			map[string]any{"command": "cat " + homeSlash + "/.env.example"},
 			false, "",
 			".env.example is excepted",
 		},

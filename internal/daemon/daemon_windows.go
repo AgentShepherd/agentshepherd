@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"syscall"
 
+	"github.com/BakeLens/crust/internal/fileutil"
 	"golang.org/x/sys/windows"
 )
 
@@ -24,7 +25,7 @@ var pidLockFile *os.File
 // call CleanupPID on shutdown.
 func WritePID() error {
 	path := pidFile()
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY, 0600)
+	f, err := fileutil.SecureOpenFile(path, os.O_CREATE|os.O_WRONLY)
 	if err != nil {
 		return fmt.Errorf("open PID file: %w", err)
 	}
@@ -122,7 +123,7 @@ func Stop() error {
 // On Windows, uses CREATE_NEW_PROCESS_GROUP to detach from the console.
 func Daemonize(args []string) (int, error) {
 	// Open log file for daemon output
-	logFile, err := os.OpenFile(LogFile(), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
+	logFile, err := fileutil.SecureOpenFile(LogFile(), os.O_CREATE|os.O_WRONLY|os.O_APPEND)
 	if err != nil {
 		return 0, fmt.Errorf("failed to open log file: %w", err)
 	}

@@ -49,19 +49,24 @@ func createAnthropicResponse(content []anthropicContentBlock) []byte {
 	return data
 }
 
-// setupTestRulesDir creates a temporary directory with test rules
+// setupTestRulesDir creates a temporary directory with test rules.
+// Uses a subdirectory of t.TempDir() so that SecureMkdirAll (which applies
+// a protected DACL on Windows) doesn't prevent TempDir cleanup.
 func setupTestRulesDir(t *testing.T, rulesYAML string) string {
 	t.Helper()
-	tempDir := t.TempDir()
+	rulesDir := filepath.Join(t.TempDir(), "rules")
+	if err := os.MkdirAll(rulesDir, 0700); err != nil {
+		t.Fatalf("Failed to create rules dir: %v", err)
+	}
 
 	if rulesYAML != "" {
-		rulePath := filepath.Join(tempDir, "test-rules.yaml")
+		rulePath := filepath.Join(rulesDir, "test-rules.yaml")
 		if err := os.WriteFile(rulePath, []byte(rulesYAML), 0644); err != nil {
 			t.Fatalf("Failed to write test rules: %v", err)
 		}
 	}
 
-	return tempDir
+	return rulesDir
 }
 
 // createTestInterceptor creates an interceptor with custom rules for testing

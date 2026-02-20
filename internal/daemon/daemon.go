@@ -5,6 +5,8 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+
+	"github.com/BakeLens/crust/internal/fileutil"
 )
 
 const (
@@ -21,7 +23,7 @@ func DataDir() string {
 		home = "/tmp" // Fallback if home dir unavailable
 	}
 	dir := filepath.Join(home, ".crust")
-	_ = os.MkdirAll(dir, 0700) //nolint:errcheck // best effort - dir may exist
+	_ = fileutil.SecureMkdirAll(dir) //nolint:errcheck // best effort - dir may exist
 	return dir
 }
 
@@ -53,7 +55,7 @@ func portFile() string {
 
 // WritePort writes the proxy port number to the port file.
 func WritePort(port int) error {
-	return os.WriteFile(portFile(), []byte(strconv.Itoa(port)), 0600)
+	return fileutil.SecureWriteFile(portFile(), []byte(strconv.Itoa(port)))
 }
 
 // ReadPort reads the proxy port number from the port file.

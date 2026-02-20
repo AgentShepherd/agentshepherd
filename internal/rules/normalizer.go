@@ -4,6 +4,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"runtime"
 	"strings"
 
 	"golang.org/x/text/unicode/norm"
@@ -79,6 +80,14 @@ func (n *Normalizer) Normalize(path string) string {
 	// so "/etc/passwd\x00.txt" would access "/etc/passwd" while bypassing
 	// pattern matching on the full string.
 	path = strings.ReplaceAll(path, "\x00", "")
+	if path == "" {
+		return ""
+	}
+
+	// Re-trim whitespace after null byte removal — a null byte between
+	// whitespace and content (e.g., "\x00 :") leaves leading spaces that
+	// break idempotency on the second normalize pass.
+	path = strings.TrimSpace(path)
 	if path == "" {
 		return ""
 	}
@@ -240,16 +249,25 @@ func (n *Normalizer) makeAbsolute(path string) string {
 		return path
 	}
 
-	// Already absolute (filepath.IsAbs, or Unix-style / which Windows doesn't recognize)
-	if filepath.IsAbs(path) || strings.HasPrefix(path, "/") {
+	// Already absolute — Unix-style / prefix
+	if strings.HasPrefix(path, "/") {
 		return path
 	}
 
-	// Windows-style drive letter path (e.g., "C:", "C:foo") — already rooted,
-	// not a relative path. On MSYS/Cygwin, filepath.IsAbs may not recognize
-	// bare "X:" without trailing slash, but prepending workDir is wrong.
-	if len(path) >= 2 && path[1] == ':' {
-		return path
+	if runtime.GOOS == "windows" {
+		// On Windows, only accept drive letter paths that are absolute
+		// (e.g., "C:/foo"). Drive-relative paths like "A:../../foo" lack
+		// a root slash and can't be resolved without knowing the current
+		// directory on that drive — treat them as relative.
+		if len(path) >= 3 && path[1] == ':' && path[2] == '/' && isDriverLetter(path[0]) {
+			return path
+		}
+	} else {
+		// On Unix, filepath.IsAbs is reliable (just checks for / prefix,
+		// which we already handled above).
+		if filepath.IsAbs(path) {
+			return path
+		}
 	}
 
 	// No working directory, can't make absolute
@@ -268,8 +286,11 @@ func (n *Normalizer) makeAbsolute(path string) string {
 
 // cleanPath cleans the path by resolving .., removing duplicate slashes, etc.
 // Always returns forward slashes for consistent cross-platform matching.
-// Uses path.Clean (forward-slash aware) instead of filepath.Clean to avoid
-// Windows UNC path confusion (filepath.Clean treats // as UNC prefix).
+//
+// On Windows: uses filepath.Clean which understands volume names (C:, D:)
+// and resolves ".." correctly relative to drive roots.
+// On Unix: uses path.Clean (forward-slash only) to avoid filepath.Clean's
+// UNC path confusion (filepath.Clean treats // as UNC prefix on Windows builds).
 func (n *Normalizer) cleanPath(p string) string {
 	if p == "" {
 		return ""
@@ -278,11 +299,34 @@ func (n *Normalizer) cleanPath(p string) string {
 	// Ensure forward slashes before cleaning (filepath.Join may produce \ on Windows).
 	p = filepath.ToSlash(p)
 
-	// path.Clean handles:
-	// - Multiple slashes (// -> /)
-	// - . and .. references
-	// - Trailing slashes (except for root)
-	// Unlike filepath.Clean, it always uses forward slashes and does not
+	if runtime.GOOS == "windows" {
+		// Collapse leading duplicate slashes — agents send Unix-style paths
+		// where "//" is a redundant slash, not a Windows UNC prefix.
+		for len(p) > 1 && p[0] == '/' && p[1] == '/' {
+			p = p[1:]
+		}
+		// On Windows, filepath.Clean mangles paths containing reserved chars
+		// (?, :, CON, etc.) by appending "." — designed for real filesystem
+		// paths, not agent-provided patterns. Extract the drive letter prefix
+		// (e.g., "C:") and use path.Clean for the rest to get correct ".."
+		// resolution without reserved-name mangling.
+		// Only use filepath.VolumeName for actual drive letters (2-char "X:").
+		// It also recognizes UNC/NT paths (//??, \\server\share) which we
+		// don't want to handle specially for agent-provided paths.
+		vol := filepath.VolumeName(p)
+		if len(vol) != 2 || vol[1] != ':' || !isDriverLetter(vol[0]) {
+			vol = "" // Not a drive letter — treat as regular path
+		}
+		rest := p[len(vol):]
+		cleaned := path.Clean(rest)
+		// Ensure absolute paths stay absolute
+		if strings.HasPrefix(rest, "/") && !strings.HasPrefix(cleaned, "/") {
+			cleaned = "/" + cleaned
+		}
+		return vol + cleaned
+	}
+
+	// Unix: use path.Clean which always uses forward slashes and does not
 	// interpret // as a Windows UNC path prefix.
 	cleaned := path.Clean(p)
 
@@ -293,6 +337,11 @@ func (n *Normalizer) cleanPath(p string) string {
 	}
 
 	return cleaned
+}
+
+// isDriverLetter returns true if c is an ASCII letter (A-Z, a-z).
+func isDriverLetter(c byte) bool {
+	return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')
 }
 
 // GetHomeDir returns the home directory used by this normalizer.
