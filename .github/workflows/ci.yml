@@ -39,8 +39,11 @@ jobs:
 
 
   test:
-    name: Go Test
-    runs-on: ubuntu-latest
+    name: Go Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
     steps:
       - uses: actions/checkout@v4
 
