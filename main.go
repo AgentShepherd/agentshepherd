@@ -254,6 +254,7 @@ func runStart(args []string) {
 
 	// Advanced options
 	proxyPort := startFlags.Int("proxy-port", 0, "Proxy server port (default from config)")
+	listenAddr := startFlags.String("listen-address", "", "Bind address for the proxy server (default 127.0.0.1)")
 	telemetryEnabled := startFlags.Bool("telemetry", false, "Enable telemetry")
 	retentionDays := startFlags.Int("retention-days", 0, "Telemetry retention in days (0=use config default)")
 	blockMode := startFlags.String("block-mode", "", "Block mode: remove (delete tool calls) or replace (substitute with echo)")
@@ -292,14 +293,21 @@ func runStart(args []string) {
 	if *daemonMode || daemon.IsDaemonMode() {
 		// We're the daemon process - run the server
 		runDaemon(cfg, *logLevel, *disableBuiltin, *endpoint, *apiKey, *dbKey,
-			*proxyPort, *telemetryEnabled, *retentionDays, *blockMode, *autoMode)
+			*proxyPort, *listenAddr, *telemetryEnabled, *retentionDays, *blockMode, *autoMode)
 		return
 	}
 
 	// Foreground mode - run server directly without daemonizing (for Docker/containers)
 	if *foreground {
 		runDaemon(cfg, *logLevel, *disableBuiltin, *endpoint, *apiKey, *dbKey,
-			*proxyPort, *telemetryEnabled, *retentionDays, *blockMode, *autoMode)
+			*proxyPort, *listenAddr, *telemetryEnabled, *retentionDays, *blockMode, *autoMode)
+		return
+	}
+
+	// Foreground mode - run server directly without daemonizing (for Docker/containers)
+	if *foreground {
+		runDaemon(cfg, *logLevel, *disableBuiltin, *endpoint, *apiKey, *dbKey,
+			*proxyPort, *listenAddr, *telemetryEnabled, *retentionDays, *blockMode, *autoMode)
 		return
 	}
 
@@ -360,6 +368,9 @@ func runStart(args []string) {
 	// Pass advanced options
 	if startupCfg.ProxyPort > 0 {
 		daemonArgs = append(daemonArgs, "--proxy-port", strconv.Itoa(startupCfg.ProxyPort))
+	}
+	if *listenAddr != "" {
+		daemonArgs = append(daemonArgs, "--listen-address", *listenAddr)
 	}
 	if startupCfg.TelemetryEnabled {
 		daemonArgs = append(daemonArgs, "--telemetry=true")
@@ -441,7 +452,7 @@ func runStart(args []string) {
 
 // runDaemon runs the actual server (called in daemon process)
 func runDaemon(cfg *config.Config, logLevel string, disableBuiltin bool, endpoint, apiKey, dbKey string,
-	proxyPort int, telemetryEnabled bool, retentionDays int, blockMode string, autoMode bool) {
+	proxyPort int, listenAddr string, telemetryEnabled bool, retentionDays int, blockMode string, autoMode bool) {
 	// Write PID file
 	if err := daemon.WritePID(); err != nil {
 		tui.PrintError(fmt.Sprintf("Failed to write PID file: %v", err))
@@ -618,8 +629,13 @@ func runDaemon(cfg *config.Config, logLevel string, disableBuiltin bool, endpoin
 		_, _ = w.Write([]byte("OK"))
 	})
 
+	bindAddr := "127.0.0.1"
+	if listenAddr != "" {
+		bindAddr = listenAddr
+	}
+
 	server := &http.Server{
-		Addr:    fmt.Sprintf("127.0.0.1:%d", cfg.Server.Port),
+		Addr:    fmt.Sprintf("%s:%d", bindAddr, cfg.Server.Port),
 		Handler: loggingMiddleware(mux),
 		// SECURITY FIX: Add ReadHeaderTimeout to prevent Slowloris attacks
 		ReadHeaderTimeout: 10 * time.Second,
@@ -627,7 +643,7 @@ func runDaemon(cfg *config.Config, logLevel string, disableBuiltin bool, endpoin
 		WriteTimeout:      0, // Must be 0 for SSE streaming (it's a deadline, not idle timeout)
 	}
 
-	log.Info("Crust listening on 127.0.0.1:%d", cfg.Server.Port)
+	log.Info("Crust listening on %s:%d", bindAddr, cfg.Server.Port)
 	if autoMode {
 		log.Info("  Mode: auto (provider resolved from model name)")
 		if cfg.Upstream.URL != "" {

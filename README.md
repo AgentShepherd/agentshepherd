@@ -190,14 +190,14 @@ In auto mode (`--auto`), the gateway resolves providers from the model name usin
 <details>
 <summary><strong>Docker</strong></summary>
 
-```dockerfile
-FROM golang
+A [`Dockerfile`](Dockerfile) is included in the repo. Build and run:
 
-RUN /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/BakeLens/crust/main/install.sh)"
-
-EXPOSE 9090
-ENTRYPOINT ["/root/.local/bin/crust", "start", "--foreground", "--auto"]
+```bash
+docker build -t crust .
+docker run -p 9090:9090 crust
 ```
+
+Or with docker-compose:
 
 ```yaml
 # docker-compose.yml
@@ -211,7 +211,9 @@ services:
 
 Point your agents to `http://<docker-host>:9090` instead of `localhost`.
 
-The `--foreground` flag keeps the process in the foreground so the container stays alive.
+The `--foreground` flag keeps the process in the foreground so the container stays alive. `--listen-address 0.0.0.0` binds to all interfaces so the host can reach the container.
+
+**What works in Docker:** All rule-based blocking, tool call inspection (Layers 0 & 1), content scanning, and telemetry. These operate on API traffic passing through the proxy and work regardless of where Crust runs.
 
 </details>
 
