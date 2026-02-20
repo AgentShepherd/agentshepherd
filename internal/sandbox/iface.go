@@ -9,10 +9,13 @@ type SecurityRule interface {
 	GetBlockPaths() []string
 	GetBlockExcept() []string
 	GetActions() []string
+	GetBlockHosts() []string // for network IP deny-list
 }
 
-// Operation represents the type of file/network operation.
+// Operation represents the type of operation.
 // Mirrors rules.Operation but defined here to avoid importing rules.
+// OpNetwork is used by the rules engine (Layer 0/1) for matching but is
+// not a valid sandbox operation — filterOps strips it before Layer 2.
 type Operation string
 
 const (

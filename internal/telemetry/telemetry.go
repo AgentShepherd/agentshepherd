@@ -153,7 +153,7 @@ func (p *Provider) StartLLMSpan(ctx context.Context, operationName string, trace
 	return ctx, spanCtx
 }
 
-// EndLLMSpan ends the span and records all data to SQLite
+// EndLLMSpan ends the span and records all data to SQLite atomically.
 func (p *Provider) EndLLMSpan(spanCtx *SpanContext, data LLMSpanData) {
 	if p == nil || !p.enabled || spanCtx == nil {
 		return
@@ -165,15 +165,8 @@ func (p *Provider) EndLLMSpan(spanCtx *SpanContext, data LLMSpanData) {
 		return
 	}
 
-	// Get or create trace
-	trace, err := storage.GetOrCreateTrace(data.TraceID, data.TraceID)
-	if err != nil {
-		log.Debug("[TELEMETRY] Failed to get/create trace: %v", err)
-		return
-	}
-
 	// Build attributes
-	attrs := map[string]interface{}{
+	attrs := map[string]any{
 		AttrSpanKind:        data.SpanKind,
 		AttrLLMModel:        data.Model,
 		AttrTargetURL:       data.TargetURL,
@@ -208,9 +201,8 @@ func (p *Provider) EndLLMSpan(spanCtx *SpanContext, data LLMSpanData) {
 		spanKind = SpanKindLLM
 	}
 
-	// Insert main span
-	span := &Span{
-		TraceRowID:   trace.ID,
+	// Build main span
+	mainSpan := &Span{
 		SpanID:       spanCtx.SpanID,
 		Name:         spanCtx.Name,
 		SpanKind:     spanKind,
@@ -222,52 +214,40 @@ func (p *Provider) EndLLMSpan(spanCtx *SpanContext, data LLMSpanData) {
 		StatusCode:   statusCode,
 	}
 
-	if err := storage.InsertSpan(span); err != nil {
-		log.Debug("[TELEMETRY] Failed to insert span: %v", err)
-		return
+	// Build tool spans
+	var toolSpans []*Span
+	for _, tc := range data.ToolCalls {
+		toolSpans = append(toolSpans, p.buildToolSpan(spanCtx.SpanID, data.TraceID, tc))
 	}
 
-	// Create tool call spans
-	if len(data.ToolCalls) > 0 {
-		p.createToolSpans(storage, trace.ID, spanCtx.SpanID, data)
-	}
-
-	// Update trace end time
-	if err := storage.UpdateTraceEndTime(data.TraceID, time.Now()); err != nil {
-		log.Debug("Failed to update trace end time: %v", err)
+	// Record everything atomically in a single transaction
+	if err := storage.RecordSpanTx(data.TraceID, data.TraceID, mainSpan, toolSpans); err != nil {
+		log.Debug("[TELEMETRY] Failed to record span: %v", err)
 	}
 }
 
-func (p *Provider) createToolSpans(storage *Storage, traceRowID int64, parentSpanID string, data LLMSpanData) {
-	for _, tc := range data.ToolCalls {
-		spanName := "tool:" + tc.Name
+// buildToolSpan creates a Span struct for a tool call without writing to the DB.
+func (p *Provider) buildToolSpan(parentSpanID string, traceID string, tc ToolCall) *Span {
+	attrs := map[string]any{
+		AttrSpanKind:       SpanKindTool,
+		AttrToolName:       tc.Name,
+		AttrToolParameters: truncateString(string(tc.Arguments), 4000),
+		AttrTraceID:        traceID,
+	}
+	attrsJSON, err := json.Marshal(attrs)
+	if err != nil {
+		log.Debug("Failed to marshal tool span attributes: %v", err)
+	}
 
-		attrs := map[string]interface{}{
-			AttrSpanKind:       SpanKindTool,
-			AttrToolName:       tc.Name,
-			AttrToolParameters: truncateString(string(tc.Arguments), 4000),
-			AttrTraceID:        data.TraceID,
-		}
-		attrsJSON, err := json.Marshal(attrs)
-		if err != nil {
-			log.Debug("Failed to marshal tool span attributes: %v", err)
-		}
-
-		toolSpan := &Span{
-			TraceRowID:   traceRowID,
-			SpanID:       generateSpanID(),
-			ParentSpanID: parentSpanID,
-			Name:         spanName,
-			SpanKind:     SpanKindTool,
-			StartTime:    time.Now(),
-			EndTime:      time.Now(),
-			Attributes:   attrsJSON,
-			StatusCode:   "OK",
-		}
-
-		if err := storage.InsertSpan(toolSpan); err != nil {
-			log.Debug("[TELEMETRY] Failed to insert tool span: %v", err)
-		}
+	return &Span{
+		SpanID:       generateSpanID(),
+		ParentSpanID: parentSpanID,
+		Name:         "tool:" + tc.Name,
+		SpanKind:     SpanKindTool,
+		StartTime:    time.Now(),
+		EndTime:      time.Now(),
+		Attributes:   attrsJSON,
+		StatusCode:   "OK",
 	}
 }
 

@@ -1,6 +1,7 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 
 	"github.com/kelseyhightower/envconfig"
@@ -49,7 +50,7 @@ func LoadSecretsWithDefaults(apiKey, dbKey string) (*Secrets, error) {
 // Validate validates that required secrets are set
 func (s *Secrets) Validate() error {
 	if s.LLMAPIKey == "" {
-		return fmt.Errorf("LLM API key is required (set LLM_API_KEY or use --api-key flag)")
+		return errors.New("LLM API key is required (set LLM_API_KEY or use --api-key flag)")
 	}
 	// Note: No minimum length validation - local LLM setups (vLLM, Ollama) may use dummy keys
 	return nil
@@ -58,7 +59,7 @@ func (s *Secrets) Validate() error {
 // ValidateDBKey validates the database encryption key if set
 func (s *Secrets) ValidateDBKey() error {
 	if s.DBKey != "" && len(s.DBKey) < 16 {
-		return fmt.Errorf("database encryption key must be at least 16 characters")
+		return errors.New("database encryption key must be at least 16 characters")
 	}
 	return nil
 }

@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -10,13 +11,12 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
-	"path/filepath"
-	"runtime"
-	"sort"
-	"strings"
+	"slices"
+	"strconv"
 	"syscall"
 	"time"
 
+	"github.com/BakeLens/crust/internal/completion"
 	"github.com/BakeLens/crust/internal/config"
 	"github.com/BakeLens/crust/internal/daemon"
 	"github.com/BakeLens/crust/internal/logger"
@@ -26,11 +26,18 @@ import (
 	"github.com/BakeLens/crust/internal/security"
 	"github.com/BakeLens/crust/internal/telemetry"
 	"github.com/BakeLens/crust/internal/tui"
+	"github.com/BakeLens/crust/internal/tui/banner"
+	"github.com/BakeLens/crust/internal/tui/dashboard"
+	"github.com/BakeLens/crust/internal/tui/logview"
+	tuiprogress "github.com/BakeLens/crust/internal/tui/progress"
+	"github.com/BakeLens/crust/internal/tui/rulelist"
+	"github.com/BakeLens/crust/internal/tui/spinner"
+	"github.com/BakeLens/crust/internal/tui/startup"
 	"github.com/BakeLens/crust/internal/types"
 )
 
 // Version is set at build time via ldflags: -X main.Version=x.y.z
-var Version = "1.1.0"
+var Version = "2.0.0"
 
 // =============================================================================
 // API Client (inlined from internal/cli)
@@ -38,20 +45,30 @@ var Version = "1.1.0"
 
 // apiClient provides API access for CLI commands
 type apiClient struct {
-	cfg     *config.Config
-	baseURL string
+	cfg    *config.Config
+	client *http.Client // uses Unix socket / named pipe transport
 }
 
 // newAPIClient creates a new CLI API client
-func newAPIClient(configPath string) *apiClient {
-	cfg, err := config.Load(configPath)
+func newAPIClient() *apiClient {
+	cfg, err := config.Load(config.DefaultConfigPath())
 	if err != nil {
 		cfg = config.DefaultConfig()
 	}
-	return &apiClient{
-		cfg:     cfg,
-		baseURL: fmt.Sprintf("http://localhost:%d", cfg.API.Port),
+	socketPath := cfg.API.SocketPath
+	if socketPath == "" {
+		socketPath = daemon.SocketFile(cfg.Server.Port)
 	}
+	return &apiClient{
+		cfg:    cfg,
+		client: &http.Client{Transport: security.APITransport(socketPath)},
+	}
+}
+
+// apiURL returns the base URL for the management API.
+// The host is a dummy — the transport routes via socket/pipe.
+func (c *apiClient) apiURL() string {
+	return "http://crust-api"
 }
 
 // proxyBaseURL returns the proxy base URL
@@ -59,22 +76,22 @@ func (c *apiClient) proxyBaseURL() string {
 	return fmt.Sprintf("http://localhost:%d", c.cfg.Server.Port)
 }
 
-// checkHealth checks if the server is healthy
+// checkHealth checks if the proxy server is healthy (still uses TCP for the proxy)
 func (c *apiClient) checkHealth() (bool, error) {
-	url := fmt.Sprintf("%s/health", c.proxyBaseURL())
+	url := c.proxyBaseURL() + "/health"
 	resp, err := http.Get(url) //nolint:gosec,noctx // URL is from trusted config
-	if err != nil {
+	if err != nil || resp == nil {
 		return false, err
 	}
 	defer resp.Body.Close()
 	return resp.StatusCode == http.StatusOK, nil
 }
 
-// isServerRunning checks if the Crust server is running
+// isServerRunning checks if the Crust management API is reachable
 func (c *apiClient) isServerRunning() bool {
-	url := fmt.Sprintf("%s/api/crust/rules/reload", c.baseURL)
-	resp, err := http.Post(url, "application/json", nil) //nolint:gosec,noctx // URL is from trusted config
-	if err != nil {
+	url := c.apiURL() + "/api/crust/rules/reload"
+	resp, err := c.client.Post(url, "application/json", nil) //nolint:noctx
+	if err != nil || resp == nil {
 		return false
 	}
 	resp.Body.Close()
@@ -83,10 +100,10 @@ func (c *apiClient) isServerRunning() bool {
 
 // reloadRules triggers a hot reload of rules
 func (c *apiClient) reloadRules() ([]byte, error) {
-	url := fmt.Sprintf("%s/api/crust/rules/reload", c.baseURL)
-	resp, err := http.Post(url, "application/json", nil) //nolint:gosec,noctx // URL is from trusted config
-	if err != nil {
-		return nil, fmt.Errorf("server not running")
+	url := c.apiURL() + "/api/crust/rules/reload"
+	resp, err := c.client.Post(url, "application/json", nil) //nolint:noctx
+	if err != nil || resp == nil {
+		return nil, errors.New("server not running")
 	}
 	defer resp.Body.Close()
 	return io.ReadAll(resp.Body)
@@ -94,10 +111,10 @@ func (c *apiClient) reloadRules() ([]byte, error) {
 
 // getRules fetches all rules from the server
 func (c *apiClient) getRules() ([]byte, error) {
-	url := fmt.Sprintf("%s/api/crust/rules", c.baseURL)
-	resp, err := http.Get(url) //nolint:gosec,noctx // URL is from trusted config
-	if err != nil {
-		return nil, fmt.Errorf("server not running")
+	url := c.apiURL() + "/api/crust/rules"
+	resp, err := c.client.Get(url) //nolint:noctx
+	if err != nil || resp == nil {
+		return nil, errors.New("server not running")
 	}
 	defer resp.Body.Close()
 	return io.ReadAll(resp.Body)
@@ -140,6 +157,17 @@ func toSecurityRules(rr []rules.Rule) []sandbox.SecurityRule {
 var log = logger.New("main")
 
 func main() {
+	// Shell worker subprocess mode: if invoked with _CRUST_SHELL_WORKER=1,
+	// enter the worker loop for crash-isolated shell interpretation.
+	if rules.RunShellWorkerMain() {
+		return
+	}
+
+	// Shell completion: if invoked for tab-completion, output completions and exit
+	if completion.Run() {
+		return
+	}
+
 	// Check for subcommands first
 	if len(os.Args) > 1 {
 		switch os.Args[1] {
@@ -150,7 +178,7 @@ func main() {
 			runStop()
 			return
 		case "status":
-			runStatus()
+			runStatus(os.Args[2:])
 			return
 		case "logs":
 			runLogs(os.Args[2:])
@@ -182,11 +210,14 @@ func main() {
 		case "repair-sandbox":
 			runRepairSandbox()
 			return
+		case "completion":
+			runCompletion(os.Args[2:])
+			return
 		case "help", "-h", "--help":
 			printUsage()
 			return
 		case "version", "-v", "--version":
-			fmt.Printf("crust version %s\n", Version)
+			runVersion(os.Args[2:])
 			return
 		}
 	}
@@ -197,15 +228,17 @@ func main() {
 
 // runStart handles the start subcommand
 func runStart(args []string) {
+	tui.WindowTitle("crust setup")
+
 	// Check if already running
 	if running, pid := daemon.IsRunning(); running {
-		fmt.Printf("Crust is already running [PID %d]\n", pid)
+		tui.PrintWarning(fmt.Sprintf("Crust is already running [PID %d]", pid))
 		os.Exit(1)
 	}
 
 	// Parse flags
 	startFlags := flag.NewFlagSet("start", flag.ExitOnError)
-	configPath := startFlags.String("config", "config.yaml", "Path to configuration file")
+	configPath := startFlags.String("config", config.DefaultConfigPath(), "Path to configuration file")
 	logLevel := startFlags.String("log-level", "", "Log level: trace, debug, info, warn, error")
 	noColor := startFlags.Bool("no-color", false, "Disable colored log output")
 	disableBuiltin := startFlags.Bool("disable-builtin", false, "Disable builtin security rules")
@@ -220,18 +253,22 @@ func runStart(args []string) {
 
 	// Advanced options
 	proxyPort := startFlags.Int("proxy-port", 0, "Proxy server port (default from config)")
-	apiPort := startFlags.Int("api-port", 0, "API server port (default from config)")
 	telemetryEnabled := startFlags.Bool("telemetry", false, "Enable telemetry")
 	retentionDays := startFlags.Int("retention-days", 0, "Telemetry retention in days (0=use config default)")
 	blockMode := startFlags.String("block-mode", "", "Block mode: remove (delete tool calls) or replace (substitute with echo)")
 
 	_ = startFlags.Parse(args)
 
+	// Wire --no-color to TUI plain mode
+	if *noColor {
+		tui.SetPlainMode(true)
+	}
+
 	// SECURITY: Load secrets from environment variables using envconfig
 	// Environment variables are preferred over CLI flags (visible in ps auxww)
 	secrets, err := config.LoadSecretsWithDefaults(*apiKey, *dbKey)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to load secrets: %v\n", err)
+		tui.PrintError(fmt.Sprintf("Failed to load secrets: %v", err))
 		os.Exit(1)
 	}
 
@@ -246,24 +283,27 @@ func runStart(args []string) {
 	// Load configuration
 	cfg, err := config.Load(*configPath)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to load configuration: %v\n", err)
+		tui.PrintError(fmt.Sprintf("Failed to load configuration: %v", err))
 		os.Exit(1)
 	}
 
 	// Check if we're in daemon mode (re-executed process)
 	if *daemonMode || daemon.IsDaemonMode() {
 		// We're the daemon process - run the server
-		runDaemon(cfg, *logLevel, *noColor, *disableBuiltin, *endpoint, *apiKey, *dbKey,
-			*proxyPort, *apiPort, *telemetryEnabled, *retentionDays, *blockMode, *autoMode)
+		runDaemon(cfg, *logLevel, *disableBuiltin, *endpoint, *apiKey, *dbKey,
+			*proxyPort, *telemetryEnabled, *retentionDays, *blockMode, *autoMode)
 		return
 	}
 
 	// Interactive mode - collect configuration via TUI
-	var startupCfg tui.StartupConfig
+	var startupCfg startup.Config
 
 	if *autoMode || (*endpoint != "" && *apiKey != "") {
-		// Flags provided — skip interactive prompts
-		startupCfg = tui.StartupConfig{
+		// Flags provided — skip interactive prompts, but still show the banner
+		fmt.Println()
+		banner.PrintBanner(Version)
+		fmt.Println()
+		startupCfg = startup.Config{
 			AutoMode:            *autoMode,
 			EndpointURL:         *endpoint,
 			APIKey:              *apiKey,
@@ -272,18 +312,17 @@ func runStart(args []string) {
 			RetentionDays:       *retentionDays,
 			DisableBuiltinRules: *disableBuiltin,
 			ProxyPort:           *proxyPort,
-			APIPort:             *apiPort,
 		}
 	} else {
 		// Run interactive prompts (asks auto vs manual mode first)
-		startupCfg, err = tui.RunStartupWithPorts(cfg.Upstream.URL, cfg.Server.Port, cfg.API.Port)
+		startupCfg, err = startup.RunStartupWithPort(cfg.Upstream.URL, cfg.Server.Port)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Startup error: %v\n", err)
+			tui.PrintError(fmt.Sprintf("Startup error: %v", err))
 			os.Exit(1)
 		}
 
 		if startupCfg.Canceled {
-			fmt.Println("Startup canceled.")
+			tui.PrintInfo("Startup canceled")
 			os.Exit(0)
 		}
 	}
@@ -312,16 +351,13 @@ func runStart(args []string) {
 	}
 	// Pass advanced options
 	if startupCfg.ProxyPort > 0 {
-		daemonArgs = append(daemonArgs, "--proxy-port", fmt.Sprintf("%d", startupCfg.ProxyPort))
-	}
-	if startupCfg.APIPort > 0 {
-		daemonArgs = append(daemonArgs, "--api-port", fmt.Sprintf("%d", startupCfg.APIPort))
+		daemonArgs = append(daemonArgs, "--proxy-port", strconv.Itoa(startupCfg.ProxyPort))
 	}
 	if startupCfg.TelemetryEnabled {
 		daemonArgs = append(daemonArgs, "--telemetry=true")
 	}
 	if startupCfg.RetentionDays > 0 {
-		daemonArgs = append(daemonArgs, "--retention-days", fmt.Sprintf("%d", startupCfg.RetentionDays))
+		daemonArgs = append(daemonArgs, "--retention-days", strconv.Itoa(startupCfg.RetentionDays))
 	}
 	if *blockMode != "" {
 		daemonArgs = append(daemonArgs, "--block-mode", *blockMode)
@@ -336,39 +372,71 @@ func runStart(args []string) {
 		os.Setenv("DB_KEY", startupCfg.EncryptionKey)
 	}
 
-	// Daemonize
-	pid, err := daemon.Daemonize(daemonArgs)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to start daemon: %v\n", err)
+	// Launch daemon with progress steps
+	var pid int
+	launchErr := tuiprogress.RunSteps([]tuiprogress.Step{
+		{
+			Label:      "Launching daemon",
+			SuccessMsg: "Daemon launched",
+			Fn: func() error {
+				var err error
+				pid, err = daemon.Daemonize(daemonArgs)
+				if err != nil {
+					return fmt.Errorf("failed to start daemon: %w", err)
+				}
+				return nil
+			},
+		},
+		{
+			Label:      "Verifying health",
+			SuccessMsg: "Health check passed",
+			Fn: func() error {
+				// Wait for daemon to start, then verify
+				time.Sleep(500 * time.Millisecond)
+				if running, _ := daemon.IsRunning(); !running {
+					return fmt.Errorf("daemon failed to start — check logs: %s", daemon.LogFile())
+				}
+				return nil
+			},
+		},
+	})
+	if launchErr != nil {
+		tui.PrintError(launchErr.Error())
 		os.Exit(1)
 	}
 
-	// Wait a moment for the daemon to start
-	time.Sleep(500 * time.Millisecond)
-
-	// Verify it started
-	if running, _ := daemon.IsRunning(); !running {
-		fmt.Fprintln(os.Stderr, "Failed to start crust. Check logs:")
-		fmt.Fprintf(os.Stderr, "  %s\n", daemon.LogFile())
-		os.Exit(1)
+	// Build success content
+	fmt.Println()
+	if tui.IsPlainMode() {
+		tui.PrintSuccess("Started")
+		fmt.Printf("  PID     %d\n", pid)
+		fmt.Printf("  Logs    %s\n", daemon.LogFileDisplay())
+		fmt.Println()
+		fmt.Println("  Commands")
+		fmt.Println("    crust status   Check status")
+		fmt.Println("    crust logs     View logs")
+		fmt.Println("    crust stop     Stop crust")
+	} else {
+		banner.RevealLines([]string{
+			tui.StyleSuccess.Render(tui.IconCheck) + " " + tui.StyleBold.Render("Started"),
+			"",
+			"  PID     " + tui.StyleBold.Render(strconv.Itoa(pid)),
+			"  Logs    " + tui.Hyperlink("file://"+daemon.LogFile(), daemon.LogFileDisplay()),
+			"",
+			tui.StyleMuted.Render("  Commands"),
+			fmt.Sprintf("    %s  %s  %s", tui.StyleCommand.Render("crust status"), tui.StyleMuted.Render("──"), "Check status"),
+			fmt.Sprintf("    %s  %s  %s", tui.StyleCommand.Render("crust logs  "), tui.StyleMuted.Render("──"), "View logs"),
+			fmt.Sprintf("    %s  %s  %s", tui.StyleCommand.Render("crust stop  "), tui.StyleMuted.Render("──"), "Stop crust"),
+		})
 	}
-
-	fmt.Println()
-	fmt.Printf("✓ Crust started [PID %d]\n", pid)
-	fmt.Printf("  Logs: %s\n", daemon.LogFile())
-	fmt.Println()
-	fmt.Println("Commands:")
-	fmt.Println("  crust status  - Check status")
-	fmt.Println("  crust logs    - View logs")
-	fmt.Println("  crust stop    - Stop crust")
 }
 
 // runDaemon runs the actual server (called in daemon process)
-func runDaemon(cfg *config.Config, logLevel string, noColor, disableBuiltin bool, endpoint, apiKey, dbKey string,
-	proxyPort, apiPort int, telemetryEnabled bool, retentionDays int, blockMode string, autoMode bool) {
+func runDaemon(cfg *config.Config, logLevel string, disableBuiltin bool, endpoint, apiKey, dbKey string,
+	proxyPort int, telemetryEnabled bool, retentionDays int, blockMode string, autoMode bool) {
 	// Write PID file
 	if err := daemon.WritePID(); err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to write PID file: %v\n", err)
+		tui.PrintError(fmt.Sprintf("Failed to write PID file: %v", err))
 		os.Exit(1)
 	}
 	defer daemon.CleanupPID()
@@ -377,7 +445,7 @@ func runDaemon(cfg *config.Config, logLevel string, noColor, disableBuiltin bool
 	if logLevel != "" {
 		logger.SetGlobalLevelFromString(logLevel)
 	} else {
-		logger.SetGlobalLevelFromString(cfg.Server.LogLevel)
+		logger.SetGlobalLevelFromString(string(cfg.Server.LogLevel))
 	}
 	// Always disable color in daemon mode (no terminal)
 	logger.SetColored(false)
@@ -399,15 +467,24 @@ func runDaemon(cfg *config.Config, logLevel string, noColor, disableBuiltin bool
 	if proxyPort > 0 {
 		cfg.Server.Port = proxyPort
 	}
-	if apiPort > 0 {
-		cfg.API.Port = apiPort
-	}
 	cfg.Telemetry.Enabled = telemetryEnabled
 	if retentionDays > 0 {
 		cfg.Telemetry.RetentionDays = retentionDays
 	}
 	if blockMode != "" {
 		cfg.Security.BlockMode = types.BlockMode(blockMode)
+	}
+
+	// Validate config AFTER all CLI overrides have been applied
+	if err := cfg.Validate(); err != nil {
+		tui.PrintError(fmt.Sprintf("Configuration error:\n%v", err))
+		os.Exit(1)
+	}
+
+	// Write port file so `crust wrap` can discover the proxy port
+	if err := daemon.WritePort(cfg.Server.Port); err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to write port file: %v\n", err)
+		os.Exit(1)
 	}
 
 	log.Info("Starting Crust daemon...")
@@ -421,9 +498,9 @@ func runDaemon(cfg *config.Config, logLevel string, noColor, disableBuiltin bool
 
 	if cfg.Rules.Enabled {
 		engineCfg := rules.EngineConfig{
-			UserRulesDir:   rulesDir,
-			DisableBuiltin: cfg.Rules.DisableBuiltin,
-			APIPort:        cfg.API.Port,
+			UserRulesDir:        rulesDir,
+			DisableBuiltin:      cfg.Rules.DisableBuiltin,
+			SubprocessIsolation: true,
 		}
 
 		ruleEngine, err := rules.NewEngine(engineCfg)
@@ -446,79 +523,41 @@ func runDaemon(cfg *config.Config, logLevel string, noColor, disableBuiltin bool
 			}
 		}
 
-		// Initialize sandbox mapper and sync with rules (if enabled)
+		// Initialize sandbox rules (if enabled)
 		if cfg.Sandbox.Enabled {
 			if !sandbox.IsSupported() {
-				log.Warn("Sandbox enabled but not supported on this platform: %s", sandbox.Platform())
-			} else if !sandbox.IsHelperInstalled() {
 				log.Info("Sandbox helper not installed (Layer 2 disabled). Visit https://getcrust.io for installation options.")
 			} else {
-				sandboxMapper := sandbox.NewMapper(sandbox.DefaultProfilePath())
-				allRules := ruleEngine.GetAllRules()
-				secRules := toSecurityRules(allRules)
-				if err := sandboxMapper.Sync(secRules); err != nil {
-					log.Warn("Failed to sync sandbox profile: %v", err)
-				} else {
-					log.Info("Sandbox profile synced: %d rules mapped", sandboxMapper.RuleCount())
-				}
-
-				// Set rules for intent-aware Landlock mode derivation
+				secRules := toSecurityRules(ruleEngine.GetAllRules())
 				sandbox.SetRules(secRules)
+				log.Info("Sandbox rules set: %d rules loaded", len(secRules))
 
-				// Register callback to sync sandbox on rule reload
 				ruleEngine.OnReload(func(reloadedRules []rules.Rule) {
 					secReloaded := toSecurityRules(reloadedRules)
-					if err := sandboxMapper.Sync(secReloaded); err != nil {
-						log.Warn("Failed to sync sandbox profile on reload: %v", err)
-					} else {
-						log.Debug("Sandbox profile synced after reload: %d rules", sandboxMapper.RuleCount())
-					}
-					// Update rules for intent-aware Landlock mode derivation.
-					// Each command spawn uses the latest rules (no restart needed).
 					sandbox.SetRules(secReloaded)
+					log.Debug("Sandbox rules reloaded: %d rules", len(secReloaded))
 				})
-			}
-
-			// Layer 2b: BPF deny-list (Linux-only, optional)
-			if runtime.GOOS == "linux" && cfg.Sandbox.BPFHelper != "" {
-				socketPath := cfg.Sandbox.BPFHelper
-				if socketPath == "" {
-					socketPath = filepath.Join(daemon.DataDir(), "bpf.sock")
-				}
-				bpfClient, err := sandbox.NewBPFClient(socketPath)
-				if err != nil {
-					log.Warn("BPF helper not available (Layer 2b disabled): %v", err)
-				} else {
-					allBPFRules := ruleEngine.GetAllRules()
-					if err := bpfClient.SyncRules(toSecurityRules(allBPFRules)); err != nil {
-						log.Warn("Failed to sync BPF rules: %v", err)
-					} else {
-						log.Info("BPF deny rules synced (Layer 2b active)")
-					}
-
-					ruleEngine.OnReload(func(reloadedRules []rules.Rule) {
-						if err := bpfClient.SyncRules(toSecurityRules(reloadedRules)); err != nil {
-							log.Warn("Failed to sync BPF rules on reload: %v", err)
-						} else {
-							log.Debug("BPF deny rules synced after reload")
-						}
-					})
-				}
 			}
 		} else {
 			log.Debug("Sandbox disabled (set sandbox.enabled=true to enable)")
 		}
 	}
 
+	// Derive socket path for management API (unique per proxy port for multi-session)
+	socketPath := cfg.API.SocketPath
+	if socketPath == "" {
+		socketPath = daemon.SocketFile(cfg.Server.Port)
+	}
+
 	// Initialize manager
 	managerCfg := security.Config{
 		DBPath:          cfg.Storage.DBPath,
 		DBKey:           cfg.Storage.EncryptionKey,
-		APIPort:         cfg.API.Port,
+		SocketPath:      socketPath,
 		SecurityEnabled: cfg.Security.Enabled,
 		RetentionDays:   cfg.Telemetry.RetentionDays,
 		BufferStreaming: cfg.Security.BufferStreaming,
-		MaxBufferSize:   cfg.Security.MaxBufferSize,
+		MaxBufferEvents: cfg.Security.MaxBufferEvents,
 		BufferTimeout:   cfg.Security.BufferTimeout,
 		BlockMode:       cfg.Security.BlockMode,
 	}
@@ -557,7 +596,7 @@ func runDaemon(cfg *config.Config, logLevel string, noColor, disableBuiltin bool
 	}
 
 	// Create proxy
-	proxyHandler, err := proxy.NewProxy(cfg.Upstream.URL, cfg.Upstream.APIKey, time.Duration(cfg.Upstream.Timeout)*time.Second, cfg.Upstream.Providers)
+	proxyHandler, err := proxy.NewProxy(cfg.Upstream.URL, cfg.Upstream.APIKey, time.Duration(cfg.Upstream.Timeout)*time.Second, cfg.Upstream.Providers, autoMode)
 	if err != nil {
 		log.Error("Failed to create proxy: %v", err)
 		os.Exit(1)
@@ -589,7 +628,7 @@ func runDaemon(cfg *config.Config, logLevel string, noColor, disableBuiltin bool
 	} else {
 		log.Info("  Upstream: %s", cfg.Upstream.URL)
 	}
-	log.Info("  API: :%d", cfg.API.Port)
+	log.Info("  API: %s", socketPath)
 
 	// Start server
 	go func() {
@@ -599,9 +638,9 @@ func runDaemon(cfg *config.Config, logLevel string, noColor, disableBuiltin bool
 		}
 	}()
 
-	// Wait for interrupt signal
+	// Wait for interrupt signal (os.Interrupt is portable across Unix and Windows)
 	quit := make(chan os.Signal, 1)
-	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+	signal.Notify(quit, os.Interrupt, syscall.SIGTERM)
 	<-quit
 
 	log.Info("Shutting down...")
@@ -619,44 +658,83 @@ func runDaemon(cfg *config.Config, logLevel string, noColor, disableBuiltin bool
 
 // runStop handles the stop subcommand
 func runStop() {
-	running, pid := daemon.IsRunning()
+	running, _ := daemon.IsRunning()
 	if !running {
-		fmt.Println("Crust is not running")
+		tui.PrintInfo("Crust is not running")
 		return
 	}
 
-	fmt.Printf("Stopping crust [PID %d]...\n", pid)
-
-	if err := daemon.Stop(); err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+	err := spinner.RunWithSpinner("Stopping crust", "Stopped", daemon.Stop)
+	if err != nil {
+		tui.PrintError(fmt.Sprintf("Failed to stop: %v", err))
 		os.Exit(1)
 	}
-
-	fmt.Println("Crust stopped")
 }
 
 // runStatus handles the status subcommand
-func runStatus() {
+func runStatus(args []string) {
+	tui.WindowTitle("crust status")
+	statusFlags := flag.NewFlagSet("status", flag.ExitOnError)
+	jsonOutput := statusFlags.Bool("json", false, "Output as JSON")
+	live := statusFlags.Bool("live", false, "Live dashboard with auto-refresh")
+	_ = statusFlags.Parse(args)
+
 	running, pid := daemon.IsRunning()
-	if !running {
-		fmt.Println("Crust is not running")
+
+	if *jsonOutput {
+		status := map[string]any{
+			"running": running,
+			"pid":     pid,
+		}
+		if running {
+			client := newAPIClient()
+			healthy, _ := client.checkHealth() //nolint:errcheck // error means unhealthy
+			status["healthy"] = healthy
+			status["log_file"] = daemon.LogFile()
+		}
+		out, _ := json.MarshalIndent(status, "", "  ") //nolint:errcheck // marshal of map[string]any won't fail
+		fmt.Println(string(out))
 		return
 	}
 
-	fmt.Printf("Crust is running [PID %d]\n", pid)
-
-	// Try to get health from API
-	client := newAPIClient("config.yaml")
-	if healthy, _ := client.checkHealth(); healthy { //nolint:errcheck // error means unhealthy
-		fmt.Println("  Status: healthy")
+	if !running {
+		tui.PrintInfo("Crust is not running")
+		return
 	}
 
-	// Show log file location
-	fmt.Printf("  Logs: %s\n", daemon.LogFile())
+	client := newAPIClient()
+
+	// Live dashboard mode
+	if *live {
+		if err := dashboard.Run(client.client, client.proxyBaseURL(), pid, daemon.LogFileDisplay()); err != nil {
+			tui.PrintError(fmt.Sprintf("Dashboard error: %v", err))
+		}
+		return
+	}
+
+	// Static display — FetchStatus handles health, security, and stats in one call
+	data := dashboard.FetchStatus(client.client, client.proxyBaseURL(), pid, daemon.LogFileDisplay())
+	fmt.Println(dashboard.RenderStatic(data))
+}
+
+// runVersion handles the version subcommand
+func runVersion(args []string) {
+	versionFlags := flag.NewFlagSet("version", flag.ExitOnError)
+	jsonOutput := versionFlags.Bool("json", false, "Output as JSON")
+	_ = versionFlags.Parse(args)
+
+	if *jsonOutput {
+		out, _ := json.MarshalIndent(map[string]string{"version": Version}, "", "  ") //nolint:errcheck // marshal of map won't fail
+		fmt.Println(string(out))
+		return
+	}
+
+	banner.PrintBanner(Version)
 }
 
 // runLogs handles the logs subcommand
 func runLogs(args []string) {
+	tui.WindowTitle("crust logs")
 	logsFlags := flag.NewFlagSet("logs", flag.ExitOnError)
 	follow := logsFlags.Bool("f", false, "Follow log output")
 	lines := logsFlags.Int("n", 50, "Number of lines to show")
@@ -671,21 +749,8 @@ func runLogs(args []string) {
 
 	logFile := daemon.LogFile()
 
-	if *follow {
-		// Use tail -f
-		fmt.Printf("Following %s (Ctrl+C to stop)...\n\n", logFile)
-		cmd := exec.Command("tail", "-f", logFile)
-		cmd.Stdout = os.Stdout
-		cmd.Stderr = os.Stderr
-		_ = cmd.Run() //nolint:errcheck // user will see tail output/errors
-	} else {
-		// Show last N lines
-		cmd := exec.Command("tail", "-n", fmt.Sprintf("%d", *lines), logFile) //nolint:gosec // G204: args are from trusted flag parsing
-		cmd.Stdout = os.Stdout
-		cmd.Stderr = os.Stderr
-		if err := cmd.Run(); err != nil {
-			fmt.Fprintf(os.Stderr, "No logs found. Is crust running?\n")
-		}
+	if err := logview.View(logFile, *lines, *follow); err != nil {
+		tui.PrintError("No logs found. Is crust running?")
 	}
 }
 
@@ -704,137 +769,165 @@ func loggingMiddleware(next http.Handler) http.Handler {
 }
 
 func printUsage() {
-	fmt.Println(`Crust - Secure gateway for AI agents
+	banner.PrintBanner(Version)
+	fmt.Println()
 
-Usage:
-  crust start [flags]        Start crust (interactive or with flags)
-  crust stop                 Stop crust
-  crust status               Check if crust is running
-  crust logs [-f] [-n N]     View logs (-f to follow, -n for line count)
+	fmt.Println(tui.Separator("Usage"))
+	fmt.Print(tui.AlignColumns([][2]string{
+		{"crust start [flags]", "Start crust (interactive or with flags)"},
+		{"crust stop", "Stop crust"},
+		{"crust status [--json]", "Check if crust is running"},
+		{"crust logs [-f] [-n N]", "View logs (-f to follow, -n for line count)"},
+	}, "  ", 2, tui.StyleCommand, tui.StyleMuted))
+	fmt.Println()
 
-  crust add-rule <file.yaml>    Add a rule file to user rules
-  crust remove-rule <filename>  Remove a user rule file
-  crust list-rules [--json]     List all active rules
-  crust reload-rules            Trigger hot reload of rules
-  crust lint-rules [file.yaml]  Validate rule syntax and patterns
+	fmt.Println(tui.Separator("Rule Management"))
+	fmt.Print(tui.AlignColumns([][2]string{
+		{"crust add-rule <file.yaml>", "Add a rule file to user rules"},
+		{"crust remove-rule <filename>", "Remove a user rule file"},
+		{"crust list-rules [--json]", "List all active rules"},
+		{"crust reload-rules", "Trigger hot reload of rules"},
+		{"crust lint-rules [file.yaml]", "Validate rule syntax and patterns"},
+	}, "  ", 2, tui.StyleCommand, tui.StyleMuted))
+	fmt.Println()
 
-  crust wrap [--dry-run] <cmd>  Run command in OS sandbox
-  crust check-sandbox           Verify rule-sandbox consistency
-  crust repair-sandbox          Regenerate sandbox profile from rules
+	fmt.Println(tui.Separator("Sandbox & Other"))
+	fmt.Print(tui.AlignColumns([][2]string{
+		{"crust wrap [--dry-run] <cmd>", "Run command in OS sandbox"},
+		{"crust check-sandbox", "Verify rule-sandbox consistency"},
+		{"crust repair-sandbox", "Regenerate sandbox profile from rules"},
+		{"crust completion [--install]", "Install shell completion (bash/zsh/fish)"},
+		{"crust uninstall", "Uninstall crust completely"},
+		{"crust help", "Show this help message"},
+		{"crust version [--json]", "Show version"},
+	}, "  ", 2, tui.StyleCommand, tui.StyleMuted))
+	fmt.Println()
 
-  crust uninstall            Uninstall crust completely
-  crust help                 Show this help message
-  crust version              Show version
+	fmt.Println(tui.Separator("Start Flags"))
+	fmt.Print(tui.AlignColumns([][2]string{
+		{"--config string", "Path to configuration file (default \"~/.crust/config.yaml\")"},
+		{"--endpoint string", "LLM API endpoint URL (skip interactive prompt)"},
+		{"--api-key string", "API key for the endpoint (skip interactive prompt)"},
+		{"--auto", "Auto mode: resolve providers from model names"},
+		{"--db-key string", "Database encryption key (optional)"},
+		{"--log-level string", "Log level: trace, debug, info, warn, error"},
+		{"--no-color", "Disable colored log output"},
+		{"--disable-builtin", "Disable builtin security rules"},
+		{"--proxy-port int", "Proxy server port (default from config)"},
+		{"--telemetry", "Enable/disable telemetry (default false)"},
+		{"--retention-days int", "Telemetry retention in days (0=forever)"},
+	}, "  ", 2, tui.StyleCommand, tui.StyleMuted))
+	fmt.Println()
 
-Start Flags:
-  --config string       Path to configuration file (default "config.yaml")
-  --endpoint string     LLM API endpoint URL (skip interactive prompt)
-  --api-key string      API key for the endpoint (skip interactive prompt)
-  --auto                Auto mode: resolve providers from model names, clients bring their own auth
-  --db-key string       Database encryption key (optional)
-  --log-level string    Log level: trace, debug, info, warn, error
-  --no-color            Disable colored log output
-  --disable-builtin     Disable builtin security rules
-  --proxy-port int      Proxy server port (default from config)
-  --api-port int        API server port (default from config)
-  --telemetry           Enable/disable telemetry (default false)
-  --retention-days int  Telemetry retention in days (0=forever)
+	fmt.Println(tui.Separator("Environment Variables"))
+	fmt.Print(tui.AlignColumns([][2]string{
+		{"LLM_API_KEY", "API key for the LLM endpoint"},
+		{"DB_KEY", "Database encryption key"},
+		{"NO_COLOR", "Disable colored output (any value)"},
+	}, "  ", 2, tui.StyleCommand, tui.StyleMuted))
+	fmt.Println()
 
-Environment Variables (preferred for secrets):
-  LLM_API_KEY    API key for the LLM endpoint
-  DB_KEY         Database encryption key
-
-Examples:
-  crust start                              Interactive setup
-  LLM_API_KEY=sk-xxx crust start --endpoint https://openrouter.ai/api/v1
-  crust start --auto                       Auto mode (clients bring their own auth)
-  crust logs -f                            Follow logs
-  crust stop                               Stop crust`)
+	fmt.Println(tui.Separator("Examples"))
+	fmt.Print(tui.AlignColumns([][2]string{
+		{"crust start", "Interactive setup"},
+		{"LLM_API_KEY=sk-xxx crust start --endpoint https://openrouter.ai/api/v1", ""},
+		{"crust start --auto", "Auto mode"},
+		{"crust logs -f", "Follow logs"},
+		{"crust stop", "Stop crust"},
+	}, "  ", 2, tui.StyleCommand, tui.StyleMuted))
 }
 
 // runAddRule handles the add-rule subcommand
 func runAddRule(args []string) {
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "Usage: crust add-rule <file.yaml>")
+		tui.PrintError("Usage: crust add-rule <file.yaml>")
 		os.Exit(1)
 	}
 
 	filePath := args[0]
-	client := newAPIClient("config.yaml")
+	client := newAPIClient()
 	serverRunning := client.isServerRunning()
 
 	// Read and validate rule file
-	data, err := os.ReadFile(filePath)
+	data, err := os.ReadFile(filePath) //nolint:gosec // filePath is a user-provided CLI argument, validated by loader.ValidateYAML below
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error reading file: %v\n", err)
+		tui.PrintError(fmt.Sprintf("Error reading file: %v", err))
 		os.Exit(1)
 	}
 
 	loader := rules.NewLoader(rules.DefaultUserRulesDir())
 	if err := loader.ValidateYAML(data); err != nil {
-		fmt.Fprintf(os.Stderr, "Validation error: %v\n", err)
+		tui.PrintError(fmt.Sprintf("Validation error: %v", err))
 		os.Exit(1)
 	}
 
 	destPath, err := loader.AddRuleFile(filePath)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error adding rule file: %v\n", err)
+		tui.PrintError(fmt.Sprintf("Error adding rule file: %v", err))
 		os.Exit(1)
 	}
 
-	fmt.Printf("Rule file added: %s\n", destPath)
+	tui.PrintSuccess("Rule file added: " + destPath)
 
 	if serverRunning {
 		if _, err := client.reloadRules(); err == nil {
-			fmt.Println("Hot reload triggered successfully")
+			tui.PrintSuccess("Hot reload triggered")
 		}
 	} else {
-		fmt.Println("Note: Crust is not running. Rules will be loaded on next start.")
+		tui.PrintInfo("Crust is not running. Rules will be loaded on next start.")
 	}
 }
 
 // runRemoveRule handles the remove-rule subcommand
 func runRemoveRule(args []string) {
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "Usage: crust remove-rule <filename>")
-		fmt.Fprintln(os.Stderr, "")
-		fmt.Fprintln(os.Stderr, "Remove a user rule file from ~/.crust/rules.d/")
-		fmt.Fprintln(os.Stderr, "Use 'crust list-rules' to see available rules.")
+		tui.PrintError("Usage: crust remove-rule <filename>")
+		fmt.Fprintln(os.Stderr, "  Remove a user rule file from ~/.crust/rules.d/")
+		if tui.IsPlainMode() {
+			fmt.Fprintln(os.Stderr, "  Use crust list-rules to see available rules.")
+		} else {
+			fmt.Fprintf(os.Stderr, "  Use %s to see available rules.\n", tui.StyleCommand.Render("crust list-rules"))
+		}
 		os.Exit(1)
 	}
 
 	filename := args[0]
-	client := newAPIClient("config.yaml")
+	client := newAPIClient()
 	serverRunning := client.isServerRunning()
 
 	loader := rules.NewLoader(rules.DefaultUserRulesDir())
 	if err := loader.RemoveRuleFile(filename); err != nil {
-		fmt.Fprintf(os.Stderr, "Error removing rule file: %v\n", err)
+		tui.PrintError(fmt.Sprintf("Error removing rule file: %v", err))
 		os.Exit(1)
 	}
 
-	fmt.Printf("Rule file removed: %s\n", filename)
+	tui.PrintSuccess("Rule file removed: " + filename)
 
 	if serverRunning {
 		if _, err := client.reloadRules(); err == nil {
-			fmt.Println("Hot reload triggered successfully")
+			tui.PrintSuccess("Hot reload triggered")
 		}
 	} else {
-		fmt.Println("Note: Crust is not running. Rules will be updated on next start.")
+		tui.PrintInfo("Crust is not running. Rules will be updated on next start.")
 	}
 }
 
 // runListRules handles the list-rules subcommand
 func runListRules(args []string) {
+	tui.WindowTitle("crust rules")
 	listFlags := flag.NewFlagSet("list-rules", flag.ExitOnError)
 	jsonOutput := listFlags.Bool("json", false, "Output as JSON")
 	_ = listFlags.Parse(args)
 
-	client := newAPIClient("config.yaml")
+	client := newAPIClient()
 	body, err := client.getRules()
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "Error: Crust is not running")
-		fmt.Fprintln(os.Stderr, "Start it first with: crust start")
+		tui.PrintError("Crust is not running")
+		if tui.IsPlainMode() {
+			fmt.Fprintln(os.Stderr, "  Start it first with: crust start")
+		} else {
+			fmt.Fprintf(os.Stderr, "  Start it first with: %s\n", tui.StyleCommand.Render("crust start"))
+		}
 		os.Exit(1)
 	}
 
@@ -843,172 +936,29 @@ func runListRules(args []string) {
 		return
 	}
 
-	// Parse and format output
+	// Parse and render
 	rulesResp, err := client.getRulesParsed()
 	if err != nil {
 		fmt.Println(string(body))
 		return
 	}
 
-	// Colors
-	green := "\033[32m"
-	yellow := "\033[33m"
-	red := "\033[31m"
-	cyan := "\033[36m"
-	gray := "\033[90m"
-	bold := "\033[1m"
-	reset := "\033[0m"
-
-	fmt.Printf("%s%sCrust Rules%s (%d total)\n\n", bold, cyan, reset, rulesResp.Total)
-
-	// Group by source
-	builtinRules := []rules.Rule{}
-	userRulesByFile := make(map[string][]rules.Rule)
-	for _, r := range rulesResp.Rules {
-		if r.Source == "builtin" {
-			builtinRules = append(builtinRules, r)
-		} else {
-			filename := filepath.Base(r.FilePath)
-			if filename == "" || filename == "." {
-				filename = "(unknown)"
-			}
-			userRulesByFile[filename] = append(userRulesByFile[filename], r)
-		}
+	if err := rulelist.Render(rulesResp.Rules, rulesResp.Total); err != nil {
+		tui.PrintError(fmt.Sprintf("Failed to render rules: %v", err))
 	}
-
-	printRule := func(r rules.Rule, prefix string) {
-		// Severity color
-		sevColor := gray
-		sev := r.Severity
-		if sev == "" {
-			sev = "critical"
-		}
-		switch sev {
-		case "critical":
-			sevColor = red
-		case "warning":
-			sevColor = yellow
-		case "info":
-			sevColor = cyan
-		}
-
-		// Status (Enabled is a pointer, nil means true)
-		enabled := r.Enabled == nil || *r.Enabled
-		status := green + "✓" + reset
-		if !enabled {
-			status = gray + "○" + reset
-		}
-
-		// Format operations
-		ops := strings.Join(r.GetActions(), ",")
-		if ops == "" {
-			ops = "all"
-		}
-
-		fmt.Printf("%s%s %s%s%s\n", prefix, status, bold, r.Name, reset)
-
-		// Show description or message
-		desc := r.Description
-		if desc == "" {
-			desc = r.Message
-		}
-		if desc != "" {
-			fmt.Printf("%s  %s%s%s\n", prefix, gray, desc, reset)
-		}
-
-		// Show what's being blocked
-		var targets []string
-		targets = append(targets, r.Block.Paths...)
-		for _, h := range r.Block.Hosts {
-			targets = append(targets, "host:"+h)
-		}
-		if r.Match != nil {
-			if r.Match.Path != "" {
-				targets = append(targets, r.Match.Path)
-			}
-			if r.Match.Command != "" {
-				targets = append(targets, "cmd:"+r.Match.Command)
-			}
-			if r.Match.Host != "" {
-				targets = append(targets, "host:"+r.Match.Host)
-			}
-		}
-		if len(r.AllConditions) > 0 {
-			targets = append(targets, fmt.Sprintf("all(%d conditions)", len(r.AllConditions)))
-		}
-		if len(r.AnyConditions) > 0 {
-			targets = append(targets, fmt.Sprintf("any(%d conditions)", len(r.AnyConditions)))
-		}
-
-		// Truncate targets display if too long
-		targetStr := ""
-		if len(targets) > 0 {
-			targetStr = targets[0]
-			if len(targets) > 1 {
-				targetStr = fmt.Sprintf("%s (+%d more)", targets[0], len(targets)-1)
-			}
-			// Truncate long patterns
-			if len(targetStr) > 40 {
-				targetStr = targetStr[:37] + "..."
-			}
-		}
-
-		fmt.Printf("%s  %s%-8s%s  ⊘ %-12s  %s%s%s  hits: %d\n",
-			prefix, sevColor, sev, reset,
-			ops,
-			gray, targetStr, reset,
-			r.HitCount)
-
-		// Show exceptions if any
-		if len(r.Block.Except) > 0 {
-			fmt.Printf("%s  %sexcept: %s%s\n", prefix, gray, strings.Join(r.Block.Except, ", "), reset)
-		}
-	}
-
-	// Print builtin rules
-	if len(builtinRules) > 0 {
-		fmt.Printf("%sBuiltin Rules:%s\n\n", bold, reset)
-		for _, r := range builtinRules {
-			printRule(r, "  ")
-			fmt.Println()
-		}
-	}
-
-	// Print user rules grouped by file
-	fmt.Printf("%sUser Rules:%s\n", bold, reset)
-	if len(userRulesByFile) == 0 {
-		fmt.Printf("  %s(none)%s\n", gray, reset)
-		fmt.Printf("  Add rules with: crust add-rule <file.yaml>\n")
-	} else {
-		// Sort filenames for consistent output
-		filenames := make([]string, 0, len(userRulesByFile))
-		for f := range userRulesByFile {
-			filenames = append(filenames, f)
-		}
-		sort.Strings(filenames)
-
-		for _, filename := range filenames {
-			rules := userRulesByFile[filename]
-			fmt.Printf("\n  %s[%s]%s\n", cyan, filename, reset)
-			for i, r := range rules {
-				prefix := "    ├─ "
-				if i == len(rules)-1 {
-					prefix = "    └─ "
-				}
-				printRule(r, prefix)
-			}
-		}
-	}
-	fmt.Println()
 }
 
 // runReloadRules handles the reload-rules subcommand
 func runReloadRules(_ []string) {
-	client := newAPIClient("config.yaml")
+	client := newAPIClient()
 	body, err := client.reloadRules()
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "Error: Crust is not running")
-		fmt.Fprintln(os.Stderr, "Start it first with: crust start")
+		tui.PrintError("Crust is not running")
+		if tui.IsPlainMode() {
+			fmt.Fprintln(os.Stderr, "  Start it first with: crust start")
+		} else {
+			fmt.Fprintf(os.Stderr, "  Start it first with: %s\n", tui.StyleCommand.Render("crust start"))
+		}
 		os.Exit(1)
 	}
 	fmt.Println(string(body))
@@ -1019,85 +969,80 @@ func runUninstall() {
 	binaryPath := "/usr/local/bin/crust"
 	dataDir := daemon.DataDir()
 
-	fmt.Println("This will remove:")
+	tui.PrintWarning("This will remove:")
 	fmt.Printf("  - %s\n", binaryPath)
 	fmt.Printf("  - %s/ (logs, rules, database)\n", dataDir)
 	fmt.Println()
 
 	// Prompt for confirmation
-	fmt.Print("Continue? [y/N] ")
+	prompt := tui.StyleAccent.Render("▸")
+	if tui.IsPlainMode() {
+		prompt = ">"
+	}
+	fmt.Printf("  %s Continue? [y/N] ", prompt)
 	var response string
 	_, _ = fmt.Scanln(&response) //nolint:errcheck // empty input means no
 
 	if response != "y" && response != "Y" {
-		fmt.Println("Uninstall canceled.")
+		tui.PrintInfo("Uninstall canceled")
 		return
 	}
 
 	// Stop crust if running
 	if running, pid := daemon.IsRunning(); running {
-		fmt.Printf("Stopping crust [PID %d]...\n", pid)
+		tui.PrintInfo(fmt.Sprintf("Stopping crust [PID %d]...", pid))
 		if err := daemon.Stop(); err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: failed to stop crust: %v\n", err)
+			tui.PrintWarning(fmt.Sprintf("Failed to stop crust: %v", err))
 		}
 	}
 
 	// Remove binary
-	fmt.Println("Removing binary...")
+	tui.PrintInfo("Removing binary...")
 	if err := os.Remove(binaryPath); err != nil {
 		if os.IsPermission(err) {
 			// Try with sudo
-			cmd := exec.Command("sudo", "rm", "-f", binaryPath)
+			cmd := exec.CommandContext(context.Background(), "sudo", "rm", "-f", binaryPath)
 			cmd.Stdout = os.Stdout
 			cmd.Stderr = os.Stderr
 			cmd.Stdin = os.Stdin
 			if err := cmd.Run(); err != nil {
-				fmt.Fprintf(os.Stderr, "Failed to remove binary: %v\n", err)
+				tui.PrintError(fmt.Sprintf("Failed to remove binary: %v", err))
 			}
 		} else if !os.IsNotExist(err) {
-			fmt.Fprintf(os.Stderr, "Failed to remove binary: %v\n", err)
+			tui.PrintError(fmt.Sprintf("Failed to remove binary: %v", err))
 		}
 	}
 
 	// Remove data directory
-	fmt.Println("Removing data directory...")
+	tui.PrintInfo("Removing data directory...")
 	if err := os.RemoveAll(dataDir); err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to remove data directory: %v\n", err)
+		tui.PrintError(fmt.Sprintf("Failed to remove data directory: %v", err))
 	}
 
 	fmt.Println()
-	fmt.Println("Crust uninstalled.")
+	tui.PrintSuccess("Crust uninstalled")
 }
 
 // runWrap handles the wrap subcommand - runs a command in OS sandbox
 func runWrap(args []string) {
 	wrapFlags := flag.NewFlagSet("wrap", flag.ExitOnError)
-	dryRun := wrapFlags.Bool("dry-run", false, "Preview sandbox profile without executing")
+	dryRun := wrapFlags.Bool("dry-run", false, "Preview sandbox policy without executing")
 	_ = wrapFlags.Parse(args)
 
 	remainingArgs := wrapFlags.Args()
 	if len(remainingArgs) == 0 {
-		fmt.Fprintln(os.Stderr, "Usage: crust wrap [--dry-run] <command> [args...]")
+		tui.PrintError("Usage: crust wrap [--dry-run] <command> [args...]")
 		os.Exit(1)
 	}
 
-	// Check platform support - Crust requires Linux 5.13+ (Landlock) or macOS
 	if !sandbox.IsSupported() {
-		fmt.Fprintf(os.Stderr, "FATAL: Sandbox not supported on this platform\n")
-		fmt.Fprintf(os.Stderr, "Platform info: %s\n", sandbox.Platform())
-		fmt.Fprintf(os.Stderr, "Crust requires Linux 5.13+ with Landlock or macOS.\n")
-		os.Exit(1)
-	}
-
-	if !sandbox.IsHelperInstalled() {
-		fmt.Fprintf(os.Stderr, "bakelens-sandbox binary not installed.\n")
-		fmt.Fprintf(os.Stderr, "The OS-level sandbox requires the bakelens-sandbox binary.\n")
-		fmt.Fprintf(os.Stderr, "Visit https://getcrust.io for installation options.\n")
+		tui.PrintError("bakelens-sandbox binary not found")
+		fmt.Fprintf(os.Stderr, "  Visit %s for installation options.\n", tui.Hyperlink("https://getcrust.io", "https://getcrust.io"))
 		os.Exit(1)
 	}
 
 	// Load configuration
-	cfg, err := config.Load("config.yaml")
+	cfg, err := config.Load(config.DefaultConfigPath())
 	if err != nil {
 		cfg = config.DefaultConfig()
 	}
@@ -1107,186 +1052,193 @@ func runWrap(args []string) {
 		rulesDir = rules.DefaultUserRulesDir()
 	}
 
-	// Initialize sandbox mapper
-	profilePath := sandbox.DefaultProfilePath()
-	mapper := sandbox.NewMapper(profilePath)
-
-	// Load all path-based rules and generate sandbox profile
+	// Load rules and set them for sandbox policy generation
 	loader := rules.NewLoader(rulesDir)
-	builtinRules, err := loader.LoadBuiltin()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: Failed to load builtin rules: %v\n", err)
+	var builtinRules []rules.Rule
+	if !cfg.Rules.DisableBuiltin {
+		builtinRules, err = loader.LoadBuiltin()
+		if err != nil {
+			tui.PrintWarning(fmt.Sprintf("Failed to load builtin rules: %v", err))
+		}
 	}
 
 	userRules, err := loader.LoadUser()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: Failed to load user rules: %v\n", err)
+		tui.PrintWarning(fmt.Sprintf("Failed to load user rules: %v", err))
 	}
 
-	allRules := append(builtinRules, userRules...)
+	allRules := slices.Concat(builtinRules, userRules)
+	sandbox.SetRules(toSecurityRules(allRules))
 
-	// Add rules to mapper
-	for i := range allRules {
-		if allRules[i].IsEnabled() {
-			if err := mapper.AddRule(&allRules[i]); err != nil {
-				fmt.Fprintf(os.Stderr, "Warning: Failed to map rule %s: %v\n", allRules[i].Name, err)
-			}
+	// If the Crust proxy is running, inject its URL so agents route through it
+	if running, _ := daemon.IsRunning(); running {
+		if port, err := daemon.ReadPort(); err == nil {
+			sandbox.SetProxyURL(fmt.Sprintf("http://localhost:%d", port))
 		}
 	}
 
 	if *dryRun {
-		// Preview mode - show profile and exit
-		fmt.Printf("Sandbox Platform: %s\n\n", sandbox.Platform())
-		profile, err := mapper.GetProfile()
+		// Dry-run: build policy and pipe to Rust sandbox
+		tui.PrintInfo("Sandbox Platform: " + sandbox.Platform())
+		fmt.Println()
+		policyJSON, err := sandbox.BuildPolicy(remainingArgs)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error reading profile: %v\n", err)
+			tui.PrintError(fmt.Sprintf("Error building policy: %v", err))
 			os.Exit(1)
 		}
-		fmt.Println("Generated Sandbox Profile:")
-		fmt.Println("---")
-		fmt.Print(string(profile))
-		fmt.Println("---")
-		fmt.Printf("\nWould execute: %v\n", remainingArgs)
-		return
+		sb := sandbox.New()
+		exitCode, err := sb.RunHelper(policyJSON)
+		if err != nil {
+			tui.PrintError(err.Error())
+			os.Exit(1)
+		}
+		os.Exit(exitCode)
 	}
 
 	// Create sandbox and execute
-	sb := sandbox.New(mapper)
+	sb := sandbox.New()
 	exitCode, err := sb.Wrap(remainingArgs)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Sandbox error: %v\n", err)
-		os.Exit(1)
+		var se *sandbox.Error
+		if errors.As(err, &se) {
+			switch se.Code {
+			case sandbox.ErrCommandNotFound:
+				tui.PrintError("Command not found: " + se.Message)
+			case sandbox.ErrEnforcementUnavailable:
+				tui.PrintError("Sandbox enforcement unavailable: " + se.Message)
+			case sandbox.ErrExecFailed:
+				tui.PrintError("Failed to execute command: " + se.Message)
+			case sandbox.ErrParse:
+				tui.PrintError("Invalid sandbox policy: " + se.Message)
+			default:
+				tui.PrintError("Sandbox error: " + se.Message)
+			}
+		} else {
+			tui.PrintError("Sandbox error: " + err.Error())
+		}
+		if exitCode == 0 {
+			exitCode = 1
+		}
+		os.Exit(exitCode)
 	}
 	os.Exit(exitCode)
 }
 
-// runCheckSandbox handles the check-sandbox subcommand - verifies rule-sandbox consistency
+// runCheckSandbox handles the check-sandbox subcommand - verifies rule-sandbox consistency.
+// Delegates to Rust's bakelens-sandbox check mode.
 func runCheckSandbox() {
-	// Load configuration first to check if sandbox is enabled
-	cfg, err := config.Load("config.yaml")
+	cfg, err := config.Load(config.DefaultConfigPath())
 	if err != nil {
 		cfg = config.DefaultConfig()
 	}
 
-	// Skip check if sandbox is disabled
 	if !cfg.Sandbox.Enabled {
-		fmt.Println("Sandbox is disabled in config - skipping consistency check")
+		tui.PrintInfo("Sandbox is disabled in config - skipping consistency check")
 		return
 	}
 
 	if !sandbox.IsSupported() {
-		fmt.Fprintf(os.Stderr, "FATAL: Sandbox not supported (%s). Requires Linux 5.13+ or macOS.\n", sandbox.Platform())
+		tui.PrintError("bakelens-sandbox binary not found")
+		tui.PrintInfo("Visit " + tui.Hyperlink("https://getcrust.io", "https://getcrust.io") + " for installation options")
 		os.Exit(1)
 	}
 
-	if !sandbox.IsHelperInstalled() {
-		fmt.Fprintf(os.Stderr, "bakelens-sandbox binary not installed.\n")
-		fmt.Fprintf(os.Stderr, "The OS-level sandbox requires the bakelens-sandbox binary.\n")
-		fmt.Fprintf(os.Stderr, "Visit https://getcrust.io for installation options.\n")
-		os.Exit(1)
-	}
+	tui.PrintInfo("Checking sandbox consistency...")
+	tui.PrintInfo("Platform: " + sandbox.Platform())
+	fmt.Println()
 
-	fmt.Printf("Checking sandbox consistency...\n")
-	fmt.Printf("Platform: %s\n\n", sandbox.Platform())
+	// Load rules and set them for policy generation
+	loadAndSetRules(cfg)
 
-	rulesDir := cfg.Rules.UserDir
-	if rulesDir == "" {
-		rulesDir = rules.DefaultUserRulesDir()
-	}
-
-	// Load all path-based rules
-	loader := rules.NewLoader(rulesDir)
-	builtinRules, err := loader.LoadBuiltin()
+	// Run a no-op command in the sandbox to verify it works
+	policyJSON, err := sandbox.BuildPolicy([]string{"true"})
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: Failed to load builtin rules: %v\n", err)
-	}
-
-	userRules, err := loader.LoadUser()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: Failed to load user rules: %v\n", err)
-	}
-
-	allRules := append(builtinRules, userRules...)
-
-	// Load sandbox mapper
-	profilePath := sandbox.DefaultProfilePath()
-	mapper := sandbox.NewMapper(profilePath)
-	if err := mapper.LoadFromFile(); err != nil {
-		// Profile doesn't exist - that's OK, we'll create it
-		fmt.Printf("Note: No sandbox profile found at %s\n", profilePath)
-		fmt.Printf("Run 'crust repair-sandbox' to generate one.\n")
-		return
-	}
-
-	// Check consistency
-	if err := mapper.CheckConsistency(toSecurityRules(allRules)); err != nil {
-		fmt.Fprintf(os.Stderr, "Inconsistency detected: %v\n\n", err)
-		fmt.Println("Run 'crust repair-sandbox' to fix")
+		tui.PrintError(fmt.Sprintf("Error building check policy: %v", err))
 		os.Exit(1)
 	}
 
-	fmt.Println("✓ Rules and sandbox mappings are consistent")
+	sb := sandbox.New()
+	exitCode, err := sb.RunHelper(policyJSON)
+	if err != nil {
+		tui.PrintError(fmt.Sprintf("Check failed: %v", err))
+		os.Exit(1)
+	}
+	if exitCode != 0 {
+		tui.PrintWarning("Run 'crust repair-sandbox' to fix")
+		os.Exit(exitCode)
+	}
+	tui.PrintSuccess("Rules and sandbox are consistent")
 }
 
-// runRepairSandbox handles the repair-sandbox subcommand - regenerates sandbox profile from rules
+// runRepairSandbox handles the repair-sandbox subcommand - regenerates sandbox profile from rules.
+// Delegates to Rust's bakelens-sandbox repair mode.
 func runRepairSandbox() {
-	// Load configuration first to check if sandbox is enabled
-	cfg, err := config.Load("config.yaml")
+	cfg, err := config.Load(config.DefaultConfigPath())
 	if err != nil {
 		cfg = config.DefaultConfig()
 	}
 
-	// Skip repair if sandbox is disabled
 	if !cfg.Sandbox.Enabled {
-		fmt.Println("Sandbox is disabled in config - skipping repair")
+		tui.PrintInfo("Sandbox is disabled in config - skipping repair")
 		return
 	}
 
 	if !sandbox.IsSupported() {
-		fmt.Fprintf(os.Stderr, "FATAL: Sandbox not supported (%s). Requires Linux 5.13+ or macOS.\n", sandbox.Platform())
+		tui.PrintError("bakelens-sandbox binary not found")
+		tui.PrintInfo("Visit " + tui.Hyperlink("https://getcrust.io", "https://getcrust.io") + " for installation options")
 		os.Exit(1)
 	}
 
-	if !sandbox.IsHelperInstalled() {
-		fmt.Fprintf(os.Stderr, "bakelens-sandbox binary not installed.\n")
-		fmt.Fprintf(os.Stderr, "The OS-level sandbox requires the bakelens-sandbox binary.\n")
-		fmt.Fprintf(os.Stderr, "Visit https://getcrust.io for installation options.\n")
+	tui.PrintInfo("Repairing sandbox...")
+	tui.PrintInfo("Platform: " + sandbox.Platform())
+	fmt.Println()
+
+	// Load rules and set them for policy generation
+	loadAndSetRules(cfg)
+
+	// Run a no-op command in the sandbox to exercise full setup path
+	policyJSON, err := sandbox.BuildPolicy([]string{"true"})
+	if err != nil {
+		tui.PrintError(fmt.Sprintf("Error building repair policy: %v", err))
 		os.Exit(1)
 	}
 
-	fmt.Printf("Repairing sandbox profile...\n")
-	fmt.Printf("Platform: %s\n\n", sandbox.Platform())
+	sb := sandbox.New()
+	exitCode, err := sb.RunHelper(policyJSON)
+	if err != nil {
+		tui.PrintError(fmt.Sprintf("Repair failed: %v", err))
+		os.Exit(1)
+	}
+	if exitCode != 0 {
+		os.Exit(exitCode)
+	}
+	tui.PrintSuccess("Sandbox repaired successfully")
+}
 
+// loadAndSetRules loads builtin + user rules and sets them for sandbox policy generation.
+func loadAndSetRules(cfg *config.Config) {
 	rulesDir := cfg.Rules.UserDir
 	if rulesDir == "" {
 		rulesDir = rules.DefaultUserRulesDir()
 	}
 
-	// Load all path-based rules
 	loader := rules.NewLoader(rulesDir)
-	builtinRules, err := loader.LoadBuiltin()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: Failed to load builtin rules: %v\n", err)
+	var builtinRules []rules.Rule
+	if !cfg.Rules.DisableBuiltin {
+		var err error
+		builtinRules, err = loader.LoadBuiltin()
+		if err != nil {
+			tui.PrintWarning(fmt.Sprintf("Failed to load builtin rules: %v", err))
+		}
 	}
 
 	userRules, err := loader.LoadUser()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: Failed to load user rules: %v\n", err)
+		tui.PrintWarning(fmt.Sprintf("Failed to load user rules: %v", err))
 	}
 
-	allRules := append(builtinRules, userRules...)
-
-	// Create new sandbox mapper and repair
-	profilePath := sandbox.DefaultProfilePath()
-	mapper := sandbox.NewMapper(profilePath)
-
-	if err := mapper.Repair(toSecurityRules(allRules)); err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to repair sandbox: %v\n", err)
-		os.Exit(1)
-	}
-
-	fmt.Printf("✓ Sandbox profile regenerated at %s\n", profilePath)
-	fmt.Printf("  Mapped %d rules\n", len(allRules))
+	allRules := slices.Concat(builtinRules, userRules)
+	sandbox.SetRules(toSecurityRules(allRules))
 }
 
 // runLintRules handles the lint-rules subcommand - validates rule syntax and patterns
@@ -1303,14 +1255,15 @@ func runLintRules(args []string) {
 	if len(remainingArgs) > 0 {
 		// Lint specific file
 		filePath := remainingArgs[0]
-		fmt.Printf("Linting %s...\n\n", filePath)
+		tui.PrintInfo(fmt.Sprintf("Linting %s...", filePath))
+		fmt.Println()
 		result, err = linter.LintFile(filePath)
 	} else {
 		// Lint all rules (builtin + user)
-		fmt.Println("Linting all rules...")
+		tui.PrintInfo("Linting all rules...")
 
 		// Load configuration
-		cfg, cfgErr := config.Load("config.yaml")
+		cfg, cfgErr := config.Load(config.DefaultConfigPath())
 		if cfgErr != nil {
 			cfg = config.DefaultConfig()
 		}
@@ -1324,24 +1277,24 @@ func runLintRules(args []string) {
 		loader := rules.NewLoader(rulesDir)
 		builtinRules, loadErr := loader.LoadBuiltin()
 		if loadErr != nil {
-			fmt.Fprintf(os.Stderr, "Warning: Failed to load builtin rules: %v\n", loadErr)
+			tui.PrintWarning(fmt.Sprintf("Failed to load builtin rules: %v", loadErr))
 		}
-		fmt.Printf("Builtin rules: %d\n", len(builtinRules))
+		tui.PrintInfo(fmt.Sprintf("Builtin rules: %d", len(builtinRules)))
 
 		// Load user rules
 		userRules, loadErr := loader.LoadUser()
 		if loadErr != nil {
-			fmt.Fprintf(os.Stderr, "Warning: Failed to load user rules: %v\n", loadErr)
+			tui.PrintWarning(fmt.Sprintf("Failed to load user rules: %v", loadErr))
 		}
-		fmt.Printf("User rules: %d\n", len(userRules))
+		tui.PrintInfo(fmt.Sprintf("User rules: %d", len(userRules)))
 		fmt.Println()
 
-		allRules := append(builtinRules, userRules...)
+		allRules := slices.Concat(builtinRules, userRules)
 		result = linter.LintRules(allRules)
 	}
 
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		tui.PrintError(err.Error())
 		os.Exit(1)
 	}
 
@@ -1351,11 +1304,62 @@ func runLintRules(args []string) {
 	// Summary
 	fmt.Println()
 	if result.Errors > 0 {
-		fmt.Printf("✗ %d error(s), %d warning(s)\n", result.Errors, result.Warns)
+		tui.PrintError(fmt.Sprintf("%d error(s), %d warning(s)", result.Errors, result.Warns))
 		os.Exit(1)
 	} else if result.Warns > 0 {
-		fmt.Printf("⚠ %d warning(s)\n", result.Warns)
+		tui.PrintWarning(fmt.Sprintf("%d warning(s)", result.Warns))
 	} else {
-		fmt.Println("✓ All rules valid")
+		tui.PrintSuccess("All rules valid")
+	}
+}
+
+// runCompletion handles the completion subcommand
+func runCompletion(args []string) {
+	compFlags := flag.NewFlagSet("completion", flag.ExitOnError)
+	doInstall := compFlags.Bool("install", false, "Install shell completion")
+	doUninstall := compFlags.Bool("uninstall", false, "Remove shell completion")
+	_ = compFlags.Parse(args)
+
+	switch {
+	case *doInstall:
+		if completion.IsInstalled() {
+			tui.PrintInfo("Shell completion is already installed")
+			return
+		}
+		err := spinner.RunWithSpinner(
+			"Installing shell completion",
+			"Shell completion installed",
+			completion.Install,
+		)
+		if err != nil {
+			tui.PrintError(fmt.Sprintf("Install failed: %v", err))
+			os.Exit(1)
+		}
+		tui.PrintInfo("Restart your shell or source your profile to activate")
+
+	case *doUninstall:
+		err := spinner.RunWithSpinner(
+			"Removing shell completion",
+			"Shell completion removed",
+			completion.Uninstall,
+		)
+		if err != nil {
+			tui.PrintError(fmt.Sprintf("Uninstall failed: %v", err))
+			os.Exit(1)
+		}
+
+	default:
+		fmt.Println(tui.Separator("Shell Completion"))
+		fmt.Println()
+		status := tui.StyleError.Render("not installed")
+		if completion.IsInstalled() {
+			status = tui.StyleSuccess.Render("installed")
+		}
+		fmt.Printf("  %s  %s\n\n", tui.Faint("Status"), status)
+		fmt.Print(tui.AlignColumns([][2]string{
+			{"crust completion --install", "Install for detected shells (bash/zsh/fish)"},
+			{"crust completion --uninstall", "Remove shell completion"},
+		}, "  ", 2, tui.StyleCommand, tui.StyleMuted))
+		fmt.Println()
 	}
 }

@@ -70,7 +70,7 @@ func BenchmarkRuleMatching(b *testing.B) {
 		b.Run(tc.name, func(b *testing.B) {
 			b.ReportAllocs()
 			b.ResetTimer()
-			for i := 0; i < b.N; i++ {
+			for range b.N {
 				_ = engine.Evaluate(tc.call)
 			}
 		})
@@ -134,7 +134,7 @@ func BenchmarkRegexMatching(b *testing.B) {
 				Arguments: json.RawMessage(`{"command": "` + cmd + `"}`),
 			}
 			b.ResetTimer()
-			for i := 0; i < b.N; i++ {
+			for range b.N {
 				_ = engine.Evaluate(call)
 			}
 		})
@@ -146,7 +146,7 @@ func BenchmarkEngineCreation(b *testing.B) {
 	b.ReportAllocs()
 	b.Run("with_builtin", func(b *testing.B) {
 		b.ReportAllocs()
-		for i := 0; i < b.N; i++ {
+		for range b.N {
 			cfg := EngineConfig{
 				DisableBuiltin: false,
 				UserRulesDir:   b.TempDir(),
@@ -157,7 +157,7 @@ func BenchmarkEngineCreation(b *testing.B) {
 
 	b.Run("without_builtin", func(b *testing.B) {
 		b.ReportAllocs()
-		for i := 0; i < b.N; i++ {
+		for range b.N {
 			cfg := EngineConfig{
 				DisableBuiltin: true,
 				UserRulesDir:   b.TempDir(),
@@ -167,11 +167,9 @@ func BenchmarkEngineCreation(b *testing.B) {
 	})
 }
 
-// BenchmarkNormalizePathsInCommand benchmarks path normalization.
-func BenchmarkNormalizePathsInCommand(b *testing.B) {
+// BenchmarkParseShellCommandsExpand benchmarks shell command parsing and expansion.
+func BenchmarkParseShellCommandsExpand(b *testing.B) {
 	b.ReportAllocs()
-	sanitizer := GetSanitizer()
-
 	commands := []struct {
 		name string
 		cmd  string
@@ -189,8 +187,8 @@ func BenchmarkNormalizePathsInCommand(b *testing.B) {
 	for _, tc := range commands {
 		b.Run(tc.name, func(b *testing.B) {
 			b.ReportAllocs()
-			for i := 0; i < b.N; i++ {
-				_ = sanitizer.SanitizeCommand(tc.cmd)
+			for range b.N {
+				NewExtractorWithEnv(nil).parseShellCommandsExpand(tc.cmd, nil)
 			}
 		})
 	}
@@ -206,8 +204,7 @@ func BenchmarkExtractor_Bash_Simple(b *testing.B) {
 	extractor := NewExtractor()
 	args := json.RawMessage(`{"command": "ls -la"}`)
 
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		_ = extractor.Extract("Bash", args)
 	}
 }
@@ -219,8 +216,7 @@ func BenchmarkExtractor_Bash_Complex(b *testing.B) {
 	// Complex command with pipes, redirects, and multiple arguments
 	args := json.RawMessage(`{"command": "cat /etc/passwd | grep root > /tmp/output.txt 2>&1 && echo done"}`)
 
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		_ = extractor.Extract("Bash", args)
 	}
 }
@@ -237,8 +233,7 @@ func BenchmarkNormalizer_NoOp(b *testing.B) {
 	})
 	path := "/home/user/project/main.go"
 
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		_ = normalizer.Normalize(path)
 	}
 }
@@ -251,8 +246,7 @@ func BenchmarkNormalizer_TildeExpansion(b *testing.B) {
 	})
 	path := "~/foo/bar/file.txt"
 
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		_ = normalizer.Normalize(path)
 	}
 }
@@ -265,8 +259,7 @@ func BenchmarkNormalizer_EnvVar(b *testing.B) {
 	})
 	path := "$HOME/.env"
 
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		_ = normalizer.Normalize(path)
 	}
 }
@@ -281,8 +274,7 @@ func BenchmarkNormalizer_Combined(b *testing.B) {
 	// Path with tilde, env var, path traversal, and relative component
 	path := "~/${PROJECT}/../other/./file.txt"
 
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		_ = normalizer.Normalize(path)
 	}
 }
@@ -310,7 +302,7 @@ func BenchmarkNormalizer_Pattern(b *testing.B) {
 		b.Run(tc.name, func(b *testing.B) {
 			b.ReportAllocs()
 			b.ResetTimer()
-			for i := 0; i < b.N; i++ {
+			for range b.N {
 				_ = normalizer.NormalizePattern(tc.pattern)
 			}
 		})

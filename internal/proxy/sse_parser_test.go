@@ -950,8 +950,8 @@ func BenchmarkParseAnthropicEvent_MessageStart(b *testing.B) {
 	b.ReportAllocs()
 	data := []byte(`{"type":"message_start","message":{"usage":{"input_tokens":100,"output_tokens":0}}}`)
 	parser := NewSSEParser(false)
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+
+	for b.Loop() {
 		parser.ParseAnthropicEvent(data)
 	}
 }
@@ -960,8 +960,8 @@ func BenchmarkParseAnthropicEvent_ContentBlockDelta(b *testing.B) {
 	b.ReportAllocs()
 	data := []byte(`{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"command\":\"ls -la\"}"}}`)
 	parser := NewSSEParser(false)
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+
+	for b.Loop() {
 		parser.ParseAnthropicEvent(data)
 	}
 }
@@ -970,8 +970,8 @@ func BenchmarkParseOpenAIEvent_ToolCall(b *testing.B) {
 	b.ReportAllocs()
 	data := []byte(`{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_123","function":{"name":"Bash","arguments":"{\"command\":\"ls\"}"}}]}}]}`)
 	parser := NewSSEParser(false)
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+
+	for b.Loop() {
 		parser.ParseOpenAIEvent(data)
 	}
 }
@@ -983,8 +983,8 @@ func BenchmarkApplyResultToToolCalls(b *testing.B) {
 		ToolCallStart: &ToolCallStartEvent{Index: 0, ID: "call_123", Name: "Bash"},
 		ToolCallDelta: &ToolCallDeltaEvent{Index: 0, PartialJSON: `{"command":"ls"}`},
 	}
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+
+	for b.Loop() {
 		toolCalls := make(map[int]*StreamingToolCall)
 		parser.ApplyResultToToolCalls(result, toolCalls)
 	}

@@ -1,0 +1,56 @@
+# Crust agent integration test configuration (v2 schema)
+#
+# Copy to config.local.yaml and fill in your API keys (gitignored).
+# config.yaml has safe Ollama defaults that work without real keys.
+#
+# Environment variable overrides (highest priority):
+#   CRUST_TEST_ENDPOINT  — backend endpoint URL
+#   CRUST_TEST_API_KEY   — API key
+#   CRUST_TEST_MODEL     — model name
+#   CRUST_TEST_AGENT     — agent brand (tool name convention)
+#
+# Priority: env vars > config.local.yaml > config.yaml
+
+crust:
+  binary: "crust"              # Path to crust binary (or just "crust" if in PATH)
+  proxy_port: 9099             # Proxy port (avoids conflict with dev instance)
+  block_mode: "replace"        # "replace" = agents see block messages, "remove" = silent
+
+backend:
+  endpoint: ""                 # LLM API endpoint (e.g. https://api.openai.com/v1)
+  api_key: ""                  # API key for the endpoint
+  model: "gpt-4o-mini"        # Model name for test requests
+  agent: "openclaw"            # Agent brand — determines tool name conventions
+
+# Supported agents:
+#   claude-code  → Bash, Read, Write, Edit, WebFetch
+#   codex        → shell, read_file, apply_patch, web_search
+#   cline        → execute_command, read_file, write_to_file, replace_in_file, browser_action
+#   cursor       → run_terminal_cmd, read_file, edit_file, web_search
+#   openclaw     → exec, Read, Write, Edit, web_search
+#   opencode     → bash, read, write, edit, websearch
+#   windsurf     → run_command, read_file, write_to_file, edit_file, read_url_content
+
+# Optional: override individual tool names (takes precedence over agent)
+# tools:
+#   exec: "my_custom_exec"
+#   read: "my_custom_read"
+#   write: "my_custom_write"
+#   edit: "my_custom_edit"
+#   web: "my_custom_web"
+
+# ── Migration from v1.1.0 schema ──────────────────────────────────────────
+# The old schema (api_keys/models sections + crust.endpoint) still works
+# but is deprecated and will be removed in a future release.
+#
+# Old (v1.1.0):                    New (v2):
+#   crust:                           crust:
+#     endpoint: "..."                  binary: "crust"
+#   api_keys:                          proxy_port: 9099
+#     openai: "sk-..."                 block_mode: "replace"
+#   models:                          backend:
+#     openai: "gpt-4o-mini"
+#                                      endpoint: "..."
+#                                      api_key: "sk-..."
+#                                      model: "gpt-4o-mini"
+#                                      agent: "openclaw"

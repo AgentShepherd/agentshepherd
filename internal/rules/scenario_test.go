@@ -169,6 +169,32 @@ func TestMaliciousAgentScenarios(t *testing.T) {
 	}
 }
 
+// TestOpenClawAttackDemo runs the OpenClaw attack demo scenarios.
+// This is the "dramatic example" — 9 real evasion techniques all caught.
+func TestOpenClawAttackDemo(t *testing.T) {
+	scenarios := loadScenarios(t, "openclaw_attack_demo.yaml")
+	engine := createEngineWithBuiltinRules(t)
+
+	t.Logf("=== OpenClaw Attack Demo: %d evasion techniques ===\n", len(scenarios))
+
+	var passed, failed int
+	for i, scenario := range scenarios {
+		t.Run(fmt.Sprintf("%d_%s", i+1, scenario.Description), func(t *testing.T) {
+			call := scenarioToToolCall(scenario)
+			result := engine.Evaluate(call)
+			if result.Matched {
+				passed++
+				t.Logf("BLOCKED  %s\n         Rule: %s | %s", scenario.Description, result.RuleName, result.Message)
+			} else {
+				failed++
+				t.Errorf("MISSED   %s (tool=%s)", scenario.Description, scenario.Tool)
+			}
+		})
+	}
+
+	t.Logf("\n%d/%d attacks blocked. %d missed.", passed, len(scenarios), failed)
+}
+
 // TestRuleHitCoverage checks which rules are hit by malicious scenarios
 func TestRuleHitCoverage(t *testing.T) {
 	scenarios := loadScenarios(t, "malicious_agent.yaml")

@@ -1,0 +1,25 @@
+# Crust agent integration test configuration (v2 schema)
+# Safe defaults: local Ollama — no real API key needed
+#
+# To customize, create config.local.yaml (gitignored) or set env vars:
+#   CRUST_TEST_ENDPOINT, CRUST_TEST_API_KEY, CRUST_TEST_MODEL, CRUST_TEST_AGENT
+
+crust:
+  binary: "crust"
+  proxy_port: 9099
+  block_mode: "replace"
+
+backend:
+  endpoint: "http://localhost:11434/v1"   # Ollama OpenAI-compatible endpoint
+  api_key: "ollama"                       # Ollama doesn't need a real key
+  model: "qwen3"                          # Local model with tool support
+  agent: "openclaw"                       # Tool name convention (see below)
+
+# Agent determines which tool names are used in test payloads:
+#   claude-code  → Bash, Read, Write, Edit, WebFetch
+#   codex        → shell, read_file, apply_patch, web_search
+#   cline        → execute_command, read_file, write_to_file, replace_in_file, browser_action
+#   cursor       → run_terminal_cmd, read_file, edit_file, web_search
+#   openclaw     → exec, Read, Write, Edit, web_search
+#   opencode     → bash, read, write, edit, websearch
+#   windsurf     → run_command, read_file, write_to_file, edit_file, read_url_content

@@ -79,6 +79,11 @@ func (w *Watcher) Stop() error {
 func (w *Watcher) run() {
 	defer w.wg.Done()
 
+	// Periodic integrity verification (defense-in-depth against tampering
+	// that bypasses inotify, e.g. direct memory writes or disabled watcher)
+	integrityTicker := time.NewTicker(5 * time.Minute)
+	defer integrityTicker.Stop()
+
 	for {
 		select {
 		case event, ok := <-w.watcher.Events:
@@ -92,6 +97,11 @@ func (w *Watcher) run() {
 				return
 			}
 			log.Warn("Watcher error: %v", err)
+
+		case <-integrityTicker.C:
+			if tampered := w.engine.GetLoader().VerifyIntegrity(); len(tampered) > 0 {
+				log.Warn("SECURITY: rule file integrity check failed: %v", tampered)
+			}
 
 		case <-w.stopChan:
 			return

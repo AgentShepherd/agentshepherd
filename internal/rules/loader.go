@@ -3,6 +3,7 @@ package rules
 import (
 	"embed"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io/fs"
 	"os"
@@ -259,7 +260,7 @@ func ValidateSafeFilename(filename string) (string, error) {
 
 	// Only allow safe characters: alphanumeric, underscore, dash, dot
 	for _, r := range base {
-		if !((r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') ||
+		if !((r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || //nolint:staticcheck // QF1001: explicit character ranges are more readable
 			(r >= '0' && r <= '9') || r == '_' || r == '-' || r == '.') {
 			return "", fmt.Errorf("invalid character in filename: %c", r)
 		}
@@ -306,7 +307,7 @@ func (l *Loader) ValidatePathInDirectory(filename string) (string, error) {
 				return "", fmt.Errorf("failed to resolve symlink: %w", err)
 			}
 			if !strings.HasPrefix(absRealPath, absUserDir+string(os.PathSeparator)) && absRealPath != absUserDir {
-				return "", fmt.Errorf("symlink points outside rules directory")
+				return "", errors.New("symlink points outside rules directory")
 			}
 		}
 	}
@@ -370,7 +371,7 @@ func (l *Loader) GetUserDir() string {
 }
 
 // parseRuleSet parses YAML data into path-based rules using progressive disclosure schema
-func (l *Loader) parseRuleSet(data []byte, path string, source string) ([]Rule, error) {
+func (l *Loader) parseRuleSet(data []byte, path string, source Source) ([]Rule, error) {
 	var ruleSetConfig RuleSetConfig
 	if err := yaml.Unmarshal(data, &ruleSetConfig); err != nil {
 		log.Trace("      YAML parse error: %v", err)

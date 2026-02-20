@@ -5,11 +5,11 @@
 ```
                     REQUEST SIDE                         RESPONSE SIDE
                          │                                    │
-Agent Request ──▶ [Layer 0: History Scan] ──▶ LLM ──▶ [Layer 1: Rules] ──▶ Execute
-                         │                                    │
-                      ↓ BLOCK                              ↓ BLOCK
-                   (14-30μs)                             (14-30μs)
-               "Bad agent detected"                   "Action blocked"
+Agent Request ──▶ [Layer 0: History Scan] ──▶ LLM ──▶ [Layer 1: Rules] ──▶ [Layer 2: Sandbox] ──▶ Execute
+                         │                                    │                    │
+                      ↓ BLOCK                              ↓ BLOCK             ↓ BLOCK
+                   (14-30μs)                             (14-30μs)          (kernel-level)
+               "Bad agent detected"                   "Action blocked"   "OS sandbox denied"
 
 Layer 1 Rule Evaluation Order:
   1. Operation-based Rules → path/command/host matching for known tools
@@ -19,6 +19,8 @@ Layer 1 Rule Evaluation Order:
 **Layer 0 (Request History):** Scans tool_calls in conversation history. Catches "bad agent" patterns where malicious actions already occurred in past turns.
 
 **Layer 1 (Response Rules):** Scans LLM-generated tool_calls in responses. Fast pattern matching with friendly error messages.
+
+**Layer 2 (OS Sandbox):** Kernel-level enforcement via Landlock (Linux) and Seatbelt (macOS). Last line of defense — even if a tool call bypasses rule matching, the OS blocks the actual syscall.
 
 ---
 
@@ -89,7 +91,7 @@ The rule engine can protect against various attack vectors:
 | Category | Examples |
 |----------|----------|
 | Credentials | .env, SSH keys, cloud creds, tokens |
-| System | Binaries, kernel modules, boot |
+| System | `/etc/passwd`, `/etc/shadow`, binaries, kernel modules, boot |
 | Persistence | Shell RC, cron, systemd, git hooks |
 | Privilege Escalation | Sudoers, PAM, LD_PRELOAD |
 | Container Escape | Docker/containerd sockets |

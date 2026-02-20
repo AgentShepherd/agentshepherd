@@ -1,0 +1,20 @@
+rules:
+  - name: test-block-env
+    block: "**/.env"
+    message: "Blocked by Crust integration test"
+
+  - name: test-block-ssh
+    block: "**/.ssh/id_*"
+    except: "**/.ssh/id_*.pub"
+    message: "Blocked by Crust integration test"
+
+  - name: test-block-etc-passwd
+    block: "/etc/passwd"
+    actions: [read]
+    message: "Blocked by Crust integration test"
+
+  - name: test-block-evil-host
+    match:
+      host: "evil.example.com"
+    actions: [network]
+    message: "Blocked by Crust integration test"

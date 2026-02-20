@@ -9,6 +9,14 @@ import (
 	"github.com/BakeLens/crust/internal/types"
 )
 
+// API-specific protocol constants for content block and delta types.
+const (
+	contentTypeToolUse      = "tool_use"         // Anthropic
+	contentTypeFunctionCall = "function_call"    // OpenAI Responses
+	deltaTypeText           = "text_delta"       // Anthropic
+	deltaTypeInputJSON      = "input_json_delta" // Anthropic
+)
+
 // StreamingToolCall represents a tool call being accumulated from SSE events.
 // Used by both SSEReader and BufferedSSEWriter.
 type StreamingToolCall struct {
@@ -140,17 +148,13 @@ type OpenAIResponsesCompleted struct {
 
 // SSEParser provides unified SSE parsing with optional sanitization.
 type SSEParser struct {
-	sanitizer *rules.InputSanitizer
+	sanitize bool
 }
 
 // NewSSEParser creates a new SSE parser.
 // If sanitize is true, tool names will be sanitized using the rules sanitizer.
 func NewSSEParser(sanitize bool) *SSEParser {
-	p := &SSEParser{}
-	if sanitize {
-		p.sanitizer = rules.GetSanitizer()
-	}
-	return p
+	return &SSEParser{sanitize: sanitize}
 }
 
 // ParseResult contains the result of parsing an SSE event.
@@ -188,16 +192,16 @@ func (p *SSEParser) ParseAnthropicEvent(data []byte) ParseResult {
 	if bytes.Contains(data, []byte(`"message_start"`)) {
 		var event AnthropicMessageStart
 		if err := json.Unmarshal(data, &event); err == nil {
-			result.InputTokens = event.Message.Usage.InputTokens
-			result.OutputTokens = event.Message.Usage.OutputTokens
+			result.InputTokens = max(0, event.Message.Usage.InputTokens)
+			result.OutputTokens = max(0, event.Message.Usage.OutputTokens)
 		}
 	} else if bytes.Contains(data, []byte(`"content_block_start"`)) {
 		var event AnthropicContentBlockStart
 		if err := json.Unmarshal(data, &event); err == nil {
-			if event.ContentBlock.Type == "tool_use" {
+			if event.ContentBlock.Type == contentTypeToolUse {
 				name := event.ContentBlock.Name
-				if p.sanitizer != nil {
-					name = p.sanitizer.SanitizeToolName(name)
+				if p.sanitize {
+					name = rules.SanitizeToolName(name)
 				}
 				result.ToolCallStart = &ToolCallStartEvent{
 					Index: event.Index,
@@ -209,9 +213,9 @@ func (p *SSEParser) ParseAnthropicEvent(data []byte) ParseResult {
 	} else if bytes.Contains(data, []byte(`"content_block_delta"`)) {
 		var event AnthropicContentBlockDelta
 		if err := json.Unmarshal(data, &event); err == nil {
-			if event.Delta.Type == "text_delta" && event.Delta.Text != "" {
+			if event.Delta.Type == deltaTypeText && event.Delta.Text != "" {
 				result.TextContent = event.Delta.Text
-			} else if event.Delta.Type == "input_json_delta" && event.Delta.PartialJSON != "" {
+			} else if event.Delta.Type == deltaTypeInputJSON && event.Delta.PartialJSON != "" {
 				result.ToolCallDelta = &ToolCallDeltaEvent{
 					Index:       event.Index,
 					PartialJSON: event.Delta.PartialJSON,
@@ -221,8 +225,8 @@ func (p *SSEParser) ParseAnthropicEvent(data []byte) ParseResult {
 	} else if bytes.Contains(data, []byte(`"message_delta"`)) {
 		var event AnthropicMessageDelta
 		if err := json.Unmarshal(data, &event); err == nil {
-			result.InputTokens = event.Usage.InputTokens
-			result.OutputTokens = event.Usage.OutputTokens
+			result.InputTokens = max(0, event.Usage.InputTokens)
+			result.OutputTokens = max(0, event.Usage.OutputTokens)
 		}
 	}
 
@@ -247,8 +251,8 @@ func (p *SSEParser) ParseOpenAIEvent(data []byte) ParseResult {
 			// Tool call start (has ID and/or name)
 			if tc.ID != "" || tc.Function.Name != "" {
 				name := tc.Function.Name
-				if p.sanitizer != nil && name != "" {
-					name = p.sanitizer.SanitizeToolName(name)
+				if p.sanitize && name != "" {
+					name = rules.SanitizeToolName(name)
 				}
 				result.ToolCallStart = &ToolCallStartEvent{
 					Index: tc.Index,
@@ -268,8 +272,8 @@ func (p *SSEParser) ParseOpenAIEvent(data []byte) ParseResult {
 	}
 
 	if chunk.Usage != nil {
-		result.InputTokens = chunk.Usage.PromptTokens
-		result.OutputTokens = chunk.Usage.CompletionTokens
+		result.InputTokens = max(0, chunk.Usage.PromptTokens)
+		result.OutputTokens = max(0, chunk.Usage.CompletionTokens)
 	}
 
 	return result
@@ -300,10 +304,10 @@ func (p *SSEParser) ParseOpenAIResponsesEvent(eventType string, data []byte) Par
 	case "response.output_item.added":
 		var event OpenAIResponsesOutputItemAdded
 		if err := json.Unmarshal(data, &event); err == nil {
-			if event.Item.Type == "function_call" {
+			if event.Item.Type == contentTypeFunctionCall {
 				name := event.Item.Name
-				if p.sanitizer != nil && name != "" {
-					name = p.sanitizer.SanitizeToolName(name)
+				if p.sanitize && name != "" {
+					name = rules.SanitizeToolName(name)
 				}
 				result.ToolCallStart = &ToolCallStartEvent{
 					Index: event.OutputIndex,
@@ -333,8 +337,8 @@ func (p *SSEParser) ParseOpenAIResponsesEvent(eventType string, data []byte) Par
 	case "response.completed":
 		var event OpenAIResponsesCompleted
 		if err := json.Unmarshal(data, &event); err == nil {
-			result.InputTokens = event.Response.Usage.InputTokens
-			result.OutputTokens = event.Response.Usage.OutputTokens
+			result.InputTokens = max(0, event.Response.Usage.InputTokens)
+			result.OutputTokens = max(0, event.Response.Usage.OutputTokens)
 		}
 	}
 

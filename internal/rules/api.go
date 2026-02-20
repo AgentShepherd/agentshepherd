@@ -20,21 +20,6 @@ func NewAPIHandler(engine *Engine) *APIHandler {
 	return &APIHandler{engine: engine}
 }
 
-// RegisterRoutes registers API routes on the given router
-func (h *APIHandler) RegisterRoutes(router *gin.Engine) {
-	rules := router.Group("/api/crust/rules")
-	{
-		rules.GET("", h.HandleRules)
-		rules.GET("/builtin", h.HandleBuiltinRules)
-		rules.GET("/user", h.HandleUserRules)
-		rules.DELETE("/user/:filename", h.HandleDeleteUserRuleFile)
-		rules.POST("/reload", h.HandleReload)
-		rules.POST("/validate", h.HandleValidate)
-		rules.GET("/files", h.HandleListFiles)
-		rules.POST("/files", h.HandleAddFile)
-	}
-}
-
 // HandleRules returns all active rules
 func (h *APIHandler) HandleRules(c *gin.Context) {
 	rules := h.engine.GetRules()
@@ -208,7 +193,7 @@ func (h *APIHandler) HandleAddFile(c *gin.Context) {
 
 	// Ensure directory exists
 	userDir := h.engine.GetLoader().GetUserDir()
-	if err := os.MkdirAll(userDir, 0755); err != nil {
+	if err := os.MkdirAll(userDir, 0700); err != nil {
 		log.Error("Failed to create rules directory: %v", err)
 		api.Error(c, http.StatusInternalServerError, "Failed to create rules directory")
 		return

@@ -1,18 +1,12 @@
-//go:build linux
-
 package sandbox
 
 import (
-	"path/filepath"
 	"strings"
 	"testing"
 )
 
 func TestWrap_EmptyCommand(t *testing.T) {
-	tmpDir := t.TempDir()
-	profilePath := filepath.Join(tmpDir, "sandbox.sb")
-	mapper := NewMapper(profilePath)
-	s := New(mapper)
+	s := New()
 
 	code, err := s.Wrap([]string{})
 	if err == nil {
@@ -26,19 +20,8 @@ func TestWrap_EmptyCommand(t *testing.T) {
 	}
 }
 
-func TestIsHelperInstalled_ReturnsBoolean(t *testing.T) {
+func TestIsSupported_ReturnsBoolean(t *testing.T) {
 	// Should return true or false without panicking
-	result := IsHelperInstalled()
-	t.Logf("IsHelperInstalled: %v", result)
-}
-
-func TestSandboxMapper(t *testing.T) {
-	tmpDir := t.TempDir()
-	profilePath := filepath.Join(tmpDir, "sandbox.sb")
-	mapper := NewMapper(profilePath)
-	s := New(mapper)
-
-	if s.mapper != mapper {
-		t.Error("sandbox mapper should be the mapper passed to New")
-	}
+	result := IsSupported()
+	t.Logf("IsSupported: %v", result)
 }

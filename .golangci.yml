@@ -1,110 +1,177 @@
-# golangci-lint configuration
-# https://golangci-lint.run/usage/configuration/
+version: "2"
+
+# https://golangci-lint.run/docs/configuration/
 
 run:
-  timeout: 5m
   modules-download-mode: readonly
 
 linters:
+  # Default linters (always enabled): errcheck, govet, ineffassign, staticcheck, unused
   enable:
-    # Critical - must have
-    - staticcheck      # Gold standard static analysis
-    - errcheck         # Unchecked error returns
+    # Security
     - gosec            # Security vulnerabilities
-    - govet            # Suspicious constructs
+    - bidichk          # Dangerous unicode bidi character sequences
+    - nosprintfhostport # Misuse of Sprintf to construct host:port URLs
 
-    # High priority
-    - revive           # Fast, extensible linter (replaces golint)
-    - ineffassign      # Ineffective assignments
-    - unused           # Unused code
-    - typecheck        # Type checking
-
-    # Formatting
-    - misspell         # Spelling mistakes in comments
-    - gofmt            # Formatting
-    - goimports        # Import organization
+    # Bug finders
+    - nilerr           # Returns nil error after checking err != nil
+    - nilnesserr       # Checks err != nil but returns different nil error
+    - errorlint        # Incorrect error wrapping (errors.Is/As issues)
+    - durationcheck    # Two durations multiplied together
+    - fatcontext       # Nested contexts in loops
+    - wastedassign     # Assignments to variables never read
+    - reassign         # Package variable reassignment
+    - makezero         # Slice init with non-zero length then append
+    - predeclared      # Shadowing predeclared identifiers (len, cap, error...)
+    - exhaustive       # Missing switch cases on enum types
+    - musttag          # Missing struct tags on marshaled fields
+    - goconst          # Repeated strings that should be constants
 
     # Resource leak detection
     - bodyclose        # HTTP response body close
     - noctx            # HTTP requests without context
     - sqlclosecheck    # SQL rows/stmt close
+    - rowserrcheck     # Missing sql.Rows.Err() check
 
-linters-settings:
-  errcheck:
-    # Check for blank identifier assignments like `_ = f()`
-    check-blank: true
-    # Exclude certain functions where ignoring errors is acceptable
-    exclude-functions:
-      # Cleanup/defer operations
-      - (*os.File).Close
-      - (io.Closer).Close
-      - (*database/sql.DB).Close
-      - (*database/sql.Rows).Close
-      - (*compress/gzip.Reader).Close
-      - io.Closer.Close
-      # Process cleanup (best effort)
-      - (*os/exec.Cmd).Wait
-      - (*os.Process).Kill
-      - (*os.Process).Signal
-      - (*os.Process).Release
-      # Flag parsing (errors shown via usage)
-      - (*flag.FlagSet).Parse
-      # HTTP response body (often in defer)
-      - (*net/http.Response).Body.Close
-      # Daemon PID file cleanup (best effort)
-      - github.com/BakeLens/crust/internal/daemon.RemovePID
-      # Telemetry stats (best effort, non-critical)
-      - (database/sql.Result).RowsAffected
-      # TUI user input (best effort)
-      - (*bufio.Reader).ReadString
-      # Shutdown operations (best effort cleanup)
-      - (*github.com/BakeLens/crust/internal/security.Manager).Shutdown
-      - (*github.com/BakeLens/crust/internal/telemetry.Provider).Shutdown
-      - (*github.com/BakeLens/crust/internal/rules.Watcher).Stop
-      # HTTP write to client (can't recover if client disconnects)
-      - (net/http.ResponseWriter).Write
-      - io.Copy
+    # Correctness
+    - canonicalheader       # HTTP header canonicalization
+    - gocheckcompilerdirectives # Validate //go: directives
 
-  revive:
+    # Stdlib maximizers
+    - modernize        # Simplifications using modern Go features
+    - exptostd         # golang.org/x/exp replaceable by stdlib
+    - usestdlibvars    # Use stdlib variables/constants
+    - intrange         # For loops using integer range (Go 1.22+)
+    - perfsprint       # fmt.Sprintf replaceable by faster alternatives
+
+    # Code quality
+    - gocritic         # Broad diagnostics: bugs, performance, style
+    - unconvert        # Unnecessary type conversions
+    - unparam          # Unused function parameters
+    - mirror           # Wrong bytes/strings mirror patterns
+    - recvcheck        # Inconsistent receiver types
+    - nolintlint       # Validate //nolint directives
+
+    # Testing
+    - usetesting       # os.Setenv in tests → t.Setenv etc
+
+    # Style
+    - revive           # Fast, extensible linter (replaces golint)
+    - misspell         # Spelling mistakes in comments
+
+  settings:
+    errcheck:
+      check-blank: true
+      exclude-functions:
+        # Cleanup/defer operations
+        - (*os.File).Close
+        - (io.Closer).Close
+        - (*database/sql.DB).Close
+        - (*database/sql.Rows).Close
+        - (*compress/gzip.Reader).Close
+        - io.Closer.Close
+        # Process cleanup (best effort)
+        - (*os/exec.Cmd).Wait
+        - (*os.Process).Kill
+        - (*os.Process).Signal
+        - (*os.Process).Release
+        # Flag parsing (errors shown via usage)
+        - (*flag.FlagSet).Parse
+        # HTTP response body (often in defer)
+        - (*net/http.Response).Body.Close
+        # Daemon PID file cleanup (best effort)
+        - github.com/BakeLens/crust/internal/daemon.RemovePID
+        # TUI user input (best effort)
+        - (*bufio.Reader).ReadString
+        # Shutdown operations (best effort cleanup)
+        - (*github.com/BakeLens/crust/internal/security.Manager).Shutdown
+        - (*github.com/BakeLens/crust/internal/telemetry.Provider).Shutdown
+        - (*github.com/BakeLens/crust/internal/rules.Watcher).Stop
+        # HTTP write to client (can't recover if client disconnects)
+        - (net/http.ResponseWriter).Write
+        - io.Copy
+
+    gocritic:
+      disabled-checks:
+        - ifElseChain      # Conflicts with tagged switch suggestions
+        - singleCaseSwitch # Single-case switches are fine for clarity
+        - exitAfterDefer   # Common in main(); OS cleans up on process exit
+
+    gosec:
+      excludes:
+        - G104  # Audit errors not checked (too noisy for some patterns)
+
+    misspell:
+      locale: US
+
+    exhaustive:
+      default-signifies-exhaustive: true
+
+    goconst:
+      min-len: 3
+      min-occurrences: 4
+
+    perfsprint:
+      err-error: true
+      errorf: true
+      sprintf1: true
+
+    revive:
+      rules:
+        - name: blank-imports
+        - name: context-as-argument
+        - name: context-keys-type
+        - name: dot-imports
+        - name: error-return
+        - name: error-strings
+        - name: error-naming
+        - name: exported
+        - name: increment-decrement
+        - name: var-naming
+        - name: package-comments
+        - name: range
+        - name: receiver-naming
+        - name: time-naming
+        - name: unexported-return
+        - name: indent-error-flow
+        - name: errorf
+
+  exclusions:
+    generated: lax
+    presets:
+      - comments
+      - common-false-positives
+      - legacy
+      - std-error-handling
     rules:
-      - name: blank-imports
-      - name: context-as-argument
-      - name: context-keys-type
-      - name: dot-imports
-      - name: error-return
-      - name: error-strings
-      - name: error-naming
-      - name: exported
-      - name: increment-decrement
-      - name: var-naming
-      - name: package-comments
-      - name: range
-      - name: receiver-naming
-      - name: time-naming
-      - name: unexported-return
-      - name: indent-error-flow
-      - name: errorf
-
-  gosec:
-    excludes:
-      - G104  # Audit errors not checked (too noisy for some patterns)
-
-  misspell:
-    locale: US
+      - path: _test\.go
+        linters:
+          - errcheck
+          - gocyclo
+          - goconst
+          - gosec
+          - noctx
+          - perfsprint
+      - path: main\.go
+        linters:
+          - gocyclo
+      # "api" and "types" are valid, widely-used Go package names
+      - path: internal/api/
+        linters:
+          - revive
+        text: "var-naming: avoid meaningless package names"
+      - path: internal/types/
+        linters:
+          - revive
+        text: "var-naming: avoid meaningless package names"
 
 issues:
-  exclude-rules:
-    # Ignore long lines in generated code
-    - path: _test\.go
-      linters:
-        - gocyclo
-        - errcheck
-        - gosec
-
-    # Ignore certain issues in main.go
-    - path: main\.go
-      linters:
-        - gocyclo
-
   max-issues-per-linter: 50
   max-same-issues: 10
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+  exclusions:
+    generated: lax

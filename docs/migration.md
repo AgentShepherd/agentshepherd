@@ -1,5 +1,31 @@
 # Migration Guide
 
+## Management API: TCP → Unix Domain Socket (v1.x → v2.0)
+
+### What Changed
+
+The management API now uses Unix domain sockets instead of TCP. This provides kernel-enforced access control (`chmod 0600`), eliminates port conflicts, and is invisible to port scanners.
+
+- **Unix/macOS**: `~/.crust/crust-api-{port}.sock`
+- **Windows**: Named pipe `\\.\pipe\crust-api`
+
+### Impact
+
+- The `api.port` config key is removed. Use `api.socket_path` (or leave empty for auto-derived path).
+- CLI commands (`crust status`, `crust list-rules`) work automatically via the new transport.
+- The `--api-port` flag is removed.
+- API access via `curl` now requires `--unix-socket`:
+
+```bash
+curl --unix-socket ~/.crust/crust-api-9090.sock http://localhost/api/security/status
+```
+
+### Telemetry DB Concurrency
+
+SQLite access is now serialized with `MaxOpenConns(1)` and `PRAGMA foreign_keys = ON`. The `GetOrCreateTrace` race condition is fixed with `INSERT ... ON CONFLICT`, and `EndLLMSpan` writes are wrapped in a single transaction for atomicity.
+
+---
+
 ## Pre-compilation Validation (v0.x → v0.y)
 
 ### What Changed
@@ -26,8 +52,9 @@ crust lint-rules
 # Lint a specific file
 crust lint-rules /path/to/rules.yaml
 
-# Validate via API
-curl -X POST http://localhost:9090/api/crust/rules/validate \
+# Validate via API (Unix domain socket)
+curl --unix-socket ~/.crust/crust-api-9090.sock \
+  -X POST http://localhost/api/crust/rules/validate \
   -d @rules.yaml
 ```
 

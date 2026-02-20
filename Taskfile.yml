@@ -1,0 +1,149 @@
+version: "3"
+
+vars:
+  VERSION:
+    sh: git describe --tags --always --dirty 2>/dev/null || echo "dev"
+  BINARY_NAME: crust
+  BUILD_DIR: build
+  LDFLAGS: -s -w -X main.Version={{.VERSION}}
+
+tasks:
+  default:
+    desc: Build for current platform
+    cmds:
+      - task: build
+
+  build:
+    desc: Build for current platform
+    cmds:
+      - go build -ldflags "{{.LDFLAGS}}" -o {{.BINARY_NAME}} .
+
+  build-notui:
+    desc: Build without TUI dependencies (plain text only)
+    cmds:
+      - go build -tags notui -ldflags "{{.LDFLAGS}}" -o {{.BINARY_NAME}} .
+
+  test:
+    desc: Run unit tests
+    cmds:
+      - task: test-unit
+
+  test-unit:
+    desc: Run unit tests
+    cmds:
+      - go test -race -v ./...
+
+  test-e2e:
+    desc: Run E2E sandbox tests
+    deps: [test-data]
+    cmds:
+      - go test -race -v -tags=sandbox_e2e -timeout=5m ./internal/sandbox/...
+
+  test-all:
+    desc: Run all tests (unit + E2E)
+    cmds:
+      - task: test-unit
+      - task: test-e2e
+      - echo "All tests complete"
+
+  test-data:
+    desc: Create test data for E2E tests
+    status:
+      - test -d /test-data
+    cmds:
+      - |
+        echo "Creating test data..."
+        sudo mkdir -p /test-data/.ssh /test-data/secrets /test-data/project
+        echo "SECRET=test" | sudo tee /test-data/.env > /dev/null
+        echo "LOCAL=test" | sudo tee /test-data/.env.local > /dev/null
+        echo "fake-rsa-key" | sudo tee /test-data/.ssh/id_rsa > /dev/null
+        echo "fake-ed25519" | sudo tee /test-data/.ssh/id_ed25519 > /dev/null
+        echo '{"key":"secret"}' | sudo tee /test-data/secrets/credentials.json > /dev/null
+        echo "password: test" | sudo tee /test-data/secrets/secrets.yaml > /dev/null
+        echo "package main" | sudo tee /test-data/project/main.go > /dev/null
+        echo "# README" | sudo tee /test-data/project/README.md > /dev/null
+        echo "hello" | sudo tee /test-data/project/data.txt > /dev/null
+        sudo chmod -R 755 /test-data
+        sudo chown -R $USER /test-data 2>/dev/null || true
+        echo "Test data created at /test-data"
+
+  lint:
+    desc: Run Go linter
+    cmds:
+      - golangci-lint run ./...
+
+  vulncheck:
+    desc: Check dependencies for known vulnerabilities
+    cmds:
+      - govulncheck ./...
+
+  semgrep:
+    desc: Run semgrep SAST scan
+    cmds:
+      - semgrep scan --config auto .
+
+  nilaway:
+    desc: Nil safety analysis
+    cmds:
+      - nilaway ./...
+
+
+  install-bpf:
+    desc: Install LSM daemon systemd service (Linux only, uses bakelens-sandbox --lsm-daemon)
+    preconditions:
+      - sh: '[ "$(uname -s)" = "Linux" ]'
+        msg: LSM daemon is Linux-only
+      - sh: command -v bakelens-sandbox
+        msg: bakelens-sandbox must be installed first (task install-sandbox)
+    cmds:
+      - sudo install -d /usr/libexec/crust
+      - sudo cp init/crust-bpf@.service /etc/systemd/system/
+      - sudo systemctl daemon-reload
+      - |
+        echo "Installed LSM daemon systemd service."
+        echo ""
+        echo "Enable for your user:"
+        echo "  sudo systemctl enable --now crust-bpf@$(whoami).service"
+
+  uninstall-bpf:
+    desc: Remove LSM daemon systemd service (Linux only)
+    preconditions:
+      - sh: '[ "$(uname -s)" = "Linux" ]'
+        msg: LSM daemon is Linux-only
+    cmds:
+      - sudo systemctl stop "crust-bpf@$(whoami).service" 2>/dev/null || true
+      - sudo systemctl disable "crust-bpf@$(whoami).service" 2>/dev/null || true
+      - sudo rm -f /etc/systemd/system/crust-bpf@.service
+      - sudo rm -rf "/etc/systemd/system/crust-bpf@$(whoami).service.d"
+      - sudo systemctl daemon-reload
+      - echo "Uninstalled LSM daemon service"
+
+  clean:
+    desc: Clean build artifacts
+    cmds:
+      - rm -f {{.BINARY_NAME}}
+      - rm -rf {{.BUILD_DIR}}
+
+  install:
+    desc: Install to /usr/local/bin
+    deps: [build]
+    cmds:
+      - sudo mv {{.BINARY_NAME}} /usr/local/bin/{{.BINARY_NAME}}
+      - echo "Installed to /usr/local/bin/{{.BINARY_NAME}}"
+
+  release:
+    desc: Build release tarball for current platform
+    deps: [clean]
+    vars:
+      OS:
+        sh: go env GOOS
+      ARCH:
+        sh: go env GOARCH
+      OUTPUT: "{{.BUILD_DIR}}/{{.BINARY_NAME}}-{{.VERSION}}-{{.OS}}-{{.ARCH}}"
+    cmds:
+      - mkdir -p {{.OUTPUT}}
+      - echo "Building {{.OS}}/{{.ARCH}}..."
+      - CGO_ENABLED=1 go build -ldflags "{{.LDFLAGS}}" -o {{.OUTPUT}}/{{.BINARY_NAME}} .
+      - tar -czf {{.OUTPUT}}.tar.gz -C {{.OUTPUT}} {{.BINARY_NAME}}
+      - rm -rf {{.OUTPUT}}
+      - echo "Created{{":"}} {{.OUTPUT}}.tar.gz"

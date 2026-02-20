@@ -57,3 +57,86 @@ func (m BlockMode) IsReplace() bool {
 func (m BlockMode) IsRemove() bool {
 	return m == BlockModeRemove
 }
+
+// LogLevel represents a log verbosity level.
+type LogLevel string
+
+const (
+	LogLevelTrace LogLevel = "trace"
+	LogLevelDebug LogLevel = "debug"
+	LogLevelInfo  LogLevel = "info"
+	LogLevelWarn  LogLevel = "warn"
+	LogLevelError LogLevel = "error"
+)
+
+// Valid returns true if the LogLevel is a known valid value.
+// Empty string is valid (defaults to info).
+func (l LogLevel) Valid() bool {
+	switch l {
+	case LogLevelTrace, LogLevelDebug, LogLevelInfo, LogLevelWarn, LogLevelError, "":
+		return true
+	}
+	return false
+}
+
+// MessageRole represents the role of a message in an LLM conversation.
+type MessageRole string
+
+const (
+	RoleSystem    MessageRole = "system"
+	RoleUser      MessageRole = "user"
+	RoleAssistant MessageRole = "assistant"
+)
+
+// Agent represents a known AI coding agent brand.
+type Agent string
+
+const (
+	AgentClaudeCode Agent = "claude-code"
+	AgentCodex      Agent = "codex"
+	AgentCline      Agent = "cline"
+	AgentCursor     Agent = "cursor"
+	AgentOpenClaw   Agent = "openclaw"
+	AgentOpenCode   Agent = "opencode"
+	AgentWindsurf   Agent = "windsurf"
+	AgentUnknown    Agent = "unknown"
+)
+
+// Valid returns true if the Agent is a known value (not unknown).
+func (a Agent) Valid() bool {
+	switch a {
+	case AgentClaudeCode, AgentCodex, AgentCline, AgentCursor,
+		AgentOpenClaw, AgentOpenCode, AgentWindsurf:
+		return true
+	case AgentUnknown:
+		return false
+	}
+	return false
+}
+
+// String returns the agent name.
+func (a Agent) String() string {
+	return string(a)
+}
+
+// AllAgents returns all known agent brands.
+func AllAgents() []Agent {
+	return []Agent{
+		AgentClaudeCode,
+		AgentCodex,
+		AgentCline,
+		AgentCursor,
+		AgentOpenClaw,
+		AgentOpenCode,
+		AgentWindsurf,
+	}
+}
+
+// ParseAgent converts a string to an Agent, returning AgentUnknown if not recognized.
+func ParseAgent(s string) Agent {
+	a := Agent(s)
+	if a.Valid() {
+		return a
+	}
+	return AgentUnknown
+}

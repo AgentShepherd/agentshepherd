@@ -52,10 +52,7 @@ func createAnthropicResponse(content []anthropicContentBlock) []byte {
 // setupTestRulesDir creates a temporary directory with test rules
 func setupTestRulesDir(t *testing.T, rulesYAML string) string {
 	t.Helper()
-	tempDir, err := os.MkdirTemp("", "test-rules-*")
-	if err != nil {
-		t.Fatalf("Failed to create temp dir: %v", err)
-	}
+	tempDir := t.TempDir()
 
 	if rulesYAML != "" {
 		rulePath := filepath.Join(tempDir, "test-rules.yaml")

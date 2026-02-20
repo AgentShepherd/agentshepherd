@@ -3,6 +3,7 @@ package proxy
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"io"
 	"testing"
 
@@ -49,7 +50,7 @@ data: {"type":"message_stop"}
 	buf := make([]byte, 4096)
 	for {
 		_, err := reader.Read(buf)
-		if err == io.EOF {
+		if errors.Is(err, io.EOF) {
 			break
 		}
 		if err != nil {
@@ -128,7 +129,7 @@ data: {"type":"message_stop"}
 	buf := make([]byte, 4096)
 	for {
 		_, err := reader.Read(buf)
-		if err == io.EOF {
+		if errors.Is(err, io.EOF) {
 			break
 		}
 		if err != nil {
@@ -171,7 +172,7 @@ data: [DONE]
 	buf := make([]byte, 4096)
 	for {
 		_, err := reader.Read(buf)
-		if err == io.EOF {
+		if errors.Is(err, io.EOF) {
 			break
 		}
 		if err != nil {

@@ -40,11 +40,16 @@ DATA_DIR="$HOME/.crust"
 
 # Parse arguments
 VERSION="latest"
+BUILD_TAGS=""
 while [[ $# -gt 0 ]]; do
     case $1 in
         --version|-v)
             VERSION="$2"
             shift 2
+            ;;
+        --no-tui)
+            BUILD_TAGS="notui"
+            shift
             ;;
         --help|-h)
             echo "Crust Installer for OpenClaw"
@@ -53,6 +58,7 @@ while [[ $# -gt 0 ]]; do
             echo ""
             echo "Options:"
             echo "  --version, -v    Install specific version (default: latest)"
+            echo "  --no-tui         Build without TUI dependencies (plain text only)"
             echo "  --help, -h       Show this help"
             exit 0
             ;;
@@ -65,12 +71,11 @@ done
 
 # Print banner
 echo -e "${BOLD}"
-echo "    _                    _   ____  _                _                   _ "
-echo "   / \\   __ _  ___ _ __ | |_/ ___|| |__   ___ _ __ | |__   ___ _ __ __| |"
-echo "  / _ \\ / _\` |/ _ \\ '_ \\| __\\___ \\| '_ \\ / _ \\ '_ \\| '_ \\ / _ \\ '__/ _\` |"
-echo " / ___ \\ (_| |  __/ | | | |_ ___) | | | |  __/ |_) | | | |  __/ | | (_| |"
-echo "/_/   \\_\\__, |\\___|_| |_|\\__|____/|_| |_|\\___| .__/|_| |_|\\___|_|  \\__,_|"
-echo "        |___/                                |_|                         "
+echo "  ____                _   "
+echo " / ___|_ __ _   _ ___| |_ "
+echo "| |   | '__| | | / __| __|"
+echo "| |___| |  | |_| \\__ \\ |_ "
+echo " \\____|_|   \\__,_|___/\\__|"
 echo -e "${NC}"
 echo -e "${BLUE}Secure gateway for AI agents — protecting OpenClaw${NC}"
 echo ""
@@ -99,22 +104,11 @@ detect_arch() {
 
 # Check for required commands
 check_requirements() {
-    if ! command -v curl &> /dev/null && ! command -v wget &> /dev/null; then
-        echo -e "${RED}Error: Missing required command: curl or wget${NC}"
-        echo "Install curl or wget and try again."
-        exit 1
-    fi
-
-    if ! command -v tar &> /dev/null; then
-        echo -e "${RED}Error: Missing required command: tar${NC}"
-        echo "Install tar and try again."
-        exit 1
-    fi
-}
-
-# Check for source build requirements
-check_source_requirements() {
     local missing=()
+
+    if ! command -v curl &> /dev/null && ! command -v wget &> /dev/null; then
+        missing+=("curl or wget")
+    fi
 
     if ! command -v git &> /dev/null; then
         missing+=("git")
@@ -125,7 +119,8 @@ check_source_requirements() {
     fi
 
     if [ ${#missing[@]} -gt 0 ]; then
-        echo -e "${RED}Error: Pre-built binary not available and source build requires: ${missing[*]}${NC}"
+        echo -e "${RED}Error: Missing required commands: ${missing[*]}${NC}"
+        echo "Install the missing tools and try again."
         exit 1
     fi
 }
@@ -142,14 +137,14 @@ download() {
     fi
 }
 
-# Get latest version from GitHub releases API
+# Get latest version from GitHub (uses latest tag or main)
 get_latest_version() {
-    local url="https://api.github.com/repos/${GITHUB_REPO}/releases/latest"
+    local url="https://api.github.com/repos/${GITHUB_REPO}/tags"
     local version
     if command -v curl &> /dev/null; then
-        version=$(curl -fsSL "$url" 2>/dev/null | grep '"tag_name"' | head -1 | sed -E 's/.*"([^"]+)".*/\1/')
+        version=$(curl -fsSL "$url" 2>/dev/null | grep '"name"' | head -1 | sed -E 's/.*"([^"]+)".*/\1/')
     elif command -v wget &> /dev/null; then
-        version=$(wget -qO- "$url" 2>/dev/null | grep '"tag_name"' | head -1 | sed -E 's/.*"([^"]+)".*/\1/')
+        version=$(wget -qO- "$url" 2>/dev/null | grep '"name"' | head -1 | sed -E 's/.*"([^"]+)".*/\1/')
     fi
     echo "${version:-main}"
 }
@@ -194,33 +189,27 @@ main() {
     tmp_dir=$(mktemp -d)
     trap 'rm -rf "$tmp_dir"' EXIT
 
-    # Try downloading pre-built binary from GitHub Releases
-    local archive_name="crust_${VERSION#v}_${os}_${arch}.tar.gz"
-    local download_url="https://github.com/${GITHUB_REPO}/releases/download/${VERSION}/${archive_name}"
-    local installed=false
-
-    echo -e "${YELLOW}Downloading pre-built binary...${NC}"
-    if download "$download_url" "$tmp_dir/$archive_name" 2>/dev/null; then
-        tar -xzf "$tmp_dir/$archive_name" -C "$tmp_dir"
-        if [ -f "$tmp_dir/crust" ]; then
-            installed=true
-        fi
+    echo -e "${YELLOW}Cloning repository...${NC}"
+    if ! git clone --depth 1 --branch "$VERSION" "https://github.com/${GITHUB_REPO}.git" "$tmp_dir/crust" 2>/dev/null; then
+        # Fallback to main if version tag doesn't exist
+        git clone --depth 1 "https://github.com/${GITHUB_REPO}.git" "$tmp_dir/crust"
     fi
 
-    if [ "$installed" = false ]; then
-        echo -e "${YELLOW}Pre-built binary not available, building from source...${NC}"
-        check_source_requirements
-        if ! git clone --depth 1 --branch "$VERSION" "https://github.com/${GITHUB_REPO}.git" "$tmp_dir/crust-src" 2>/dev/null; then
-            git clone --depth 1 "https://github.com/${GITHUB_REPO}.git" "$tmp_dir/crust-src"
-        fi
-        cd "$tmp_dir/crust-src"
-        go build -ldflags "-X main.Version=${VERSION#v}" -o "$tmp_dir/crust" .
+    local tags_flag=""
+    if [ -n "${BUILD_TAGS:-}" ]; then
+        tags_flag="-tags ${BUILD_TAGS}"
+        echo -e "${YELLOW}Building Crust (tags: ${BUILD_TAGS})...${NC}"
+    else
+        echo -e "${YELLOW}Building Crust...${NC}"
     fi
+    cd "$tmp_dir/crust"
+    # shellcheck disable=SC2086
+    go build ${tags_flag} -ldflags "-X main.Version=${VERSION#v}" -o crust .
 
     # Install binary
     echo -e "${YELLOW}Installing to ${INSTALL_DIR}...${NC}"
     mkdir -p "$INSTALL_DIR"
-    mv "$tmp_dir/crust" "$INSTALL_DIR/$BINARY_NAME"
+    mv "$tmp_dir/crust/crust" "$INSTALL_DIR/$BINARY_NAME"
     chmod +x "$INSTALL_DIR/$BINARY_NAME"
 
     # Create data directory

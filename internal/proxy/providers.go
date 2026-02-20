@@ -1,6 +1,9 @@
 package proxy
 
-import "strings"
+import (
+	"slices"
+	"strings"
+)
 
 // builtinProviders maps model keyword to provider base URL.
 // Matching logic: slash-split first (e.g. "openai/gpt-4o" → "openai"),
@@ -21,6 +24,7 @@ var builtinProviders = map[string]string{
 	"gemini":       "https://generativelanguage.googleapis.com",
 	"mistral":      "https://api.mistral.ai",
 	"groq":         "https://api.groq.com/openai",
+	"llama":        "https://api.groq.com/openai",
 	"minimax":      "https://api.minimax.io/anthropic",
 	"hf:":          "https://api.synthetic.new/anthropic", // HuggingFace
 }
@@ -50,8 +54,7 @@ func ResolveProvider(model string, userProviders map[string]string) (baseURL str
 	}
 
 	// Step 2: slash-split (e.g. "openai/gpt-4o" → vendor "openai")
-	if idx := strings.IndexByte(model, '/'); idx > 0 {
-		vendor := model[:idx]
+	if vendor, _, ok := strings.Cut(model, "/"); ok && vendor != "" {
 		if url, found := lookupExact(vendor, userProviders); found {
 			return url, true
 		}
@@ -95,11 +98,8 @@ func lookupBestMatch(model string, userProviders map[string]string) (string, boo
 			}
 			// Segment match (e.g. "codex" is a segment of "gpt-5.3-codex")
 			if !matched {
-				for _, seg := range segments {
-					if seg == key {
-						matched = true
-						break
-					}
+				if slices.Contains(segments, key) {
+					matched = true
 				}
 			}
 			if matched && len(key) > bestLen {

@@ -1,11 +1,13 @@
 package proxy
 
 import (
-	"bytes"
 	"encoding/json"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/BakeLens/crust/internal/rules"
 )
 
 func TestBufferedSSEWriter_AnthropicToolUse(t *testing.T) {
@@ -34,11 +36,6 @@ func TestBufferedSSEWriter_AnthropicToolUse(t *testing.T) {
 		if err != nil {
 			t.Fatalf("BufferEvent failed: %v", err)
 		}
-	}
-
-	// Check that tool use was detected
-	if !buffer.HasToolUse() {
-		t.Error("Expected HasToolUse() to be true")
 	}
 
 	// Check tool calls were extracted
@@ -87,10 +84,6 @@ func TestBufferedSSEWriter_OpenAIToolUse(t *testing.T) {
 		}
 	}
 
-	if !buffer.HasToolUse() {
-		t.Error("Expected HasToolUse() to be true")
-	}
-
 	toolCalls := buffer.GetToolCalls()
 	if len(toolCalls) != 1 {
 		t.Fatalf("Expected 1 tool call, got %d", len(toolCalls))
@@ -124,10 +117,10 @@ func TestBufferedSSEWriter_FlushAll(t *testing.T) {
 
 	// Check output
 	body := w.Body.String()
-	if !bytes.Contains([]byte(body), []byte("message_start")) {
+	if !strings.Contains(body, "message_start") {
 		t.Error("Expected output to contain message_start")
 	}
-	if !bytes.Contains([]byte(body), []byte("message_stop")) {
+	if !strings.Contains(body, "message_stop") {
 		t.Error("Expected output to contain message_stop")
 	}
 }
@@ -160,8 +153,86 @@ func TestBufferedSSEWriter_Timeout(t *testing.T) {
 	if err == nil {
 		t.Error("Expected error when buffer timed out")
 	}
+}
 
-	if !buffer.IsTimedOut() {
-		t.Error("Expected IsTimedOut() to be true")
+func TestBuildBlockedReplacement_WithMessage(t *testing.T) {
+	result := buildBlockedReplacement("Bash", rules.MatchResult{
+		Message: "Dangerous command",
+	})
+
+	if result["command"] == "" {
+		t.Fatal("command should not be empty")
+	}
+	if !strings.Contains(result["command"], "Bash") || !strings.Contains(result["command"], "Dangerous command") {
+		t.Errorf("command = %q, want blocked message with tool name and reason", result["command"])
+	}
+	if !strings.Contains(result["command"], blockedToolSuffix) {
+		t.Error("command should contain blockedToolSuffix")
+	}
+	if result["description"] != "Security: blocked tool call" {
+		t.Errorf("description = %q, want %q", result["description"], "Security: blocked tool call")
+	}
+}
+
+func TestBuildBlockedReplacement_WithoutMessage(t *testing.T) {
+	result := buildBlockedReplacement("Read", rules.MatchResult{})
+
+	if !strings.Contains(result["command"], "Read") || !strings.Contains(result["command"], "blocked") {
+		t.Errorf("command = %q, want blocked message with tool name", result["command"])
+	}
+	if !strings.Contains(result["command"], blockedToolSuffix) {
+		t.Error("command should contain blockedToolSuffix")
+	}
+}
+
+func TestBuildBlockedReplacement_ShellQuoting(t *testing.T) {
+	result := buildBlockedReplacement("Bash", rules.MatchResult{
+		Message: "Can't do that",
+	})
+
+	cmd := result["command"]
+	// Single quote in "Can't" should be escaped for shell safety
+	if !strings.Contains(cmd, `'\''`) {
+		t.Errorf("single quote not escaped in command: %q", cmd)
+	}
+}
+
+func TestBufferedSSEWriter_ReplaceModeNoShellTool_FallsBackToRemove(t *testing.T) {
+	w := httptest.NewRecorder()
+	// Create buffer with NO shell tool (only non-shell tools)
+	tools := []AvailableTool{
+		{Name: "Read", InputSchema: json.RawMessage(`{"type":"object"}`)},
+	}
+	buffer := NewBufferedSSEWriter(w, 100, 30*time.Second,
+		"trace-1", "session-1", "claude-3", "anthropic", tools)
+
+	// Buffer Anthropic events with a tool_use
+	events := []struct {
+		eventType string
+		data      string
+	}{
+		{"message_start", `{"type":"message_start","message":{"id":"msg_1","type":"message","role":"assistant","content":[],"model":"claude-3","usage":{"input_tokens":10,"output_tokens":0}}}`},
+		{"content_block_start", `{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_1","name":"Write","input":{}}}`},
+		{"content_block_delta", `{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"path\":\"/etc/passwd\"}"}}`},
+		{"content_block_stop", `{"type":"content_block_stop","index":0}`},
+		{"message_delta", `{"type":"message_delta","delta":{"stop_reason":"tool_use"},"usage":{"output_tokens":10}}`},
+		{"message_stop", `{"type":"message_stop"}`},
+	}
+
+	for _, evt := range events {
+		raw := []byte("event: " + evt.eventType + "\ndata: " + evt.data + "\n\n")
+		if err := buffer.BufferEvent(evt.eventType, []byte(evt.data), raw); err != nil {
+			t.Fatalf("BufferEvent failed: %v", err)
+		}
+	}
+
+	// FlushAll to verify no panic with replace mode and no shell tool
+	if err := buffer.FlushAll(); err != nil {
+		t.Fatalf("FlushAll failed: %v", err)
+	}
+
+	body := w.Body.String()
+	if !strings.Contains(body, "message_start") {
+		t.Error("message_start event should be present")
 	}
 }

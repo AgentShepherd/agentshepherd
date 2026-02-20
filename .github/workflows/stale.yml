@@ -1,0 +1,29 @@
+name: Stale Issues
+
+on:
+  schedule:
+    - cron: "0 9 * * 1" # Weekly on Monday 09:00 UTC
+
+permissions:
+  issues: write
+
+jobs:
+  stale:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/stale@v9
+        with:
+          stale-issue-message: >
+            This issue has been automatically marked as stale because it has not had
+            activity in the last 30 days. It will be closed in 7 days if no further
+            activity occurs. If this issue is still relevant, please leave a comment.
+          close-issue-message: >
+            This issue was closed because it has been stale for 37 days with no activity.
+            Feel free to reopen if still relevant.
+          days-before-issue-stale: 30
+          days-before-issue-close: 7
+          days-before-pr-stale: -1
+          days-before-pr-close: -1
+          stale-issue-label: stale
+          close-issue-reason: not_planned
+          exempt-issue-labels: "security,pinned,confirmed,priority/critical,priority/high"

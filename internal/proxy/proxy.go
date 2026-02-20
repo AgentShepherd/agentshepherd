@@ -14,6 +14,8 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"path"
+	"strconv"
 	"strings"
 	"time"
 
@@ -27,6 +29,8 @@ import (
 )
 
 var log = logger.New("proxy")
+
+const encodingGzip = "gzip"
 
 // RequestBody represents minimal structure to extract model and messages
 type RequestBody struct {
@@ -47,9 +51,8 @@ type ToolDefinition struct {
 
 // RequestMessage represents a message in the request
 type RequestMessage struct {
-	Role      string            `json:"role"`
-	Content   json.RawMessage   `json:"content"`
-	ToolCalls []RequestToolCall `json:"tool_calls,omitempty"` // Tool calls in message history
+	Role    types.MessageRole `json:"role"`
+	Content json.RawMessage   `json:"content"`
 }
 
 // ContentString returns the message content as a plain string.
@@ -66,16 +69,6 @@ func (m RequestMessage) ContentString() string {
 	}
 	// Fallback: return raw JSON (for array content parts, etc.)
 	return string(m.Content)
-}
-
-// RequestToolCall represents a tool call in message history (OpenAI format)
-type RequestToolCall struct {
-	ID       string `json:"id"`
-	Type     string `json:"type"`
-	Function struct {
-		Name      string `json:"name"`
-		Arguments string `json:"arguments"`
-	} `json:"function"`
 }
 
 // UsageResponse represents usage info from API responses
@@ -99,10 +92,11 @@ type Proxy struct {
 	apiKey        string
 	client        *http.Client
 	userProviders map[string]string // user-defined keyword → base URL
+	autoMode      bool              // true = resolve provider from model name; false = always use upstreamURL
 }
 
 // NewProxy creates a new proxy
-func NewProxy(upstreamURL string, apiKey string, timeout time.Duration, userProviders map[string]string) (*Proxy, error) {
+func NewProxy(upstreamURL string, apiKey string, timeout time.Duration, userProviders map[string]string, autoMode bool) (*Proxy, error) {
 	u, err := url.Parse(upstreamURL)
 	if err != nil {
 		return nil, err
@@ -112,14 +106,22 @@ func NewProxy(upstreamURL string, apiKey string, timeout time.Duration, userProv
 		upstreamURL:   u,
 		apiKey:        apiKey,
 		userProviders: userProviders,
+		autoMode:      autoMode,
 		client: &http.Client{
-			Timeout: timeout,
-			// SECURITY: Enforce TLS 1.2+ for upstream connections
+			// Do NOT set http.Client.Timeout — it covers the entire response
+			// lifecycle including body reads, which kills long-running SSE
+			// streams. Instead, use Transport-level timeouts that only apply
+			// to connection setup and waiting for the first response byte.
 			Transport: &http.Transport{
+				Proxy: http.ProxyFromEnvironment, // Respect system proxy (HTTP_PROXY, HTTPS_PROXY, etc.)
+				// SECURITY: Enforce TLS 1.2+ for upstream connections
 				TLSClientConfig: &tls.Config{
 					MinVersion: tls.VersionTLS12,
 				},
-				DisableCompression: true, // Preserve client's original Accept-Encoding
+				ForceAttemptHTTP2:     true, // Required: custom TLSClientConfig disables auto-HTTP/2
+				DisableCompression:    true, // Preserve client's original Accept-Encoding
+				TLSHandshakeTimeout:   10 * time.Second,
+				ResponseHeaderTimeout: timeout, // Time to wait for server's first response byte
 			},
 			// Don't follow redirects automatically
 			CheckRedirect: func(req *http.Request, via []*http.Request) error {
@@ -129,12 +131,26 @@ func NewProxy(upstreamURL string, apiKey string, timeout time.Duration, userProv
 	}, nil
 }
 
+// doRequest performs an HTTP request and guarantees a non-nil *http.Response on success.
+func (p *Proxy) doRequest(req *http.Request) (*http.Response, error) {
+	resp, err := p.client.Do(req) //nolint:gosec // proxy by design forwards client-controlled URLs to upstream providers
+	if err != nil {
+		return nil, err
+	}
+	if resp == nil {
+		return nil, errors.New("nil response from upstream")
+	}
+	return resp, nil
+}
+
 // Header length limits for security
 const (
-	maxTraceIDLen      = 128
-	maxSpanNameLen     = 256
-	maxSpanKindLen     = 32
-	maxRequestBodySize = 100 * 1024 * 1024 // 100MB - generous limit for LLM API requests
+	maxTraceIDLen       = 128
+	maxSpanNameLen      = 256
+	maxSpanKindLen      = 32
+	maxRequestBodySize  = 100 * 1024 * 1024 // 100MB - generous limit for LLM API requests
+	maxResponseBodySize = 100 * 1024 * 1024 // 100MB - generous limit for LLM API responses
+	maxErrorBodySize    = 1 * 1024 * 1024   // 1MB - error responses should be small
 )
 
 // sanitizeHeader truncates and sanitizes header values
@@ -151,13 +167,13 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// Extract and sanitize telemetry headers
 	// SECURITY: Limit header lengths to prevent resource exhaustion
-	traceID := sanitizeHeader(r.Header.Get("X-Trace-ID"), maxTraceIDLen)
+	traceID := sanitizeHeader(r.Header.Get("X-Trace-Id"), maxTraceIDLen)
 	spanName := sanitizeHeader(r.Header.Get("X-Span-Name"), maxSpanNameLen)
 	spanKind := sanitizeHeader(r.Header.Get("X-Span-Kind"), maxSpanKindLen)
 
 	// Fallback to W3C traceparent
 	if traceID == "" {
-		if traceparent := r.Header.Get("traceparent"); traceparent != "" {
+		if traceparent := r.Header.Get("Traceparent"); traceparent != "" {
 			// W3C traceparent format: version-trace_id-parent_id-flags
 			// Validate format before parsing
 			if len(traceparent) <= 256 {
@@ -183,7 +199,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Failed to read request body", http.StatusBadRequest)
 		return
 	}
-	r.Body.Close()
+	_ = r.Body.Close()
 
 	// Decompress request body for local parsing only (model extraction, security scanning).
 	// The original compressed body is forwarded to upstream untouched for full transparency.
@@ -193,25 +209,37 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if contentEncoding == "" {
 			// Auto-detect by magic bytes
 			if bodyBytes[0] == 0x1f && bodyBytes[1] == 0x8b {
-				contentEncoding = "gzip"
+				contentEncoding = encodingGzip
 			} else if bodyBytes[0] == 0x28 && bodyBytes[1] == 0xb5 && bodyBytes[2] == 0x2f && bodyBytes[3] == 0xfd {
 				contentEncoding = "zstd"
 			}
 		}
-		if contentEncoding == "gzip" {
+		switch contentEncoding {
+		case encodingGzip:
 			if gr, err := gzip.NewReader(bytes.NewReader(bodyBytes)); err == nil {
 				if decompressed, err := io.ReadAll(gr); err == nil {
 					parseBytes = decompressed
 				}
-				gr.Close()
+				if err := gr.Close(); err != nil {
+					log.Debug("Failed to close gzip reader: %v", err)
+				}
 			}
-		} else if contentEncoding == "zstd" {
+		case "zstd":
 			if decoder, err := zstd.NewReader(nil); err == nil {
 				if decompressed, err := decoder.DecodeAll(bodyBytes, nil); err == nil {
 					parseBytes = decompressed
 				}
 				decoder.Close()
 			}
+		}
+
+		// Fail-closed: reject requests with unsupported Content-Encoding
+		// that we couldn't decompress (prevents bypassing security scanning).
+		// Only reject when a Content-Encoding header was present but we couldn't decode it.
+		if contentEncoding != "" && bytes.Equal(parseBytes, bodyBytes) {
+			log.Warn("Unsupported Content-Encoding %q — rejecting request", contentEncoding)
+			http.Error(w, "Unsupported Content-Encoding: "+contentEncoding, http.StatusUnsupportedMediaType)
+			return
 		}
 	}
 
@@ -234,57 +262,32 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Determine API type from path
 	apiType := detectAPIType(r.URL.Path)
 
-	// [Layer0] Scan tool_calls in request message history
+	// [Layer0] Scan tool_calls in request history (format-agnostic).
+	// Walks raw JSON to find tool calls across OpenAI Chat, Anthropic Messages,
+	// and OpenAI Responses formats without format-specific struct parsing.
 	interceptor := security.GetGlobalInterceptor()
 	if interceptor != nil && interceptor.IsEnabled() && interceptor.GetEngine() != nil {
-		// OpenAI Chat Completions format: tool_calls in messages
-		for _, msg := range reqBody.Messages {
-			for _, tc := range msg.ToolCalls {
-				result := interceptor.GetEngine().Evaluate(rules.ToolCall{
-					Name:      tc.Function.Name,
-					Arguments: json.RawMessage(tc.Function.Arguments),
+		for _, tc := range extractToolCallsFromJSON(parseBytes) {
+			result := interceptor.GetEngine().Evaluate(tc)
+			if result.Matched && result.Action == rules.ActionBlock {
+				log.Warn("[Layer0] Request blocked: %s in history (rule: %s)", tc.Name, result.RuleName)
+				security.RecordEvent(security.Event{
+					Layer:      security.LayerL0,
+					TraceID:    traceID,
+					SessionID:  sessionID,
+					ToolName:   tc.Name,
+					Arguments:  tc.Arguments,
+					APIType:    apiType,
+					Model:      reqBody.Model,
+					WasBlocked: true,
+					RuleName:   result.RuleName,
 				})
-				if result.Matched && result.Action == rules.ActionBlock {
-					log.Warn("[Layer0] Request blocked: %s in history (rule: %s)", tc.Function.Name, result.RuleName)
-					security.RecordLayer0Block()
-					msg := fmt.Sprintf("[Crust] Request blocked: %s", result.Message)
-					if result.Message == "" {
-						msg = fmt.Sprintf("[Crust] Request blocked by rule: %s", result.RuleName)
-					}
-					http.Error(w, msg, http.StatusForbidden)
-					return
+				msg := "[Crust] Request blocked: " + result.Message
+				if result.Message == "" {
+					msg = "[Crust] Request blocked by rule: " + result.RuleName
 				}
-			}
-		}
-
-		// OpenAI Responses API format: function_call items in input array
-		if apiType.IsOpenAIResponses() && len(reqBody.Input) > 0 {
-			var inputItems []struct {
-				Type      string `json:"type"`
-				CallID    string `json:"call_id"`
-				Name      string `json:"name"`
-				Arguments string `json:"arguments"`
-			}
-			if json.Unmarshal(reqBody.Input, &inputItems) == nil {
-				for _, item := range inputItems {
-					if item.Type != "function_call" {
-						continue
-					}
-					result := interceptor.GetEngine().Evaluate(rules.ToolCall{
-						Name:      item.Name,
-						Arguments: json.RawMessage(item.Arguments),
-					})
-					if result.Matched && result.Action == rules.ActionBlock {
-						log.Warn("[Layer0] Request blocked: %s in input (rule: %s)", item.Name, result.RuleName)
-						security.RecordLayer0Block()
-						msg := fmt.Sprintf("[Crust] Request blocked: %s", result.Message)
-						if result.Message == "" {
-							msg = fmt.Sprintf("[Crust] Request blocked by rule: %s", result.RuleName)
-						}
-						http.Error(w, msg, http.StatusForbidden)
-						return
-					}
-				}
+				http.Error(w, msg, http.StatusForbidden)
+				return
 			}
 		}
 	}
@@ -301,37 +304,11 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Build upstream URL
-	upstreamURL := *p.upstreamURL
-
-	reqPath := r.URL.Path
-
-	// Auto mode: resolve provider from model name
-	if resolvedBaseURL, ok := ResolveProvider(reqBody.Model, p.userProviders); ok {
-		resolvedURL, parseErr := url.Parse(resolvedBaseURL)
-		if parseErr == nil {
-			// Normalize /responses → /v1/responses only when the provider
-			// has no meaningful path (e.g. "https://api.openai.com").
-			// Providers with a path (e.g. "chatgpt.com/backend-api/codex")
-			// get the request path appended directly.
-			if reqPath == "/responses" && (resolvedURL.Path == "" || resolvedURL.Path == "/") {
-				reqPath = "/v1/responses"
-			}
-			upstreamURL.Scheme = resolvedURL.Scheme
-			upstreamURL.Host = resolvedURL.Host
-			upstreamURL.Path = singleJoiningSlash(resolvedURL.Path, reqPath)
-		} else {
-			// Parse error on resolved URL — fall back to configured upstream
-			if reqPath == "/responses" {
-				reqPath = "/v1/responses"
-			}
-			upstreamURL.Path = singleJoiningSlash(upstreamURL.Path, reqPath)
-		}
-	} else {
-		// Fallback: configured upstream (existing behavior)
-		if reqPath == "/responses" {
-			reqPath = "/v1/responses"
-		}
-		upstreamURL.Path = singleJoiningSlash(upstreamURL.Path, reqPath)
+	upstreamURL, err := p.buildUpstreamURL(r.URL.Path, reqBody.Model)
+	if err != nil {
+		log.Warn("Failed to build upstream URL: %v", err)
+		http.Error(w, "invalid upstream URL", http.StatusBadGateway)
+		return
 	}
 	upstreamURL.RawQuery = r.URL.RawQuery
 
@@ -353,15 +330,13 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	upstreamReq.Body = io.NopCloser(bytes.NewReader(bodyBytes))
 	upstreamReq.ContentLength = int64(len(bodyBytes))
 
-	// Remove hop-by-hop headers
-	for k := range HopByHopHeaders {
-		upstreamReq.Header.Del(k)
-	}
+	// Remove hop-by-hop headers (including Connection-listed per RFC 7230 §6.1)
+	stripHopByHopHeaders(upstreamReq.Header)
 
 	// Auth passthrough: only inject gateway key if client didn't provide auth
 	if !hasClientAuth(upstreamReq.Header) && p.apiKey != "" {
 		if apiType.IsAnthropic() {
-			upstreamReq.Header.Set("x-api-key", p.apiKey)
+			upstreamReq.Header.Set("X-Api-Key", p.apiKey)
 		} else {
 			upstreamReq.Header.Set("Authorization", "Bearer "+p.apiKey)
 		}
@@ -392,7 +367,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Non-streaming: use http.Client directly
-	resp, err := p.client.Do(upstreamReq)
+	resp, err := p.doRequest(upstreamReq)
 	if err != nil {
 		log.Error("Upstream request failed: %v", err)
 
@@ -410,7 +385,6 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Bad Gateway", http.StatusBadGateway)
 		return
 	}
-
 	defer resp.Body.Close()
 
 	// Read response body
@@ -440,9 +414,13 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	} else {
 		var err error
-		responseBody, err = io.ReadAll(resp.Body)
+		responseBody, err = io.ReadAll(io.LimitReader(resp.Body, maxErrorBodySize+1))
 		if err != nil {
 			log.Warn("Failed to read error response body: %v", err)
+		}
+		if int64(len(responseBody)) > maxErrorBodySize {
+			log.Warn("Error response body too large, truncating to %dKB", maxErrorBodySize/1024)
+			responseBody = responseBody[:maxErrorBodySize]
 		}
 	}
 
@@ -470,19 +448,22 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
-	// Copy response headers
+	// Copy response headers and fix Content-Length before writing the status
+	// (headers cannot be modified after WriteHeader is called).
 	copyHeaders(w.Header(), resp.Header)
+	w.Header().Set("Content-Length", strconv.Itoa(len(responseBody)))
 	w.WriteHeader(resp.StatusCode)
-	// Update Content-Length if response was modified
-	w.Header().Set("Content-Length", fmt.Sprintf("%d", len(responseBody)))
-	_, _ = w.Write(responseBody)
+	_, _ = w.Write(responseBody) //nolint:gosec // binary proxy relay, not HTML; nosemgrep: go.lang.security.audit.xss.no-direct-write-to-responsewriter.no-direct-write-to-responsewriter
 }
 
 // handleStreamingRequest handles SSE streaming requests
 func (p *Proxy) handleStreamingRequest(ctx *RequestContext) {
-	// Check if buffered streaming is enabled
+	// Auto-buffer: only buffer when security buffering is enabled AND the
+	// request carries tool definitions. Pure text-generation streams can
+	// never produce tool calls, so buffering them adds latency for zero
+	// security benefit.
 	secCfg := security.GetInterceptionConfig()
-	if secCfg.BufferStreaming {
+	if secCfg.BufferStreaming && len(ctx.Tools) > 0 {
 		p.handleBufferedStreamingRequest(ctx, secCfg)
 		return
 	}
@@ -492,13 +473,13 @@ func (p *Proxy) handleStreamingRequest(ctx *RequestContext) {
 		Rewrite: func(pr *httputil.ProxyRequest) {
 			pr.Out.URL = ctx.UpstreamReq.URL
 			pr.Out.Host = ctx.UpstreamReq.URL.Host
-			copyHeaders(pr.Out.Header, ctx.Request.Header)
+			copyHeaders(pr.Out.Header, ctx.UpstreamReq.Header)
 			pr.Out.Body = io.NopCloser(bytes.NewReader(ctx.BodyBytes))
 			pr.Out.ContentLength = int64(len(ctx.BodyBytes))
 			// Auth passthrough: only inject gateway key if client didn't provide auth
 			if !hasClientAuth(pr.Out.Header) && p.apiKey != "" {
 				if ctx.APIType.IsAnthropic() {
-					pr.Out.Header.Set("x-api-key", p.apiKey)
+					pr.Out.Header.Set("X-Api-Key", p.apiKey)
 				} else {
 					pr.Out.Header.Set("Authorization", "Bearer "+p.apiKey)
 				}
@@ -552,13 +533,13 @@ func (p *Proxy) handleStreamingRequest(ctx *RequestContext) {
 		FlushInterval: -1,
 	}
 
-	proxy.ServeHTTP(ctx.Writer, ctx.Request)
+	proxy.ServeHTTP(ctx.Writer, ctx.Request) //nolint:gosec // reverse proxy by design forwards client requests
 }
 
 // handleBufferedStreamingRequest handles SSE streaming with response buffering for security evaluation
 func (p *Proxy) handleBufferedStreamingRequest(ctx *RequestContext, secCfg security.InterceptionConfig) {
 	// Make the upstream request
-	resp, err := p.client.Do(ctx.UpstreamReq)
+	resp, err := p.doRequest(ctx.UpstreamReq)
 	if err != nil {
 		log.Error("Upstream request failed: %v", err)
 		if ctx.Provider != nil && ctx.Provider.IsEnabled() && ctx.SpanCtx != nil {
@@ -599,10 +580,11 @@ func (p *Proxy) handleBufferedStreamingRequest(ctx *RequestContext, secCfg secur
 			InputSchema: schema,
 		})
 	}
-	buffer := NewBufferedSSEWriter(ctx.Writer, secCfg.MaxBufferSize, timeout, ctx.TraceID, ctx.SessionID, ctx.Model, ctx.APIType, availableTools)
+	buffer := NewBufferedSSEWriter(ctx.Writer, secCfg.MaxBufferEvents, timeout, ctx.TraceID, ctx.SessionID, ctx.Model, ctx.APIType, availableTools)
 
-	// Copy response headers before buffering
+	// Copy response headers and status code before buffering
 	copyHeaders(ctx.Writer.Header(), resp.Header)
+	ctx.Writer.WriteHeader(resp.StatusCode)
 
 	// Get interceptor early to avoid goto issues
 	interceptor := security.GetGlobalInterceptor()
@@ -637,10 +619,11 @@ readLoop:
 						if flushErr := buffer.FlushAll(); flushErr != nil {
 							log.Warn("FlushAll error during recovery: %v", flushErr)
 						}
-						// Write remaining buffered data (ignore errors - client may have disconnected)
-						_, _ = ctx.Writer.Write(data[idx+4:]) //nolint:errcheck // best effort
+						// Write the event that caused the overflow, then remaining data
+						_, _ = ctx.Writer.Write(raw)
+						_, _ = ctx.Writer.Write(data[idx+4:])
 						// Stream rest directly
-						_, _ = io.Copy(ctx.Writer, resp.Body) //nolint:errcheck // best effort
+						_, _ = io.Copy(ctx.Writer, resp.Body)
 						bufferOverflowed = true
 						break readLoop
 					}
@@ -657,8 +640,10 @@ readLoop:
 					if flushErr := buffer.FlushAll(); flushErr != nil {
 						log.Warn("FlushAll error during recovery: %v", flushErr)
 					}
-					_, _ = ctx.Writer.Write(data[idx+2:]) //nolint:errcheck // best effort
-					_, _ = io.Copy(ctx.Writer, resp.Body) //nolint:errcheck // best effort
+					// Write the event that caused the overflow, then remaining data
+					_, _ = ctx.Writer.Write(raw)
+					_, _ = ctx.Writer.Write(data[idx+2:])
+					_, _ = io.Copy(ctx.Writer, resp.Body)
 					bufferOverflowed = true
 					break readLoop
 				}
@@ -727,24 +712,6 @@ readLoop:
 	}
 }
 
-// parseSSEEventData extracts event type and JSON data from SSE event
-func parseSSEEventData(event []byte) (eventType string, data []byte) {
-	lines := bytes.Split(event, []byte("\n"))
-
-	for _, line := range lines {
-		line = bytes.TrimSuffix(line, []byte("\r"))
-
-		if bytes.HasPrefix(line, []byte("event:")) {
-			eventType = string(bytes.TrimSpace(bytes.TrimPrefix(line, []byte("event:"))))
-		} else if bytes.HasPrefix(line, []byte("data:")) {
-			data = bytes.TrimPrefix(line, []byte("data:"))
-			data = bytes.TrimPrefix(data, []byte(" "))
-		}
-	}
-
-	return eventType, data
-}
-
 // detectAPIType detects the API type from the request path
 func detectAPIType(path string) types.APIType {
 	if strings.Contains(path, "/anthropic") || strings.Contains(path, "/v1/messages") {
@@ -756,62 +723,108 @@ func detectAPIType(path string) types.APIType {
 	return types.APITypeOpenAICompletion
 }
 
-// copyHeaders copies headers, excluding hop-by-hop headers and Host
-func copyHeaders(dst, src http.Header) {
-	for key, values := range src {
-		if HopByHopHeaders[key] {
-			continue
-		}
-		for _, value := range values {
-			dst.Add(key, value)
-		}
-	}
-}
-
 // hasClientAuth returns true if the request already carries an auth header.
 func hasClientAuth(h http.Header) bool {
-	return h.Get("Authorization") != "" || h.Get("x-api-key") != ""
+	return h.Get("Authorization") != "" || h.Get("X-Api-Key") != ""
 }
 
-func singleJoiningSlash(a, b string) string {
-	aslash := strings.HasSuffix(a, "/")
-	bslash := strings.HasPrefix(b, "/")
-	switch {
-	case aslash && bslash:
-		return a + b[1:]
-	case !aslash && !bslash:
-		return a + "/" + b
+// buildUpstreamURL constructs the target URL for a proxy request.
+// In auto mode it resolves the provider from the model name; in endpoint mode
+// it always uses the configured upstream URL.
+func (p *Proxy) buildUpstreamURL(reqPath, model string) (url.URL, error) {
+	u := *p.upstreamURL
+
+	if p.autoMode {
+		// Auto mode: resolve provider from model name
+		if resolvedBaseURL, ok := ResolveProvider(model, p.userProviders); ok {
+			resolvedURL, err := url.Parse(resolvedBaseURL)
+			if err != nil {
+				return url.URL{}, fmt.Errorf("invalid provider URL %q: %w", resolvedBaseURL, err)
+			}
+			// Normalize /responses → /v1/responses only when the provider
+			// has no meaningful path (e.g. "https://api.openai.com").
+			// Providers with a path (e.g. "chatgpt.com/backend-api/codex")
+			// get the request path appended directly.
+			if reqPath == "/responses" && (resolvedURL.Path == "" || resolvedURL.Path == "/") {
+				reqPath = "/v1/responses"
+			}
+			u.Scheme = resolvedURL.Scheme
+			u.Host = resolvedURL.Host
+			// path.Join concatenates provider path + request path and
+			// cleans the result (collapses double slashes, resolves dots).
+			u.Path = path.Join(resolvedURL.Path, reqPath)
+			return u, nil
+		}
 	}
-	return a + b
+
+	// Endpoint mode (or auto mode with unrecognized model):
+	// Use ResolveReference which keeps the base scheme+host and replaces
+	// the path with reqPath — no manual path dedup needed.
+	if reqPath == "/responses" {
+		reqPath = "/v1/responses"
+	}
+	ref := &url.URL{Path: reqPath}
+	resolved := u.ResolveReference(ref)
+	return *resolved, nil
 }
 
 // extractUsageAndBody extracts token usage and body from response
 func extractUsageAndBody(resp *http.Response, apiType types.APIType) (inputTokens, outputTokens int64, bodyBytes []byte) {
+	if resp == nil {
+		return 0, 0, nil
+	}
 	contentType := resp.Header.Get("Content-Type")
 	if !strings.Contains(contentType, "application/json") {
 		var err error
-		bodyBytes, err = io.ReadAll(resp.Body)
+		bodyBytes, err = io.ReadAll(io.LimitReader(resp.Body, maxResponseBodySize+1))
 		if err != nil {
 			log.Debug("Failed to read non-JSON response body: %v", err)
+		}
+		if int64(len(bodyBytes)) > maxResponseBodySize {
+			log.Warn("Non-JSON response body too large (limit: %dMB)", maxResponseBodySize/(1024*1024))
+			bodyBytes = nil
 		}
 		resp.Body = io.NopCloser(bytes.NewReader(bodyBytes))
 		return 0, 0, bodyBytes
 	}
 
-	var bodyReader io.Reader = resp.Body
-
-	if resp.Header.Get("Content-Encoding") == "gzip" {
-		gzReader, err := gzip.NewReader(resp.Body)
-		if err != nil {
-			return 0, 0, nil
-		}
-		defer gzReader.Close()
-		bodyReader = gzReader
+	// Read the entire raw body first so we have it available as fallback on gzip error
+	rawBytes, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBodySize+1))
+	if err != nil {
+		log.Debug("Failed to read response body: %v", err)
+		resp.Body = io.NopCloser(bytes.NewReader(nil))
+		return 0, 0, nil
+	}
+	if int64(len(rawBytes)) > maxResponseBodySize {
+		log.Warn("Response body too large (limit: %dMB)", maxResponseBodySize/(1024*1024))
+		resp.Body = io.NopCloser(bytes.NewReader(nil))
+		return 0, 0, nil
 	}
 
-	bodyBytes, err := io.ReadAll(bodyReader)
-	if err != nil {
-		return 0, 0, nil
+	bodyBytes = rawBytes
+
+	if resp.Header.Get("Content-Encoding") == encodingGzip {
+		gzReader, err := gzip.NewReader(bytes.NewReader(rawBytes))
+		if err != nil {
+			log.Debug("Failed to create gzip reader, using raw body: %v", err)
+			resp.Header.Del("Content-Encoding")
+			// Fall through with bodyBytes = rawBytes
+		} else {
+			decompressed, readErr := io.ReadAll(io.LimitReader(gzReader, maxResponseBodySize+1))
+			gzReader.Close()
+			if readErr != nil {
+				log.Debug("Failed to decompress gzip body, using raw body: %v", readErr)
+				resp.Header.Del("Content-Encoding")
+				// Fall through with bodyBytes = rawBytes
+			} else if int64(len(decompressed)) > maxResponseBodySize {
+				log.Warn("Decompressed response body too large (limit: %dMB)", maxResponseBodySize/(1024*1024))
+				resp.Header.Del("Content-Encoding")
+				// Fall through with bodyBytes = rawBytes
+			} else {
+				bodyBytes = decompressed
+				resp.Header.Del("Content-Encoding")
+			}
+		}
 	}
 
 	var respData ResponseWithUsage
@@ -831,9 +844,6 @@ func extractUsageAndBody(resp *http.Response, apiType types.APIType) (inputToken
 
 	resp.Body = io.NopCloser(bytes.NewReader(bodyBytes))
 	resp.ContentLength = int64(len(bodyBytes))
-	if resp.Header.Get("Content-Encoding") == "gzip" {
-		resp.Header.Del("Content-Encoding")
-	}
 
 	return inputTokens, outputTokens, bodyBytes
 }
@@ -882,7 +892,7 @@ func extractToolCalls(bodyBytes []byte, apiType types.APIType) []telemetry.ToolC
 		}
 		if err := json.Unmarshal(bodyBytes, &resp); err == nil {
 			for _, c := range resp.Content {
-				if c.Type == "tool_use" {
+				if c.Type == contentTypeToolUse {
 					toolCalls = append(toolCalls, telemetry.ToolCall{
 						ID:        c.ID,
 						Name:      c.Name,
@@ -903,7 +913,7 @@ func extractToolCalls(bodyBytes []byte, apiType types.APIType) []telemetry.ToolC
 		}
 		if err := json.Unmarshal(bodyBytes, &resp); err == nil {
 			for _, item := range resp.Output {
-				if item.Type == "function_call" {
+				if item.Type == contentTypeFunctionCall {
 					toolCalls = append(toolCalls, telemetry.ToolCall{
 						ID:        item.CallID,
 						Name:      item.Name,
@@ -920,7 +930,7 @@ func extractToolCalls(bodyBytes []byte, apiType types.APIType) []telemetry.ToolC
 func escapeJSON(s string) string {
 	b, err := json.Marshal(s)
 	if err != nil {
-		return s
+		return ""
 	}
 	return string(b[1 : len(b)-1])
 }
@@ -928,30 +938,130 @@ func escapeJSON(s string) string {
 // computeSessionID generates a session ID from system prompt and first user message
 // Same session will have the same system prompt + first user message, so the hash is stable
 func computeSessionID(messages []RequestMessage) string {
-	var sessionKey string
+	var sb strings.Builder
 
 	// Extract system prompt
 	for _, msg := range messages {
-		if msg.Role == "system" {
-			sessionKey += msg.ContentString()
+		if msg.Role == types.RoleSystem {
+			sb.WriteString(msg.ContentString())
 			break
 		}
 	}
 
 	// Extract first user message
 	for _, msg := range messages {
-		if msg.Role == "user" {
-			sessionKey += msg.ContentString()
+		if msg.Role == types.RoleUser {
+			sb.WriteString(msg.ContentString())
 			break
 		}
 	}
 
 	// If no messages, return empty (will fall back to traceID)
-	if sessionKey == "" {
+	if sb.Len() == 0 {
 		return ""
 	}
 
 	// SHA256 hash, take first 8 bytes (16 hex chars)
-	h := sha256.Sum256([]byte(sessionKey))
+	h := sha256.Sum256([]byte(sb.String()))
 	return hex.EncodeToString(h[:8])
+}
+
+// maxJSONWalkDepth limits recursion depth in walkJSONForToolCalls to prevent
+// stack overflow from adversarially nested JSON. Tool calls in real API
+// requests are at most ~5 levels deep; 64 is generous.
+const maxJSONWalkDepth = 64
+
+// extractToolCallsFromJSON walks raw JSON to find tool call objects across
+// all API formats (OpenAI Chat, Anthropic Messages, OpenAI Responses) without
+// format-specific struct parsing.
+func extractToolCallsFromJSON(data []byte) []rules.ToolCall {
+	var raw any
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return nil
+	}
+	var results []rules.ToolCall
+	walkJSONForToolCalls(raw, &results, 0)
+	if len(results) > 0 {
+		log.Debug("extractToolCallsFromJSON: found %d tool calls", len(results))
+	}
+	return results
+}
+
+func walkJSONForToolCalls(v any, results *[]rules.ToolCall, depth int) {
+	if depth > maxJSONWalkDepth {
+		return
+	}
+	switch val := v.(type) {
+	case map[string]any:
+		// Pattern 1: type=tool_use (Anthropic)
+		// Pattern 2: type=function_call (OpenAI Responses)
+		matched := false
+		if tc, ok := matchTypedToolCall(val); ok {
+			*results = append(*results, tc)
+			matched = true
+		}
+		// Pattern 3: function.{name, arguments} (OpenAI Chat)
+		// Skip if already matched as typed tool call to avoid double-counting.
+		if !matched {
+			if fn, ok := val["function"].(map[string]any); ok {
+				if tc, ok := matchFunctionObject(fn); ok {
+					*results = append(*results, tc)
+				}
+			}
+		}
+		// Recurse into all values
+		for _, child := range val {
+			walkJSONForToolCalls(child, results, depth+1)
+		}
+	case []any:
+		for _, child := range val {
+			walkJSONForToolCalls(child, results, depth+1)
+		}
+	}
+}
+
+func matchTypedToolCall(obj map[string]any) (rules.ToolCall, bool) {
+	t, _ := obj["type"].(string)
+	name, _ := obj["name"].(string)
+	if name == "" {
+		return rules.ToolCall{}, false
+	}
+	switch t {
+	case contentTypeToolUse:
+		// Anthropic: input is a JSON object
+		return rules.ToolCall{Name: name, Arguments: toRawMessage(obj["input"])}, true
+	case contentTypeFunctionCall:
+		// OpenAI Responses: arguments is a JSON string
+		return rules.ToolCall{Name: name, Arguments: toRawMessage(obj["arguments"])}, true
+	}
+	return rules.ToolCall{}, false
+}
+
+func matchFunctionObject(fn map[string]any) (rules.ToolCall, bool) {
+	name, _ := fn["name"].(string)
+	if name == "" {
+		return rules.ToolCall{}, false
+	}
+	_, hasArgs := fn["arguments"]
+	if !hasArgs {
+		return rules.ToolCall{}, false
+	}
+	return rules.ToolCall{Name: name, Arguments: toRawMessage(fn["arguments"])}, true
+}
+
+// toRawMessage converts a value to json.RawMessage.
+// If the value is a string, it's treated as already-encoded JSON arguments.
+// Otherwise, it's marshaled to JSON.
+func toRawMessage(v any) json.RawMessage {
+	if v == nil {
+		return nil
+	}
+	if s, ok := v.(string); ok {
+		return json.RawMessage(s)
+	}
+	b, err := json.Marshal(v)
+	if err != nil {
+		return nil
+	}
+	return b
 }

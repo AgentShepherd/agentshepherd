@@ -165,3 +165,196 @@ scenarios:
     args:
       command: "curl https://api.openai.com/v1/models"
     description: "Calling OpenAI API"
+
+  # ============================================================================
+  # WebFetch / WebSearch — normal URL operations
+  # ============================================================================
+
+  # Fetching public search results
+  - tool: web_search
+    args:
+      url: "https://stackoverflow.com/search?q=golang+fuzz"
+    description: "WebSearch to StackOverflow"
+
+  # Fetching documentation pages
+  - tool: WebFetch
+    args:
+      url: "https://developer.mozilla.org/en-US/docs/Web/JavaScript"
+    description: "Fetching MDN documentation"
+
+  # Fetching package registry
+  - tool: WebFetch
+    args:
+      url: "https://registry.npmjs.org/express"
+    description: "Fetching npm package info"
+
+  # file:// URL to safe project files
+  - tool: WebFetch
+    args:
+      url: "file:///home/user/project/README.md"
+    description: "file:// URL to project README (safe)"
+
+  - tool: WebFetch
+    args:
+      url: "file:///home/user/project/src/main.go"
+    description: "file:// URL to source code (safe)"
+
+  - tool: WebFetch
+    args:
+      url: "file:///tmp/output.json"
+    description: "file:// URL to tmp output (safe)"
+
+  # ============================================================================
+  # MCP / Unknown tools — normal operations via shape-based detection
+  # ============================================================================
+
+  # MCP tool reading project source code
+  - tool: file_reader
+    args:
+      file_path: "/home/user/project/src/main.go"
+    description: "MCP tool reading source code via file_path"
+
+  - tool: doc_viewer
+    args:
+      target_file: "/home/user/project/README.md"
+    description: "MCP tool reading README via target_file"
+
+  # MCP tool writing project files
+  - tool: file_writer
+    args:
+      file_path: "/home/user/project/src/handler.go"
+      content: "package main\n\nfunc handler() {}\n"
+    description: "MCP tool writing source code via file_path + content"
+
+  # MCP tool editing project config
+  - tool: config_editor
+    args:
+      file_path: "/home/user/project/config.yaml"
+      old_string: "port: 8080"
+      new_string: "port: 9090"
+    description: "MCP tool editing config via file_path + old_string/new_string"
+
+  # MCP tool running safe commands
+  - tool: run_terminal_cmd
+    args:
+      command: "go test ./..."
+    description: "MCP tool running go test via command field"
+
+  - tool: shell_exec
+    args:
+      command: "npm run build"
+    description: "MCP tool running npm build via command field"
+
+  - tool: mcp_shell
+    args:
+      command: "git status"
+    description: "MCP tool running git status"
+
+  - tool: run_cmd
+    args:
+      cmd: "eslint src/"
+    description: "MCP tool running linter via cmd field"
+
+  # MCP tool fetching public URLs
+  - tool: mcp_fetch
+    args:
+      url: "https://api.github.com/repos/user/repo"
+    description: "MCP tool fetching GitHub API via url field"
+
+  - tool: api_client
+    args:
+      uri: "https://registry.npmjs.org/lodash"
+    description: "MCP tool fetching npm registry via uri field"
+
+  - tool: webhook_sender
+    args:
+      endpoint: "https://hooks.slack.com/services/T00/B00/xxx"
+    description: "MCP tool calling Slack webhook via endpoint field"
+
+  # MCP tool with file:// to safe project files
+  - tool: mcp_fetch
+    args:
+      url: "file:///home/user/project/package.json"
+    description: "MCP tool reading package.json via file:// URL"
+
+  # Reading .env.example (explicitly allowed)
+  - tool: file_reader
+    args:
+      file_path: "/home/user/project/.env.example"
+    description: "MCP tool reading .env.example (allowed exception)"
+
+  # Reading package manifests
+  - tool: mcp_read
+    args:
+      file_path: "/home/user/project/package.json"
+    description: "MCP tool reading package.json"
+
+  - tool: mcp_read
+    args:
+      file_path: "/home/user/project/go.mod"
+    description: "MCP tool reading go.mod"
+
+  # Docker build (safe)
+  - tool: mcp_shell
+    args:
+      command: "docker build -t myapp ."
+    description: "MCP tool running docker build"
+
+  # Array path fields with safe paths
+  - tool: bulk_reader
+    args:
+      path:
+        - "/home/user/project/src/main.go"
+        - "/home/user/project/src/handler.go"
+    description: "MCP tool reading multiple safe source files"
+
+  # ============================================================================
+  # Shell Features (previously false-positived by PreFilter)
+  # ============================================================================
+
+  # Command substitution $() — normal usage
+  - tool: Bash
+    args:
+      command: "cd $(git rev-parse --show-toplevel)"
+    description: "Command substitution $() in normal cd"
+
+  - tool: Bash
+    args:
+      command: "echo $(date)"
+    description: "Command substitution $() with date"
+
+  - tool: Bash
+    args:
+      command: "ls $(pwd)"
+    description: "Command substitution $() with pwd"
+
+  # Backtick substitution — normal usage
+  - tool: Bash
+    args:
+      command: "echo `date`"
+    description: "Backtick substitution with date"
+
+  # Safe hex escapes (1-2 consecutive)
+  - tool: Bash
+    args:
+      command: "grep '\\x00' binary_file"
+    description: "Single hex escape for null byte grep"
+
+  - tool: Bash
+    args:
+      command: "printf '\\x1b[31mred\\x1b[0m\\n'"
+    description: "ANSI color codes with hex escapes"
+
+  # NOTE: docker exec / kubectl exec are known FPs from block-eval-exec regex.
+
+  # tar extract (read)
+  - tool: Bash
+    args:
+      command: "tar xzf archive.tar.gz -C /tmp"
+    description: "tar extract to /tmp"
+
+  # scp to remote (safe)
+  - tool: Bash
+    args:
+      command: "scp /tmp/file.txt remote-server:/tmp/"
+    description: "scp to remote server"

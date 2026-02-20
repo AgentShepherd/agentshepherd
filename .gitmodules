@@ -1,0 +1,3 @@
+[submodule "cmd/bakelens-sandbox"]
+	path = cmd/bakelens-sandbox
+	url = git@github.com:BakeLab/bakelens-sandbox.git

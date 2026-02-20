@@ -6,14 +6,25 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/BakeLens/crust/internal/tui"
 	"gopkg.in/yaml.v3"
+)
+
+// LintSeverity represents the severity of a lint issue.
+type LintSeverity string
+
+// Lint severity levels (distinct from rule Severity).
+const (
+	LintError   LintSeverity = "error"
+	LintWarning LintSeverity = "warning"
+	LintInfo    LintSeverity = "info"
 )
 
 // LintIssue represents a problem found in a rule.
 type LintIssue struct {
 	RuleName string
 	Field    string
-	Severity string // "error", "warning", "info"
+	Severity LintSeverity
 	Message  string
 }
 
@@ -71,7 +82,7 @@ func (l *Linter) LintRules(rules []Rule) LintResult {
 			result.Issues = append(result.Issues, LintIssue{
 				RuleName: rule.Name,
 				Field:    "name",
-				Severity: "error",
+				Severity: LintError,
 				Message:  "duplicate rule name",
 			})
 			result.Errors++
@@ -82,10 +93,13 @@ func (l *Linter) LintRules(rules []Rule) LintResult {
 		issues := l.lintRule(rule)
 		for _, issue := range issues {
 			result.Issues = append(result.Issues, issue)
-			if issue.Severity == "error" {
+			switch issue.Severity {
+			case LintError:
 				result.Errors++
-			} else if issue.Severity == "warning" {
+			case LintWarning:
 				result.Warns++
+			case LintInfo:
+				// info items don't increment counters
 			}
 		}
 	}
@@ -101,7 +115,7 @@ func (l *Linter) lintRule(rule Rule) []LintIssue {
 		issues = append(issues, LintIssue{
 			RuleName: "(unnamed)",
 			Field:    "name",
-			Severity: "error",
+			Severity: LintError,
 			Message:  "rule name is required",
 		})
 	}
@@ -110,7 +124,7 @@ func (l *Linter) lintRule(rule Rule) []LintIssue {
 		issues = append(issues, LintIssue{
 			RuleName: rule.Name,
 			Field:    "message",
-			Severity: "error",
+			Severity: LintError,
 			Message:  "message is required",
 		})
 	}
@@ -119,7 +133,7 @@ func (l *Linter) lintRule(rule Rule) []LintIssue {
 		issues = append(issues, LintIssue{
 			RuleName: rule.Name,
 			Field:    "actions",
-			Severity: "error",
+			Severity: LintError,
 			Message:  "at least one action is required",
 		})
 	}
@@ -130,7 +144,7 @@ func (l *Linter) lintRule(rule Rule) []LintIssue {
 			issues = append(issues, LintIssue{
 				RuleName: rule.Name,
 				Field:    fmt.Sprintf("actions[%d]", i),
-				Severity: "error",
+				Severity: LintError,
 				Message:  fmt.Sprintf("invalid action: %s", op),
 			})
 		}
@@ -147,7 +161,7 @@ func (l *Linter) lintRule(rule Rule) []LintIssue {
 		issues = append(issues, LintIssue{
 			RuleName: rule.Name,
 			Field:    "block",
-			Severity: "error",
+			Severity: LintError,
 			Message:  "block.paths, block.hosts, match, all, or any is required",
 		})
 	}
@@ -194,7 +208,7 @@ func (l *Linter) lintMatch(ruleName, fieldName string, match Match) []LintIssue 
 		issues = append(issues, LintIssue{
 			RuleName: ruleName,
 			Field:    fieldName,
-			Severity: "error",
+			Severity: LintError,
 			Message:  "match must have at least one field (path, command, host, content, tools)",
 		})
 	}
@@ -216,7 +230,7 @@ func (l *Linter) lintPathPattern(ruleName, fieldName, pattern string) []LintIssu
 		issues = append(issues, LintIssue{
 			RuleName: ruleName,
 			Field:    fieldName,
-			Severity: "error",
+			Severity: LintError,
 			Message:  "empty path pattern",
 		})
 		return issues
@@ -228,7 +242,7 @@ func (l *Linter) lintPathPattern(ruleName, fieldName, pattern string) []LintIssu
 			issues = append(issues, LintIssue{
 				RuleName: ruleName,
 				Field:    fieldName,
-				Severity: "warning",
+				Severity: LintWarning,
 				Message:  sp.message,
 			})
 		}
@@ -239,7 +253,7 @@ func (l *Linter) lintPathPattern(ruleName, fieldName, pattern string) []LintIssu
 		issues = append(issues, LintIssue{
 			RuleName: ruleName,
 			Field:    fieldName,
-			Severity: "warning",
+			Severity: LintWarning,
 			Message:  "very short pattern may match too broadly",
 		})
 	}
@@ -255,7 +269,7 @@ func (l *Linter) lintCompilation(rule Rule) []LintIssue {
 		return []LintIssue{{
 			RuleName: rule.Name,
 			Field:    "patterns",
-			Severity: "error",
+			Severity: LintError,
 			Message:  err.Error(),
 		}}
 	}
@@ -300,27 +314,45 @@ func (l *Linter) LintBuiltin() (LintResult, error) {
 // FormatIssues returns a human-readable string of all issues.
 func (r LintResult) FormatIssues(showInfo bool) string {
 	if len(r.Issues) == 0 {
-		return "No issues found."
+		return ""
 	}
 
 	var sb strings.Builder
 	for _, issue := range r.Issues {
-		if issue.Severity == "info" && !showInfo {
+		if issue.Severity == LintInfo && !showInfo {
 			continue
 		}
 
-		icon := "?"
-		switch issue.Severity {
-		case "error":
-			icon = "✗"
-		case "warning":
-			icon = "⚠"
-		case "info":
-			icon = "ℹ"
+		var icon, styledLine string
+		if tui.IsPlainMode() {
+			switch issue.Severity {
+			case LintError:
+				icon = "X"
+			case LintWarning:
+				icon = "!"
+			case LintInfo:
+				icon = "i"
+			default:
+				icon = "?"
+			}
+			styledLine = fmt.Sprintf("  %s [%s] %s: %s - %s\n",
+				icon, issue.Severity, issue.RuleName, issue.Field, issue.Message)
+		} else {
+			switch issue.Severity {
+			case LintError:
+				icon = tui.StyleError.Render(tui.IconCross)
+			case LintWarning:
+				icon = tui.StyleWarning.Render(tui.IconWarning)
+			case LintInfo:
+				icon = tui.StyleInfo.Render(tui.IconInfo)
+			default:
+				icon = "?"
+			}
+			severity := tui.SeverityBadge(string(issue.Severity))
+			styledLine = fmt.Sprintf("  %s %s %s: %s - %s\n",
+				icon, severity, tui.StyleBold.Render(issue.RuleName), issue.Field, issue.Message)
 		}
-
-		sb.WriteString(fmt.Sprintf("%s [%s] %s: %s - %s\n",
-			icon, issue.Severity, issue.RuleName, issue.Field, issue.Message))
+		sb.WriteString(styledLine)
 	}
 
 	return sb.String()
