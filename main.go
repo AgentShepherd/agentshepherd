@@ -611,7 +611,7 @@ func runDaemon(cfg *config.Config, logLevel string, disableBuiltin bool, endpoin
 	})
 
 	server := &http.Server{
-		Addr:    fmt.Sprintf(":%d", cfg.Server.Port),
+		Addr:    fmt.Sprintf("127.0.0.1:%d", cfg.Server.Port),
 		Handler: loggingMiddleware(mux),
 		// SECURITY FIX: Add ReadHeaderTimeout to prevent Slowloris attacks
 		ReadHeaderTimeout: 10 * time.Second,
@@ -619,7 +619,7 @@ func runDaemon(cfg *config.Config, logLevel string, disableBuiltin bool, endpoin
 		WriteTimeout:      0, // Must be 0 for SSE streaming (it's a deadline, not idle timeout)
 	}
 
-	log.Info("Crust listening on :%d", cfg.Server.Port)
+	log.Info("Crust listening on 127.0.0.1:%d", cfg.Server.Port)
 	if autoMode {
 		log.Info("  Mode: auto (provider resolved from model name)")
 		if cfg.Upstream.URL != "" {
