@@ -135,6 +135,7 @@ crust add-rule my-rules.yaml    # Rules active immediately (hot reload)
 crust start --auto                          # Auto mode (recommended)
 crust start --endpoint URL --api-key KEY    # Manual mode
 crust start --auto --block-mode replace     # Show block messages to agent
+crust start --foreground --auto             # Foreground mode (for Docker)
 crust stop                                  # Stop the gateway
 crust status                                # Check if running
 crust logs [-f]                             # View logs
@@ -183,6 +184,34 @@ sandbox:
 ```
 
 In auto mode (`--auto`), the gateway resolves providers from the model name using a [built-in registry](internal/proxy/providers.go) (Anthropic, OpenAI, DeepSeek, Gemini, Mistral, Groq, and more). Clients bring their own API keys. User-defined providers take priority.
+
+</details>
+
+<details>
+<summary><strong>Docker</strong></summary>
+
+```dockerfile
+FROM golang
+
+RUN /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/BakeLens/crust/main/install.sh)"
+
+EXPOSE 9090
+ENTRYPOINT ["/root/.local/bin/crust", "start", "--foreground", "--auto"]
+```
+
+```yaml
+# docker-compose.yml
+services:
+  crust:
+    build: .
+    ports:
+      - "9090:9090"
+    restart: always
+```
+
+Point your agents to `http://<docker-host>:9090` instead of `localhost`.
+
+The `--foreground` flag keeps the process in the foreground so the container stays alive.
 
 </details>
 
