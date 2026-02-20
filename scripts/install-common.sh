@@ -208,7 +208,7 @@ parse_args() {
                 echo "Crust Installer"
                 echo ""
                 echo "Options:"
-                echo "  --version, -v    Install specific version (default: latest)"
+                echo "  --version, -v    Install specific version or branch (e.g. v2.0.0, main)"
                 echo "  --no-tui         Build without TUI dependencies (plain text only)"
                 echo "  --no-font        Skip Nerd Font installation"
                 echo "  --uninstall      Uninstall crust completely"
