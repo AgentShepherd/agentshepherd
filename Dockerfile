@@ -1,9 +1,18 @@
-FROM golang:1.24
+FROM golang:1.24-bookworm AS builder
 
-RUN apt-get update && apt-get install -y --no-install-recommends bash curl git sqlite3 && \
-    rm -rf /var/lib/apt/lists/* && \
-    curl -fsSL https://raw.githubusercontent.com/BakeLens/crust/main/install.sh | bash -s -- --no-font
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+RUN go build -ldflags "-s -w" -o /usr/local/bin/crust .
+
+FROM debian:bookworm-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && \
+    rm -rf /var/lib/apt/lists/*
+
+COPY --from=builder /usr/local/bin/crust /usr/local/bin/crust
+ENV PATH="$PATH:/usr/local/bin"
 
 EXPOSE 9090
-ENV PATH="$PATH:/root/.local/bin"
-ENTRYPOINT ["/root/.local/bin/crust", "start", "--foreground", "--auto", "--listen-address", "0.0.0.0"]
+ENTRYPOINT ["crust", "start", "--foreground", "--auto", "--listen-address", "0.0.0.0"]
