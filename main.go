@@ -17,7 +17,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/BakeLens/crust/internal/earlyinit" // must be first: prevents terminal queries before bubbletea init
+	"github.com/BakeLens/crust/internal/earlyinit" // side-effect import: init() runs before bubbletea's via dependency order + lexicographic tie-breaking
 
 	"github.com/BakeLens/crust/internal/completion"
 	"github.com/BakeLens/crust/internal/config"
@@ -233,7 +233,7 @@ func main() {
 func runStart(args []string) {
 	// Foreground mode: if earlyinit suppressed TERM (no real TTY), restore
 	// the original TERM and set fallback color config. If a real TTY was
-	// present, bubbletea already auto-detected background color and profile.
+	// present, lipgloss will auto-detect background color on first render.
 	if earlyinit.Foreground {
 		if earlyinit.Suppressed {
 			os.Setenv("TERM", earlyinit.OrigTERM)
@@ -322,7 +322,7 @@ func runStart(args []string) {
 	}
 
 	// Foreground mode - run server directly without daemonizing (for Docker/containers).
-	// If detached (non-interactive), TUI was already disabled by earlyinit.
+	// If detached (no TTY), earlyinit suppressed TERM and plain mode auto-detects from non-TTY stdout.
 	// If interactive (docker run -it), full TUI is available.
 	if *foreground {
 		runDaemon(cfg, *logLevel, *disableBuiltin, *endpoint, *apiKey, *dbKey,
