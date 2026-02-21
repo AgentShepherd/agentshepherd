@@ -4,7 +4,6 @@ docs
 tests
 fonts
 scripts
-example_rules
 *.md
 *.exe
 .env*
