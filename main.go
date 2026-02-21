@@ -43,7 +43,7 @@ import (
 )
 
 // Version is set at build time via ldflags: -X main.Version=x.y.z
-var Version = "2.1.0"
+var Version = "2.2.0"
 
 // =============================================================================
 // API Client (inlined from internal/cli)
