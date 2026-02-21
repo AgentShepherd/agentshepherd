@@ -630,7 +630,12 @@ func runDaemon(cfg *config.Config, logLevel string, disableBuiltin bool, endpoin
 	if listenAddr != "" && listenAddr != "127.0.0.1" && listenAddr != "localhost" {
 		// Expose management API on proxy port for remote access (Docker/container mode).
 		// On localhost, the Unix socket is used instead (more secure).
-		mux.Handle("/api/", manager.APIHandler())
+		// Register specific sub-paths so that /api/v1/... from LLM clients
+		// (e.g. PhpStorm) falls through to the proxy handler.
+		mgmtHandler := manager.APIHandler()
+		mux.Handle("/api/security/", mgmtHandler)
+		mux.Handle("/api/telemetry/", mgmtHandler)
+		mux.Handle("/api/crust/", mgmtHandler)
 	}
 	mux.Handle("/", proxyHandler)
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {

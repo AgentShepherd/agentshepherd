@@ -67,16 +67,24 @@ Point your agent to Crust:
 
 | Agent | Configuration |
 |-------|---------------|
-| **Claude Code** | `ANTHROPIC_BASE_URL=http://localhost:9090` |
-| **Codex CLI** | `OPENAI_BASE_URL=http://localhost:9090/v1` |
-| **Cursor** | Settings → Models → Override OpenAI Base URL → `http://localhost:9090/v1` |
-| **Cline** | Settings → API Configuration → Base URL → `http://localhost:9090/v1` |
-| **Windsurf** | Settings → AI → Provider Base URL → `http://localhost:9090/v1` |
-| **Open Claw** | Set `baseUrl` to `http://localhost:9090` in `~/.openclaw/openclaw.json` |
-| **OpenCode** | `OPENAI_BASE_URL=http://localhost:9090/v1` |
+| **[Claude Code](https://github.com/anthropics/claude-code)** | `ANTHROPIC_BASE_URL=http://localhost:9090` |
+| **[Codex CLI](https://github.com/openai/codex)** | `OPENAI_BASE_URL=http://localhost:9090/v1` |
+| **[Cursor](https://cursor.com)** | Settings → Models → Override OpenAI Base URL → `http://localhost:9090/v1` |
+| **[Cline](https://github.com/cline/cline)** | Settings → API Configuration → Base URL → `http://localhost:9090/v1` |
+| **[Windsurf](https://windsurf.com)** | Settings → AI → Provider Base URL → `http://localhost:9090/v1` |
+| **[JetBrains AI](https://www.jetbrains.com/ai/)** | Settings → AI Assistant → Providers & API keys → Base URL → `http://localhost:9090/v1` |
+| **[Continue](https://github.com/continuedev/continue)** | Set `apiBase` to `http://localhost:9090/v1` in config |
+| **[Aider](https://github.com/Aider-AI/aider)** | `OPENAI_API_BASE=http://localhost:9090/v1` |
+| **[Zed](https://github.com/zed-industries/zed)** | Set `api_url` to `http://localhost:9090/v1` in settings |
+| **[Tabby](https://github.com/TabbyML/tabby)** | Set `api_endpoint` to `http://localhost:9090/v1` in config |
+| **[avante.nvim](https://github.com/yetone/avante.nvim)** | Set `endpoint` to `http://localhost:9090/v1` in config |
+| **[codecompanion.nvim](https://github.com/olimorris/codecompanion.nvim)** | Set `url` to `http://localhost:9090/v1` in adapter config |
+| **[CodeGPT](https://github.com/timkmecl/codegpt)** | Set custom provider URL to `http://localhost:9090/v1` |
+| **[OpenClaw](https://github.com/openclaw/openclaw)** | Set `baseUrl` to `http://localhost:9090` in `~/.openclaw/openclaw.json` |
+| **[OpenCode](https://github.com/opencode-ai/opencode)** | `OPENAI_BASE_URL=http://localhost:9090/v1` |
 | **Any OpenAI-compatible agent** | Set your LLM base URL to `http://localhost:9090/v1` |
 
-That's it. Crust auto-detects the provider from the model name and passes through your auth. Works with all 7 major coding agents out of the box — each agent's tool names are recognized automatically.
+That's it. Crust auto-detects the provider from the model name and passes through your auth. Works with all major coding agents out of the box — each agent's tool names are recognized automatically. Clients that send `/api/v1/...` paths (e.g. some JetBrains configurations) are also supported — the `/api` prefix is stripped automatically.
 
 ```bash
 crust status     # Check if running
