@@ -214,19 +214,20 @@ func main() {
 
 // runStart handles the start subcommand
 func runStart(args []string) {
-	// Foreground mode: earlyinit already set TERM=dumb to suppress termenv's
-	// OSC queries during bubbletea's package init(). Now restore the original
-	// TERM and color profile so styled output works. HasDarkBackground is set
-	// explicitly to prevent any future terminal queries.
+	// Foreground mode: if earlyinit suppressed TERM (no real TTY), restore
+	// the original TERM and set fallback color config. If a real TTY was
+	// present, bubbletea already auto-detected background color and profile.
 	if earlyinit.Foreground {
-		os.Setenv("TERM", earlyinit.OrigTERM)
-		lipgloss.SetHasDarkBackground(true)
-		lipgloss.SetColorProfile(colorProfileFromTERM(earlyinit.OrigTERM))
+		if earlyinit.Suppressed {
+			os.Setenv("TERM", earlyinit.OrigTERM)
+			lipgloss.SetHasDarkBackground(true)
+			lipgloss.SetColorProfile(colorProfileFromTERM(earlyinit.OrigTERM))
+		}
 
 		// Enable styled TUI output when stdout is a TTY and TERM supports
-		// colors. Docker containers lack terminal-specific env vars, so
+		// colors. Docker containers may lack terminal-specific env vars, so
 		// auto-detection falls back to CapNone → plain mode. Override that
-		// here since the TTY + restored color profile are sufficient.
+		// here since the TTY + color profile are sufficient.
 		_, noColor := os.LookupEnv("NO_COLOR")
 		isTTY := term.IsTerminal(int(os.Stdout.Fd())) //nolint:gosec // Fd() fits int
 		if !noColor && isTTY && earlyinit.OrigTERM != "" && earlyinit.OrigTERM != "dumb" {

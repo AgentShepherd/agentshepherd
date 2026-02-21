@@ -2,6 +2,27 @@ package earlyinit
 
 import "testing"
 
+func TestShouldSuppress(t *testing.T) {
+	tests := []struct {
+		name       string
+		foreground bool
+		isTTY      bool
+		want       bool
+	}{
+		{"not foreground, no TTY", false, false, false},
+		{"not foreground, with TTY", false, true, false},
+		{"foreground, no TTY", true, false, true},
+		{"foreground, with TTY", true, true, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := ShouldSuppress(tt.foreground, tt.isTTY); got != tt.want {
+				t.Errorf("ShouldSuppress(%v, %v) = %v, want %v", tt.foreground, tt.isTTY, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestHasForeground(t *testing.T) {
 	tests := []struct {
 		name string

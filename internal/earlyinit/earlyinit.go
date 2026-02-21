@@ -1,32 +1,49 @@
-// Package earlyinit runs before charmbracelet/bubbletea's init() to prevent
-// terminal escape sequence leaks in --foreground mode.
+// Package earlyinit runs before lipgloss's first render to prevent terminal
+// escape sequence leaks in --foreground mode without a real TTY.
 //
-// Problem: bubbletea's init() calls lipgloss.HasDarkBackground() which sends
-// OSC 11 (background color query) and DSR (cursor position) escape sequences
-// to stdout. On a detached TTY (docker run -d -t), these sequences appear as
-// garbage in container logs because no terminal emulator processes them.
+// Problem: lipgloss lazily calls HasDarkBackground() on first styled render,
+// which sends OSC 11 (background color query) via termenv. Without a real TTY
+// (e.g., docker run -d), these sequences appear as garbage in container logs
+// because no terminal emulator processes them.
 //
-// Solution: This package only imports "os" (stdlib), so Go initializes it
-// before bubbletea (which depends on lipgloss → termenv). When --foreground
-// is detected in os.Args, TERM is temporarily set to "dumb", which causes
-// termenv's termStatusReport() to bail out without sending any escape
-// sequences. The original TERM is saved so the caller can restore the color
-// profile for styled log output after bubbletea's init() has completed.
+// Solution: When --foreground is detected and stdout is NOT a terminal, TERM
+// is set to "dumb" before any rendering occurs. This causes termenv's
+// termStatusReport() to bail out without sending escape sequences. The caller
+// then sets explicit color values via SetHasDarkBackground/SetColorProfile,
+// pre-empting the lazy query entirely. When a real TTY is present (e.g.,
+// docker run -it), TERM is left intact so lipgloss can query the terminal
+// and auto-detect the correct background color.
 //
 // Init order guarantee (Go spec): packages are initialized in dependency
-// order; ties are broken by lexicographic package path. Since this package
-// has fewer dependencies than bubbletea and "BakeLens" < "charmbracelet",
-// this init() runs first.
+// order; ties are broken by lexicographic package path. This package imports
+// only "os" and "golang.org/x/term" (which depends on golang.org/x/sys) —
+// strictly fewer dependencies than bubbletea (lipgloss → termenv → many
+// packages), and "BakeLens" < "charmbracelet" for lexicographic tie-breaking.
 package earlyinit
 
-import "os"
+import (
+	"os"
+
+	"golang.org/x/term"
+)
 
 // Foreground is true when --foreground was detected in os.Args.
 var Foreground bool
 
-// OrigTERM holds the original TERM value before earlyinit set it to "dumb".
-// Used to restore the color profile for styled log output.
+// Suppressed is true when TERM was set to "dumb" to prevent terminal queries.
+// False when a real TTY is present and bubbletea was allowed to query normally.
+var Suppressed bool
+
+// OrigTERM holds the original TERM value before earlyinit may have set it to
+// "dumb". Used to restore the color profile for styled log output.
 var OrigTERM string
+
+// ShouldSuppress reports whether TERM should be set to "dumb" to prevent
+// terminal escape sequence leaks. Returns true when in foreground mode
+// without a real TTY on stdout. Exported for testing.
+func ShouldSuppress(foreground, isTTY bool) bool {
+	return foreground && !isTTY
+}
 
 // HasForeground reports whether args contains "--foreground" before any "--".
 // Exported for testing; init() calls this with os.Args.
@@ -51,11 +68,14 @@ func init() {
 		return
 	}
 
-	// Save original TERM, then set to "dumb" to suppress terminal queries.
-	// termenv's termStatusReport() checks strings.HasPrefix(term, "dumb")
-	// and returns early without sending OSC escape sequences.
-	// The caller restores TERM and the color profile after bubbletea's
-	// init() has completed safely.
 	OrigTERM = os.Getenv("TERM")
-	os.Setenv("TERM", "dumb")
+
+	// Only suppress terminal queries when stdout is not a real TTY.
+	// With a real TTY (e.g., docker run -it), bubbletea can safely query
+	// the terminal and get correct responses for background color, etc.
+	isTTY := term.IsTerminal(int(os.Stdout.Fd())) //nolint:gosec // Fd() fits int
+	if ShouldSuppress(Foreground, isTTY) {
+		os.Setenv("TERM", "dumb")
+		Suppressed = true
+	}
 }
