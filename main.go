@@ -718,18 +718,18 @@ func runStatus(args []string) {
 	if *apiAddr != "" {
 		client := newRemoteAPIClient(*apiAddr)
 		if *jsonOutput {
-			data := dashboard.FetchStatus(client.client, client.proxyBaseURL(), 0, "")
+			data := dashboard.FetchStatus(client.client, client.apiURL(), client.proxyBaseURL(), 0, "")
 			out, _ := json.MarshalIndent(data, "", "  ") //nolint:errcheck // marshal won't fail
 			fmt.Println(string(out))
 			return
 		}
 		if *live {
-			if err := dashboard.Run(client.client, client.proxyBaseURL(), 0, ""); err != nil {
+			if err := dashboard.Run(client.client, client.apiURL(), client.proxyBaseURL(), 0, ""); err != nil {
 				tui.PrintError(fmt.Sprintf("Dashboard error: %v", err))
 			}
 			return
 		}
-		data := dashboard.FetchStatus(client.client, client.proxyBaseURL(), 0, "")
+		data := dashboard.FetchStatus(client.client, client.apiURL(), client.proxyBaseURL(), 0, "")
 		fmt.Println(dashboard.RenderStatic(data))
 		return
 	}
@@ -761,14 +761,14 @@ func runStatus(args []string) {
 
 	// Live dashboard mode
 	if *live {
-		if err := dashboard.Run(client.client, client.proxyBaseURL(), pid, daemon.LogFileDisplay()); err != nil {
+		if err := dashboard.Run(client.client, dashboard.DefaultAPIBase, client.proxyBaseURL(), pid, daemon.LogFileDisplay()); err != nil {
 			tui.PrintError(fmt.Sprintf("Dashboard error: %v", err))
 		}
 		return
 	}
 
 	// Static display — FetchStatus handles health, security, and stats in one call
-	data := dashboard.FetchStatus(client.client, client.proxyBaseURL(), pid, daemon.LogFileDisplay())
+	data := dashboard.FetchStatus(client.client, dashboard.DefaultAPIBase, client.proxyBaseURL(), pid, daemon.LogFileDisplay())
 	fmt.Println(dashboard.RenderStatic(data))
 }
 

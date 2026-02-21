@@ -30,8 +30,8 @@ type SessionEvent struct {
 
 // FetchSessions fetches recent sessions from the management API.
 // Returns nil on any error so the TUI can degrade gracefully.
-func FetchSessions(mgmtClient *http.Client) []SessionSummary {
-	resp, err := mgmtClient.Get(apiBaseURL + "/api/telemetry/sessions") //nolint:noctx
+func FetchSessions(mgmtClient *http.Client, apiBase string) []SessionSummary {
+	resp, err := mgmtClient.Get(apiBase + "/api/telemetry/sessions") //nolint:noctx
 	if err != nil || resp == nil {
 		return nil
 	}
@@ -46,8 +46,8 @@ func FetchSessions(mgmtClient *http.Client) []SessionSummary {
 
 // FetchSessionEvents fetches recent events for a specific session from the management API.
 // Returns nil on any error so the TUI can degrade gracefully.
-func FetchSessionEvents(mgmtClient *http.Client, sessionID string) []SessionEvent {
-	resp, err := mgmtClient.Get(apiBaseURL + "/api/telemetry/sessions/" + sessionID + "/events") //nolint:noctx
+func FetchSessionEvents(mgmtClient *http.Client, apiBase string, sessionID string) []SessionEvent {
+	resp, err := mgmtClient.Get(apiBase + "/api/telemetry/sessions/" + sessionID + "/events") //nolint:noctx
 	if err != nil || resp == nil {
 		return nil
 	}
@@ -96,16 +96,17 @@ type SecurityStats struct {
 	AllowedCalls   int64 `json:"allowed_tool_calls"`
 }
 
-// apiBaseURL is the dummy host for socket-based API requests.
+// DefaultAPIBase is the dummy host for socket-based API requests.
 // The actual routing happens via the http.Client transport (Unix socket / named pipe).
-const apiBaseURL = "http://crust-api"
+const DefaultAPIBase = "http://crust-api"
 
 // proxyClient is a plain HTTP client for proxy health checks (still TCP).
 var proxyClient = &http.Client{Timeout: 2 * time.Second}
 
 // FetchStatus fetches health, security status, and stats from the Crust API.
-// The mgmtClient uses a Unix socket / named pipe transport for management API calls.
-func FetchStatus(mgmtClient *http.Client, proxyBaseURL string, pid int, logFile string) StatusData {
+// apiBase is the management API base URL: DefaultAPIBase for local socket, or
+// "http://host:port" for remote TCP connections.
+func FetchStatus(mgmtClient *http.Client, apiBase string, proxyBaseURL string, pid int, logFile string) StatusData {
 	data := StatusData{Running: true, PID: pid, LogFile: logFile}
 
 	// Fetch health from proxy (still TCP)
@@ -114,8 +115,8 @@ func FetchStatus(mgmtClient *http.Client, proxyBaseURL string, pid int, logFile 
 		data.Healthy = resp.StatusCode == http.StatusOK
 	}
 
-	// Fetch security status via management socket
-	if resp, err := mgmtClient.Get(apiBaseURL + "/api/security/status"); err == nil && resp != nil { //nolint:noctx
+	// Fetch security status
+	if resp, err := mgmtClient.Get(apiBase + "/api/security/status"); err == nil && resp != nil { //nolint:noctx
 		defer resp.Body.Close()
 		var result struct {
 			Enabled    bool `json:"enabled"`
@@ -127,8 +128,8 @@ func FetchStatus(mgmtClient *http.Client, proxyBaseURL string, pid int, logFile 
 		}
 	}
 
-	// Fetch security stats via management socket
-	if resp, err := mgmtClient.Get(apiBaseURL + "/api/security/stats"); err == nil && resp != nil { //nolint:noctx
+	// Fetch security stats
+	if resp, err := mgmtClient.Get(apiBase + "/api/security/stats"); err == nil && resp != nil { //nolint:noctx
 		defer resp.Body.Close()
 		var stats SecurityStats
 		if json.NewDecoder(resp.Body).Decode(&stats) == nil {

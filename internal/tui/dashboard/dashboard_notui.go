@@ -8,8 +8,8 @@ import (
 )
 
 // Run prints static status once (no interactivity in notui build).
-func Run(mgmtClient *http.Client, proxyBaseURL string, pid int, logFile string) error {
-	data := FetchStatus(mgmtClient, proxyBaseURL, pid, logFile)
+func Run(mgmtClient *http.Client, apiBase string, proxyBaseURL string, pid int, logFile string) error {
+	data := FetchStatus(mgmtClient, apiBase, proxyBaseURL, pid, logFile)
 	fmt.Println(RenderStatic(data))
 	return nil
 }

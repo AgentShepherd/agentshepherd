@@ -49,6 +49,7 @@ type sessionEventsMsg struct {
 type model struct {
 	data         StatusData
 	mgmtClient   *http.Client
+	apiBase      string
 	proxyBaseURL string
 
 	blockBar progress.Model
@@ -72,7 +73,7 @@ type model struct {
 	activeSessionID string // ID whose events are currently loaded
 }
 
-func newModel(mgmtClient *http.Client, proxyBaseURL string, pid int) model {
+func newModel(mgmtClient *http.Client, apiBase string, proxyBaseURL string, pid int) model {
 	blockBar := progress.New(progress.WithGradient("#F5A623", "#E05A3A"), progress.WithoutPercentage(), progress.WithWidth(20))
 	blockBar.EmptyColor = "#3D3228"
 
@@ -85,6 +86,7 @@ func newModel(mgmtClient *http.Client, proxyBaseURL string, pid int) model {
 
 	return model{
 		mgmtClient:   mgmtClient,
+		apiBase:      apiBase,
 		proxyBaseURL: proxyBaseURL,
 		data:         StatusData{Running: true, PID: pid},
 		blockBar:     blockBar,
@@ -105,7 +107,7 @@ func (m model) Init() tea.Cmd {
 // fetchStats fetches the overview status data.
 func (m model) fetchStats() tea.Cmd {
 	return func() tea.Msg {
-		data := FetchStatus(m.mgmtClient, m.proxyBaseURL, m.data.PID, m.data.LogFile)
+		data := FetchStatus(m.mgmtClient, m.apiBase, m.proxyBaseURL, m.data.PID, m.data.LogFile)
 		return statsMsg{data: data}
 	}
 }
@@ -113,7 +115,7 @@ func (m model) fetchStats() tea.Cmd {
 // fetchSessions fetches the session list from the API.
 func (m model) fetchSessions() tea.Cmd {
 	return func() tea.Msg {
-		return sessionsMsg{sessions: FetchSessions(m.mgmtClient)}
+		return sessionsMsg{sessions: FetchSessions(m.mgmtClient, m.apiBase)}
 	}
 }
 
@@ -128,7 +130,7 @@ func (m model) fetchSessionEvents() tea.Cmd {
 	return func() tea.Msg {
 		return sessionEventsMsg{
 			sessionID: sid,
-			events:    FetchSessionEvents(m.mgmtClient, sid),
+			events:    FetchSessionEvents(m.mgmtClient, m.apiBase, sid),
 		}
 	}
 }
@@ -571,14 +573,14 @@ func formatCount(n int64) string {
 
 // Run launches the live dashboard that refreshes every 2 seconds.
 // Press q to quit, r for immediate refresh, tab to switch tabs.
-func Run(mgmtClient *http.Client, proxyBaseURL string, pid int, logFile string) error {
+func Run(mgmtClient *http.Client, apiBase string, proxyBaseURL string, pid int, logFile string) error {
 	if tui.IsPlainMode() {
-		data := FetchStatus(mgmtClient, proxyBaseURL, pid, logFile)
+		data := FetchStatus(mgmtClient, apiBase, proxyBaseURL, pid, logFile)
 		fmt.Println(RenderPlain(data))
 		return nil
 	}
 
-	m := newModel(mgmtClient, proxyBaseURL, pid)
+	m := newModel(mgmtClient, apiBase, proxyBaseURL, pid)
 	m.data.LogFile = logFile
 	p := tea.NewProgram(m, tea.WithAltScreen())
 	_, err := p.Run()
