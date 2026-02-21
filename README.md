@@ -11,6 +11,7 @@
 <p align="center">
   <a href="https://getcrust.io">Website</a> •
   <a href="#quick-start">Quick Start</a> •
+  <a href="#built-in-protection">Protection</a> •
   <a href="#how-it-works">How It Works</a> •
   <a href="#documentation">Docs</a> •
   <a href="https://github.com/BakeLens/crust/issues">Issues</a> •
@@ -26,15 +27,15 @@
   <img src="https://img.shields.io/badge/Platform-macOS%20%7C%20Linux%20%7C%20Windows%20%7C%20FreeBSD-lightgrey" alt="Platform" />
 </p>
 
-<p align="center">
-  <img src="docs/demo.gif" alt="Crust in action" width="800" />
-</p>
-
 ## What is Crust?
 
 Crust is a transparent, local gateway between your AI agents and LLM providers. It intercepts every tool call — file reads, shell commands, network requests — and blocks dangerous actions before they execute. No code changes required.
 
 **100% local. Your data never leaves your machine.**
+
+<p align="center">
+  <img src="docs/demo.gif" alt="Crust in action" width="800" />
+</p>
 
 ## Quick Start
 
@@ -48,11 +49,19 @@ Crust is a transparent, local gateway between your AI agents and LLM providers. 
 irm https://raw.githubusercontent.com/BakeLens/crust/main/install.ps1 | iex
 ```
 
+**Docker:**
+```bash
+docker build -t crust https://github.com/BakeLens/crust.git
+docker run -p 9090:9090 crust
+```
+
 Then start the gateway:
 
 ```bash
 crust start --auto
 ```
+
+Auto mode detects your LLM provider from the model name — no endpoint URL or API key configuration needed. Your agent's existing auth is passed through.
 
 Point your agent to Crust:
 
@@ -69,18 +78,11 @@ Point your agent to Crust:
 
 That's it. Crust auto-detects the provider from the model name and passes through your auth. Works with all 7 major coding agents out of the box — each agent's tool names are recognized automatically.
 
-## How It Works
-
-<p align="center">
-  <img src="docs/crust.png" alt="Crust architecture" width="90%" />
-</p>
-
-Crust inspects tool calls at two layers:
-
-1. **Layer 0 (Request Scan)**: Scans tool calls in conversation history before they reach the LLM — catches agents replaying dangerous actions.
-2. **Layer 1 (Response Scan)**: Scans tool calls in the LLM's response before they execute — blocks new dangerous actions in real-time.
-
-All activity is logged locally to encrypted storage.
+```bash
+crust status     # Check if running
+crust logs -f    # Follow logs
+crust stop       # Stop crust
+```
 
 ## Built-in Protection
 
@@ -127,25 +129,38 @@ rules:
 crust add-rule my-rules.yaml    # Rules active immediately (hot reload)
 ```
 
+## How It Works
+
+<p align="center">
+  <img src="docs/crust.png" alt="Crust architecture" width="90%" />
+</p>
+
+Crust inspects tool calls at two layers:
+
+1. **Layer 0 (Request Scan)**: Scans tool calls in conversation history before they reach the LLM — catches agents replaying dangerous actions.
+2. **Layer 1 (Response Scan)**: Scans tool calls in the LLM's response before they execute — blocks new dangerous actions in real-time.
+
+All activity is logged locally to encrypted storage.
+
 ## Documentation
 
 | Guide | Description |
 |-------|-------------|
-| [CLI Reference](docs/cli.md) | Commands, flags, environment variables |
 | [Configuration](docs/configuration.md) | `config.yaml`, providers, auto mode, block modes |
-| [Docker](docs/docker.md) | Dockerfile, docker-compose, TUI in containers |
+| [CLI Reference](docs/cli.md) | Commands, flags, environment variables |
 | [How It Works](docs/how-it-works.md) | Architecture, rule schema, protection categories |
+| [Docker](docs/docker.md) | Dockerfile, docker-compose, TUI in containers |
 | [TUI Design](docs/tui.md) | Terminal UI internals, plain mode, Docker behavior |
 
 ## Build from Source
 
-Requires Go 1.24+ and [Task](https://taskfile.dev).
+Requires Go 1.24+ and a C compiler (CGO is needed for SQLite).
 
 ```bash
 git clone https://github.com/BakeLens/crust.git
 cd crust
-task build
-./crust version
+go build .
+./crust version   # Windows: .\crust.exe version
 ```
 
 ## Contributing
