@@ -30,10 +30,11 @@ type RequestContext struct {
 	SpanKind  string
 
 	// Request metadata
-	Model     string
-	TargetURL string
-	APIType   types.APIType
-	Tools     []ToolDefinition
+	Model          string
+	TargetURL      string
+	APIType        types.APIType
+	Tools          []ToolDefinition
+	ProviderAPIKey string // per-provider API key (from config)
 
 	// Telemetry (optional)
 	Provider *telemetry.Provider

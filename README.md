@@ -168,8 +168,10 @@ upstream:
   url: "https://openrouter.ai/api"       # fallback upstream
   timeout: 300
   providers:                               # custom model routing
-    my-llama: "http://localhost:11434/v1"
-    my-vllm:  "http://gpu-server:8000/v1"
+    my-llama: "http://localhost:11434/v1"  # short form (URL only)
+    openai:                                # expanded form (URL + API key)
+      url: "https://api.openai.com"
+      api_key: "$OPENAI_API_KEY"           # env variable expansion
 
 security:
   enabled: true
@@ -183,7 +185,7 @@ sandbox:
   enabled: false        # OS-level sandbox (Landlock/Seatbelt)
 ```
 
-In auto mode (`--auto`), the gateway resolves providers from the model name using a [built-in registry](internal/proxy/providers.go) (Anthropic, OpenAI, DeepSeek, Gemini, Mistral, Groq, and more). Clients bring their own API keys. User-defined providers take priority.
+In auto mode (`--auto`), the gateway resolves providers from the model name using a [built-in registry](internal/proxy/providers.go) (Anthropic, OpenAI, DeepSeek, Gemini, Mistral, Groq, and more). Clients bring their own API keys unless a per-provider `api_key` is configured. User-defined providers take priority. API key values support `$VAR` and `${VAR}` environment variable expansion.
 
 </details>
 
@@ -197,7 +199,7 @@ docker build -t crust .
 docker run -p 9090:9090 crust
 ```
 
-Or with docker-compose:
+Or with docker-compose (with per-provider API keys injected via environment):
 
 ```yaml
 # docker-compose.yml
@@ -207,6 +209,19 @@ services:
     ports:
       - "9090:9090"
     restart: always
+    environment:
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+    volumes:
+      - ./config.yaml:/root/.crust/config.yaml:ro
+```
+
+```yaml
+# config.yaml — provider keys reference env vars
+upstream:
+  providers:
+    openai:
+      url: "https://api.openai.com"
+      api_key: "$OPENAI_API_KEY"
 ```
 
 Point your agents to `http://<docker-host>:9090` instead of `localhost`.

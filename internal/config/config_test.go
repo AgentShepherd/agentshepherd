@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/BakeLens/crust/internal/types"
+	"gopkg.in/yaml.v3"
 )
 
 func TestSecurityConfig_Validate_Defaults(t *testing.T) {
@@ -239,23 +240,23 @@ func TestValidate_RetentionDays(t *testing.T) {
 
 func TestValidate_ProviderURL(t *testing.T) {
 	cfg := DefaultConfig()
-	cfg.Upstream.Providers = map[string]string{
-		"good": "http://localhost:11434/v1",
+	cfg.Upstream.Providers = map[string]ProviderConfig{
+		"good": {URL: "http://localhost:11434/v1"},
 	}
 	if err := cfg.Validate(); err != nil {
 		t.Errorf("valid provider URL should pass: %v", err)
 	}
 
-	cfg.Upstream.Providers = map[string]string{
-		"empty": "",
+	cfg.Upstream.Providers = map[string]ProviderConfig{
+		"empty": {URL: ""},
 	}
 	err := cfg.Validate()
 	if err == nil || !strings.Contains(err.Error(), "upstream.providers.empty") {
 		t.Errorf("empty provider URL should fail: %v", err)
 	}
 
-	cfg.Upstream.Providers = map[string]string{
-		"bad": "ftp://nope",
+	cfg.Upstream.Providers = map[string]ProviderConfig{
+		"bad": {URL: "ftp://nope"},
 	}
 	err = cfg.Validate()
 	if err == nil || !strings.Contains(err.Error(), "upstream.providers.bad") {
@@ -335,5 +336,116 @@ func TestLoad_FileNotExist(t *testing.T) {
 	}
 	if cfg.Server.Port != 9090 {
 		t.Errorf("Server.Port = %d, want default 9090", cfg.Server.Port)
+	}
+}
+
+// --- ProviderConfig YAML unmarshaling tests (Docker config support) ---
+
+func TestProviderConfig_Unmarshal(t *testing.T) {
+	yamlData := `
+upstream:
+  providers:
+    my-llama: "http://localhost:11434/v1"
+    openai:
+      url: "https://api.openai.com"
+      api_key: "sk-test"
+`
+	var cfg Config
+	if err := yaml.Unmarshal([]byte(yamlData), &cfg); err != nil {
+		t.Fatalf("unmarshal failed: %v", err)
+	}
+	if len(cfg.Upstream.Providers) != 2 {
+		t.Fatalf("expected 2 providers, got %d", len(cfg.Upstream.Providers))
+	}
+
+	// Short form: URL only
+	llama := cfg.Upstream.Providers["my-llama"]
+	if llama.URL != "http://localhost:11434/v1" || llama.APIKey != "" {
+		t.Errorf("my-llama: URL=%q APIKey=%q, want URL-only", llama.URL, llama.APIKey)
+	}
+
+	// Expanded form: URL + API key
+	openai := cfg.Upstream.Providers["openai"]
+	if openai.URL != "https://api.openai.com" || openai.APIKey != "sk-test" {
+		t.Errorf("openai: URL=%q APIKey=%q", openai.URL, openai.APIKey)
+	}
+}
+
+func TestLoad_ProviderEnvExpansion(t *testing.T) {
+	tests := []struct {
+		name    string
+		envKey  string
+		envVal  string
+		apiKey  string
+		wantKey string
+	}{
+		{"dollar form", "CRUST_TEST_KEY1", "sk-dollar", "$CRUST_TEST_KEY1", "sk-dollar"},
+		{"brace form", "CRUST_TEST_KEY2", "sk-brace", "${CRUST_TEST_KEY2}", "sk-brace"},
+		{"unset var", "", "", "$CRUST_TEST_NONEXISTENT", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.envKey != "" {
+				t.Setenv(tt.envKey, tt.envVal)
+			} else {
+				os.Unsetenv("CRUST_TEST_NONEXISTENT")
+			}
+
+			dir := t.TempDir()
+			cfgPath := filepath.Join(dir, "config.yaml")
+			data := []byte("upstream:\n  providers:\n    test:\n      url: \"http://localhost:8000\"\n      api_key: \"" + tt.apiKey + "\"\n")
+			if err := os.WriteFile(cfgPath, data, 0o644); err != nil {
+				t.Fatal(err)
+			}
+
+			cfg, err := Load(cfgPath)
+			if err != nil {
+				t.Fatalf("Load failed: %v", err)
+			}
+			if got := cfg.Upstream.Providers["test"].APIKey; got != tt.wantKey {
+				t.Errorf("APIKey = %q, want %q", got, tt.wantKey)
+			}
+		})
+	}
+}
+
+func TestLoad_ProviderShortFormNoExpansion(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(cfgPath, []byte("upstream:\n  providers:\n    my-llama: \"http://localhost:11434/v1\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := Load(cfgPath)
+	if err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+	prov := cfg.Upstream.Providers["my-llama"]
+	if prov.URL != "http://localhost:11434/v1" || prov.APIKey != "" {
+		t.Errorf("short form: URL=%q APIKey=%q", prov.URL, prov.APIKey)
+	}
+}
+
+func TestProviderConfig_MarshalYAML(t *testing.T) {
+	// With API key: should redact
+	out, err := yaml.Marshal(ProviderConfig{URL: "https://api.openai.com", APIKey: "sk-secret"})
+	if err != nil {
+		t.Fatalf("marshal failed: %v", err)
+	}
+	s := string(out)
+	if strings.Contains(s, "sk-secret") {
+		t.Error("API key should be redacted in marshaled output")
+	}
+	if !strings.Contains(s, "***") {
+		t.Error("expected redacted marker '***'")
+	}
+
+	// Without API key: should be simple string
+	out, err = yaml.Marshal(ProviderConfig{URL: "http://localhost:11434/v1"})
+	if err != nil {
+		t.Fatalf("marshal failed: %v", err)
+	}
+	if !strings.Contains(string(out), "http://localhost:11434/v1") {
+		t.Error("expected URL in output")
 	}
 }

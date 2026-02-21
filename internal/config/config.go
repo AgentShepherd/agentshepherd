@@ -47,6 +47,34 @@ type ServerConfig struct {
 	NoColor  bool           `yaml:"no_color"`
 }
 
+// ProviderConfig holds per-provider settings.
+// Supports both short form (just a URL string) and expanded form (url + api_key).
+type ProviderConfig struct {
+	URL    string `yaml:"url"`
+	APIKey string `yaml:"api_key"` //nolint:gosec // not a hardcoded credential, user-configured field
+}
+
+// UnmarshalYAML allows ProviderConfig to be specified as either a plain string
+// (short form: just the URL) or a mapping with url and api_key fields.
+func (p *ProviderConfig) UnmarshalYAML(value *yaml.Node) error {
+	if value.Kind == yaml.ScalarNode {
+		p.URL = value.Value
+		return nil
+	}
+	// Decode as struct (expanded form)
+	type plain ProviderConfig // avoid recursion
+	return value.Decode((*plain)(p))
+}
+
+// MarshalYAML redacts the API key to prevent accidental credential exposure
+// when the config is serialized (e.g., debug dumps, error reports).
+func (p ProviderConfig) MarshalYAML() (interface{}, error) {
+	if p.APIKey != "" {
+		return map[string]string{"url": p.URL, "api_key": "***"}, nil
+	}
+	return p.URL, nil
+}
+
 // UpstreamConfig holds upstream (downstream target) settings
 type UpstreamConfig struct {
 	// URL is the target to forward requests to (e.g., router or provider)
@@ -55,8 +83,10 @@ type UpstreamConfig struct {
 	Timeout int `yaml:"timeout"`
 	// APIKey for upstream authentication (set at runtime, not from config file)
 	APIKey string `yaml:"-"` //nolint:gosec // not a hardcoded credential, runtime-set field
-	// Providers maps user-defined model keywords to base URLs (e.g. "my-llama": "http://localhost:11434/v1")
-	Providers map[string]string `yaml:"providers"`
+	// Providers maps user-defined model keywords to provider configs.
+	// Short form: "my-llama": "http://localhost:11434/v1"
+	// Expanded form: "openai": {url: "https://api.openai.com", api_key: "$OPENAI_API_KEY"}
+	Providers map[string]ProviderConfig `yaml:"providers"`
 }
 
 // StorageConfig holds unified database settings
@@ -204,11 +234,11 @@ func (c *Config) Validate() error {
 	}
 
 	// Provider URLs
-	for name, provURL := range c.Upstream.Providers {
-		if provURL == "" {
+	for name, prov := range c.Upstream.Providers {
+		if prov.URL == "" {
 			errs = append(errs, fmt.Sprintf("upstream.providers.%s: URL must not be empty", name))
-		} else if u, err := url.Parse(provURL); err != nil || (u.Scheme != "http" && u.Scheme != "https") {
-			errs = append(errs, fmt.Sprintf("upstream.providers.%s: must be a valid http/https URL (got %q)", name, provURL))
+		} else if u, err := url.Parse(prov.URL); err != nil || (u.Scheme != "http" && u.Scheme != "https") {
+			errs = append(errs, fmt.Sprintf("upstream.providers.%s: must be a valid http/https URL (got %q)", name, prov.URL))
 		}
 	}
 
@@ -269,6 +299,18 @@ func Load(path string) (*Config, error) {
 			}
 		} else {
 			return nil, fmt.Errorf("config parse error: %w", err)
+		}
+	}
+
+	// Expand environment variables in provider API keys
+	for name, prov := range cfg.Upstream.Providers {
+		if prov.APIKey != "" {
+			raw := prov.APIKey
+			prov.APIKey = os.ExpandEnv(prov.APIKey)
+			if prov.APIKey == "" {
+				cfgLog.Warn("upstream.providers.%s: api_key references unset env var %q (expanded to empty)", name, raw)
+			}
+			cfg.Upstream.Providers[name] = prov
 		}
 	}
 
