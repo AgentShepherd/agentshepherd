@@ -260,7 +260,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		sessionID = traceID // fallback to traceID if no messages
 	}
 
-	// Strip /api prefix sent by some clients (e.g. PhpStorm) before any
+	// Strip /api prefix sent by some IDE clients before any
 	// path-based logic so detectAPIType and buildUpstreamURL both see
 	// the canonical path.
 	reqPath := stripAPIPrefix(r.URL.Path)
@@ -706,9 +706,9 @@ readLoop:
 }
 
 // stripAPIPrefix removes a leading "/api" segment from the request path.
-// Some clients (e.g. JetBrains IDEs) prepend /api/ when targeting an
-// OpenAI-compatible endpoint. Only strips when "/api" is followed by "/"
-// or is the entire path — "/apis/..." is left untouched.
+// Some IDE clients prepend /api/ when targeting an OpenAI-compatible
+// endpoint. Only strips when "/api" is followed by "/" or is the entire
+// path — "/apis/..." is left untouched.
 func stripAPIPrefix(path string) string {
 	if path == "/api" {
 		return "/"

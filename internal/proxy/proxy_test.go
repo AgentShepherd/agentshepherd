@@ -163,7 +163,7 @@ func TestBuildUpstreamURL_EndpointMode(t *testing.T) {
 			wantHost: "localhost:11434",
 			wantPath: "/v1/chat/completions",
 		},
-		// Issue #19: /api/v1 prefix from clients like PhpStorm
+		// Issue #19: /api/v1 prefix from some IDE clients
 		{
 			name:     "issue19: /api/v1 prefix stripped in endpoint mode",
 			upstream: "http://localhost:11434/v1",

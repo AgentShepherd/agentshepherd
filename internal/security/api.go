@@ -40,6 +40,21 @@ func NewAPIServer(storage *telemetry.Storage, interceptor *Interceptor) *APIServ
 	return s
 }
 
+// Management API route group prefixes (relative to /api).
+// Used by both registerRoutes and APIPrefixes to stay in sync.
+var apiGroups = []string{"/security", "/telemetry", "/crust"}
+
+// APIPrefixes returns the top-level path prefixes registered under /api.
+// Used by the mux in main.go to register only management routes so that
+// /api/v1/... from LLM clients falls through to the proxy handler.
+func APIPrefixes() []string {
+	prefixes := make([]string, len(apiGroups))
+	for i, g := range apiGroups {
+		prefixes[i] = "/api" + g + "/"
+	}
+	return prefixes
+}
+
 // Handler returns the HTTP handler for the API
 func (s *APIServer) Handler() http.Handler {
 	return s.router
@@ -53,7 +68,7 @@ func (s *APIServer) registerRoutes() {
 	apiGroup := s.router.Group("/api")
 	{
 		// Security routes
-		security := apiGroup.Group("/security")
+		security := apiGroup.Group(apiGroups[0])
 		{
 			security.GET("/logs", s.handleLogs)
 			security.GET("/stats", s.handleStats)
@@ -61,7 +76,7 @@ func (s *APIServer) registerRoutes() {
 		}
 
 		// Telemetry routes
-		telemetryGroup := apiGroup.Group("/telemetry")
+		telemetryGroup := apiGroup.Group(apiGroups[1])
 		{
 			telemetryGroup.GET("/traces", s.telemetryAPI.HandleTraces)
 			telemetryGroup.GET("/traces/:trace_id", s.telemetryAPI.HandleTrace)
@@ -73,7 +88,7 @@ func (s *APIServer) registerRoutes() {
 		// Rules routes (if rule engine is available)
 		if ruleEngine := rules.GetGlobalEngine(); ruleEngine != nil {
 			rulesAPI := rules.NewAPIHandler(ruleEngine)
-			rulesGroup := apiGroup.Group("/crust/rules")
+			rulesGroup := apiGroup.Group(apiGroups[2] + "/rules")
 			{
 				rulesGroup.GET("", rulesAPI.HandleRules)
 				rulesGroup.GET("/builtin", rulesAPI.HandleBuiltinRules)
