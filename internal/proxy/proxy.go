@@ -260,8 +260,13 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		sessionID = traceID // fallback to traceID if no messages
 	}
 
+	// Strip /api prefix sent by some clients (e.g. PhpStorm) before any
+	// path-based logic so detectAPIType and buildUpstreamURL both see
+	// the canonical path.
+	reqPath := stripAPIPrefix(r.URL.Path)
+
 	// Determine API type from path
-	apiType := detectAPIType(r.URL.Path)
+	apiType := detectAPIType(reqPath)
 
 	// [Layer0] Scan tool_calls in request history (format-agnostic).
 	// Walks raw JSON to find tool calls across OpenAI Chat, Anthropic Messages,
@@ -305,7 +310,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Build upstream URL
-	upstreamURL, providerAPIKey, err := p.buildUpstreamURL(r.URL.Path, reqBody.Model)
+	upstreamURL, providerAPIKey, err := p.buildUpstreamURL(reqPath, reqBody.Model)
 	if err != nil {
 		log.Warn("Failed to build upstream URL: %v", err)
 		http.Error(w, "invalid upstream URL", http.StatusBadGateway)
@@ -700,6 +705,20 @@ readLoop:
 	}
 }
 
+// stripAPIPrefix removes a leading "/api" segment from the request path.
+// Some clients (e.g. JetBrains IDEs) prepend /api/ when targeting an
+// OpenAI-compatible endpoint. Only strips when "/api" is followed by "/"
+// or is the entire path — "/apis/..." is left untouched.
+func stripAPIPrefix(path string) string {
+	if path == "/api" {
+		return "/"
+	}
+	if after, ok := strings.CutPrefix(path, "/api/"); ok {
+		return "/" + after
+	}
+	return path
+}
+
 // detectAPIType detects the API type from the request path
 func detectAPIType(path string) types.APIType {
 	if strings.Contains(path, "/anthropic") || strings.Contains(path, "/v1/messages") {
@@ -741,6 +760,9 @@ func injectAuth(h http.Header, providerKey, gatewayKey string, isAnthropic bool)
 // it always uses the configured upstream URL.
 // Returns the target URL and an optional per-provider API key.
 func (p *Proxy) buildUpstreamURL(reqPath, model string) (url.URL, string, error) {
+	// Strip /api prefix (idempotent — ServeHTTP also strips for detectAPIType).
+	reqPath = stripAPIPrefix(reqPath)
+
 	u := *p.upstreamURL
 
 	if p.autoMode {

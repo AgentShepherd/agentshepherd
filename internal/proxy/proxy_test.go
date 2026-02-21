@@ -163,6 +163,23 @@ func TestBuildUpstreamURL_EndpointMode(t *testing.T) {
 			wantHost: "localhost:11434",
 			wantPath: "/v1/chat/completions",
 		},
+		// Issue #19: /api/v1 prefix from clients like PhpStorm
+		{
+			name:     "issue19: /api/v1 prefix stripped in endpoint mode",
+			upstream: "http://localhost:11434/v1",
+			reqPath:  "/api/v1/chat/completions",
+			model:    "qwen3",
+			wantHost: "localhost:11434",
+			wantPath: "/v1/chat/completions",
+		},
+		{
+			name:     "issue19: /api/v1 prefix stripped — plain host endpoint",
+			upstream: "http://localhost:11434",
+			reqPath:  "/api/v1/chat/completions",
+			model:    "qwen3",
+			wantHost: "localhost:11434",
+			wantPath: "/v1/chat/completions",
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -239,6 +256,49 @@ func TestBuildUpstreamURL_AutoMode(t *testing.T) {
 			model:    "codex-mini",
 			wantHost: "chatgpt.com",
 			wantPath: "/backend-api/codex/responses",
+		},
+		// Issue #19: client sends /api/v1/... — the /api prefix must be
+		// stripped so the upstream URL doesn't become
+		// https://api.openai.com/api/v1/chat/completions (404).
+		{
+			name:     "issue19: /api/v1 prefix stripped for openai",
+			upstream: "http://fallback:8080",
+			reqPath:  "/api/v1/chat/completions",
+			model:    "gpt-4o",
+			wantHost: "api.openai.com",
+			wantPath: "/v1/chat/completions",
+		},
+		{
+			name:     "issue19: /api/v1 prefix stripped for anthropic",
+			upstream: "http://fallback:8080",
+			reqPath:  "/api/v1/messages",
+			model:    "claude-sonnet-4-5-20250929",
+			wantHost: "api.anthropic.com",
+			wantPath: "/v1/messages",
+		},
+		{
+			name:     "issue19: /api/v1 prefix stripped for deepseek",
+			upstream: "http://fallback:8080",
+			reqPath:  "/api/v1/chat/completions",
+			model:    "deepseek-chat",
+			wantHost: "api.deepseek.com",
+			wantPath: "/v1/chat/completions",
+		},
+		{
+			name:     "issue19: /api/v1 prefix stripped for fallback",
+			upstream: "http://fallback:8080",
+			reqPath:  "/api/v1/chat/completions",
+			model:    "unknown-model",
+			wantHost: "fallback:8080",
+			wantPath: "/v1/chat/completions",
+		},
+		{
+			name:     "issue19: /api prefix stripped for responses endpoint",
+			upstream: "http://fallback:8080",
+			reqPath:  "/api/responses",
+			model:    "gpt-4o",
+			wantHost: "api.openai.com",
+			wantPath: "/v1/responses",
 		},
 	}
 	for _, tt := range tests {
