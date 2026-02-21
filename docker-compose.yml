@@ -1,0 +1,14 @@
+services:
+  crust:
+    build: .
+    ports:
+      - "9090:9090"
+    tty: true
+    restart: always
+    environment:
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+    volumes:
+      - crust-data:/home/crust/.crust
+      - ./config.yaml:/home/crust/.crust/config.yaml:ro
+volumes:
+  crust-data:

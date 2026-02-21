@@ -10,10 +10,11 @@ crust start --auto --block-mode replace     # Show block messages to agent
 crust start --foreground --auto             # Foreground mode (for Docker)
 crust stop                                  # Stop the gateway
 crust status [--json] [--live]              # Check if running
+crust status --live --api-addr HOST:PORT    # Remote dashboard (Docker)
 crust logs [-f] [-n N]                      # View logs
 
 # Rules
-crust list-rules [--json]                   # List active rules
+crust list-rules [--json] [--api-addr ADDR] # List active rules
 crust add-rule FILE                         # Add custom rules (hot reload)
 crust remove-rule FILE                      # Remove user rules
 crust reload-rules                          # Force reload all rules
@@ -41,6 +42,12 @@ crust uninstall                             # Complete removal
 | `--telemetry` | Enable telemetry |
 | `--retention-days N` | Telemetry retention in days (0=forever) |
 | `--db-key KEY` | Database encryption key (prefer `DB_KEY` env var) |
+
+## Status / List-Rules Flags
+
+| Flag | Description |
+|------|-------------|
+| `--api-addr HOST:PORT` | Connect to a remote daemon (e.g. Docker) over TCP instead of the local Unix socket |
 
 ## Environment Variables
 
@@ -74,4 +81,8 @@ crust lint-rules my-rules.yaml
 # Machine-readable output
 crust status --json
 crust list-rules --json
+
+# Remote dashboard (daemon running in Docker)
+crust status --live --api-addr localhost:9090
+crust list-rules --api-addr localhost:9090
 ```

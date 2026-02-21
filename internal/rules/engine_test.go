@@ -728,8 +728,8 @@ func TestSelfProtectSocketRegex_Blocks(t *testing.T) {
 		{"python AF_UNIX", `python3 -c "import socket; s=socket.socket(socket.AF_UNIX)"`},
 		{"socket filename", `cat ~/.crust/crust-api-9090.sock`},
 		{"socket filename variant", `ls ~/.crust/crust-api-9091.sock`},
-		{"windows pipe", `echo | \\.\pipe\crust-api`},
-		{"dotnet pipe", `new NamedPipeClientStream(".", "crust-api")`},
+		{"windows pipe", `echo | \\.\pipe\crust-api-9090.sock`},
+		{"dotnet pipe", `new NamedPipeClientStream(".", "crust-api-9090.sock")`},
 	}
 
 	for _, tt := range blocked {

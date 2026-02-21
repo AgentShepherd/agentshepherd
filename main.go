@@ -17,7 +17,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/BakeLens/crust/internal/earlyinit" // must be first: prevents terminal queries before bubbletea init
+	"github.com/BakeLens/crust/internal/earlyinit" // side-effect import: init() runs before bubbletea's via dependency order + lexicographic tie-breaking
 
 	"github.com/BakeLens/crust/internal/completion"
 	"github.com/BakeLens/crust/internal/config"
@@ -52,14 +52,24 @@ var Version = "2.1.0"
 // apiClient provides API access for CLI commands
 type apiClient struct {
 	cfg    *config.Config
-	client *http.Client // uses Unix socket / named pipe transport
+	client *http.Client // uses Unix socket / named pipe transport (or TCP for remote)
+	remote string       // non-empty when connecting to a remote daemon
 }
 
-// newAPIClient creates a new CLI API client
-func newAPIClient() *apiClient {
+// newAPIClient creates a CLI API client.
+// If remoteAddr is empty, connects via local Unix socket / named pipe.
+// If remoteAddr is set (e.g., "localhost:9090"), connects over TCP.
+func newAPIClient(remoteAddr ...string) *apiClient {
 	cfg, err := config.Load(config.DefaultConfigPath())
 	if err != nil {
 		cfg = config.DefaultConfig()
+	}
+	if len(remoteAddr) > 0 && remoteAddr[0] != "" {
+		return &apiClient{
+			cfg:    cfg,
+			client: &http.Client{},
+			remote: remoteAddr[0],
+		}
 	}
 	socketPath := cfg.API.SocketPath
 	if socketPath == "" {
@@ -72,13 +82,20 @@ func newAPIClient() *apiClient {
 }
 
 // apiURL returns the base URL for the management API.
-// The host is a dummy — the transport routes via socket/pipe.
+// For local: dummy host routed via socket/pipe.
+// For remote: TCP address of the daemon.
 func (c *apiClient) apiURL() string {
-	return "http://crust-api"
+	if c.remote != "" {
+		return "http://" + c.remote
+	}
+	return dashboard.DefaultAPIBase
 }
 
 // proxyBaseURL returns the proxy base URL
 func (c *apiClient) proxyBaseURL() string {
+	if c.remote != "" {
+		return "http://" + c.remote
+	}
 	return fmt.Sprintf("http://localhost:%d", c.cfg.Server.Port)
 }
 
@@ -214,19 +231,20 @@ func main() {
 
 // runStart handles the start subcommand
 func runStart(args []string) {
-	// Foreground mode: earlyinit already set TERM=dumb to suppress termenv's
-	// OSC queries during bubbletea's package init(). Now restore the original
-	// TERM and color profile so styled output works. HasDarkBackground is set
-	// explicitly to prevent any future terminal queries.
+	// Foreground mode: if earlyinit suppressed TERM (no real TTY), restore
+	// the original TERM and set fallback color config. If a real TTY was
+	// present, lipgloss will auto-detect background color on first render.
 	if earlyinit.Foreground {
-		os.Setenv("TERM", earlyinit.OrigTERM)
-		lipgloss.SetHasDarkBackground(true)
-		lipgloss.SetColorProfile(colorProfileFromTERM(earlyinit.OrigTERM))
+		if earlyinit.Suppressed {
+			os.Setenv("TERM", earlyinit.OrigTERM)
+			lipgloss.SetHasDarkBackground(true)
+			lipgloss.SetColorProfile(colorProfileFromTERM(earlyinit.OrigTERM))
+		}
 
 		// Enable styled TUI output when stdout is a TTY and TERM supports
-		// colors. Docker containers lack terminal-specific env vars, so
+		// colors. Docker containers may lack terminal-specific env vars, so
 		// auto-detection falls back to CapNone → plain mode. Override that
-		// here since the TTY + restored color profile are sufficient.
+		// here since the TTY + color profile are sufficient.
 		_, noColor := os.LookupEnv("NO_COLOR")
 		isTTY := term.IsTerminal(int(os.Stdout.Fd())) //nolint:gosec // Fd() fits int
 		if !noColor && isTTY && earlyinit.OrigTERM != "" && earlyinit.OrigTERM != "dumb" {
@@ -304,7 +322,7 @@ func runStart(args []string) {
 	}
 
 	// Foreground mode - run server directly without daemonizing (for Docker/containers).
-	// If detached (non-interactive), TUI was already disabled by earlyinit.
+	// If detached (no TTY), earlyinit suppressed TERM and plain mode auto-detects from non-TTY stdout.
 	// If interactive (docker run -it), full TUI is available.
 	if *foreground {
 		runDaemon(cfg, *logLevel, *disableBuiltin, *endpoint, *apiKey, *dbKey,
@@ -609,6 +627,11 @@ func runDaemon(cfg *config.Config, logLevel string, disableBuiltin bool, endpoin
 
 	// Create HTTP server
 	mux := http.NewServeMux()
+	if listenAddr != "" && listenAddr != "127.0.0.1" && listenAddr != "localhost" {
+		// Expose management API on proxy port for remote access (Docker/container mode).
+		// On localhost, the Unix socket is used instead (more secure).
+		mux.Handle("/api/", manager.APIHandler())
+	}
 	mux.Handle("/", proxyHandler)
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -687,43 +710,52 @@ func runStatus(args []string) {
 	statusFlags := flag.NewFlagSet("status", flag.ExitOnError)
 	jsonOutput := statusFlags.Bool("json", false, "Output as JSON")
 	live := statusFlags.Bool("live", false, "Live dashboard with auto-refresh")
+	apiAddr := statusFlags.String("api-addr", "", "Remote daemon address (host:port)")
 	_ = statusFlags.Parse(args)
 
-	running, pid := daemon.IsRunning()
+	// Resolve client, PID, and log file based on local vs remote
+	var client *apiClient
+	var pid int
+	var logFile string
 
-	if *jsonOutput {
-		status := map[string]any{
-			"running": running,
-			"pid":     pid,
+	if *apiAddr != "" {
+		client = newAPIClient(*apiAddr)
+	} else {
+		running, localPID := daemon.IsRunning()
+		if *jsonOutput {
+			status := map[string]any{"running": running, "pid": localPID}
+			if running {
+				c := newAPIClient()
+				healthy, _ := c.checkHealth() //nolint:errcheck // error means unhealthy
+				status["healthy"] = healthy
+				status["log_file"] = daemon.LogFile()
+			}
+			out, _ := json.MarshalIndent(status, "", "  ") //nolint:errcheck // marshal of map[string]any won't fail
+			fmt.Println(string(out))
+			return
 		}
-		if running {
-			client := newAPIClient()
-			healthy, _ := client.checkHealth() //nolint:errcheck // error means unhealthy
-			status["healthy"] = healthy
-			status["log_file"] = daemon.LogFile()
+		if !running {
+			tui.PrintInfo("Crust is not running")
+			return
 		}
-		out, _ := json.MarshalIndent(status, "", "  ") //nolint:errcheck // marshal of map[string]any won't fail
-		fmt.Println(string(out))
-		return
+		client = newAPIClient()
+		pid = localPID
+		logFile = daemon.LogFileDisplay()
 	}
 
-	if !running {
-		tui.PrintInfo("Crust is not running")
-		return
-	}
-
-	client := newAPIClient()
-
-	// Live dashboard mode
 	if *live {
-		if err := dashboard.Run(client.client, client.proxyBaseURL(), pid, daemon.LogFileDisplay()); err != nil {
+		if err := dashboard.Run(client.client, client.apiURL(), client.proxyBaseURL(), pid, logFile); err != nil {
 			tui.PrintError(fmt.Sprintf("Dashboard error: %v", err))
 		}
 		return
 	}
 
-	// Static display — FetchStatus handles health, security, and stats in one call
-	data := dashboard.FetchStatus(client.client, client.proxyBaseURL(), pid, daemon.LogFileDisplay())
+	data := dashboard.FetchStatus(client.client, client.apiURL(), client.proxyBaseURL(), pid, logFile)
+	if *jsonOutput {
+		out, _ := json.MarshalIndent(data, "", "  ") //nolint:errcheck // marshal won't fail
+		fmt.Println(string(out))
+		return
+	}
 	fmt.Println(dashboard.RenderStatic(data))
 }
 
@@ -786,7 +818,7 @@ func printUsage() {
 	fmt.Print(tui.AlignColumns([][2]string{
 		{"crust start [flags]", "Start crust (interactive or with flags)"},
 		{"crust stop", "Stop crust"},
-		{"crust status [--json]", "Check if crust is running"},
+		{"crust status [--json] [--live] [--api-addr]", "Check if crust is running"},
 		{"crust logs [-f] [-n N]", "View logs (-f to follow, -n for line count)"},
 	}, "  ", 2, tui.StyleCommand, tui.StyleMuted))
 	fmt.Println()
@@ -937,9 +969,10 @@ func runListRules(args []string) {
 	tui.WindowTitle("crust rules")
 	listFlags := flag.NewFlagSet("list-rules", flag.ExitOnError)
 	jsonOutput := listFlags.Bool("json", false, "Output as JSON")
+	apiAddr := listFlags.String("api-addr", "", "Remote daemon address (host:port)")
 	_ = listFlags.Parse(args)
 
-	client := newAPIClient()
+	client := newAPIClient(*apiAddr)
 	body, err := client.getRules()
 	if err != nil {
 		exitNotRunning()
