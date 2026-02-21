@@ -52,10 +52,11 @@ var Version = "2.1.0"
 // apiClient provides API access for CLI commands
 type apiClient struct {
 	cfg    *config.Config
-	client *http.Client // uses Unix socket / named pipe transport
+	client *http.Client // uses Unix socket / named pipe transport (or TCP for remote)
+	remote string       // non-empty when connecting to a remote daemon
 }
 
-// newAPIClient creates a new CLI API client
+// newAPIClient creates a new CLI API client using the local Unix socket
 func newAPIClient() *apiClient {
 	cfg, err := config.Load(config.DefaultConfigPath())
 	if err != nil {
@@ -71,14 +72,35 @@ func newAPIClient() *apiClient {
 	}
 }
 
+// newRemoteAPIClient creates a CLI API client that connects over TCP.
+// Used when --api-addr is specified (e.g., connecting to a Docker daemon).
+func newRemoteAPIClient(addr string) *apiClient {
+	cfg, err := config.Load(config.DefaultConfigPath())
+	if err != nil {
+		cfg = config.DefaultConfig()
+	}
+	return &apiClient{
+		cfg:    cfg,
+		client: &http.Client{},
+		remote: addr,
+	}
+}
+
 // apiURL returns the base URL for the management API.
-// The host is a dummy — the transport routes via socket/pipe.
+// For local: dummy host routed via socket/pipe.
+// For remote: TCP address of the daemon.
 func (c *apiClient) apiURL() string {
+	if c.remote != "" {
+		return "http://" + c.remote
+	}
 	return "http://crust-api"
 }
 
 // proxyBaseURL returns the proxy base URL
 func (c *apiClient) proxyBaseURL() string {
+	if c.remote != "" {
+		return "http://" + c.remote
+	}
 	return fmt.Sprintf("http://localhost:%d", c.cfg.Server.Port)
 }
 
@@ -610,6 +632,7 @@ func runDaemon(cfg *config.Config, logLevel string, disableBuiltin bool, endpoin
 
 	// Create HTTP server
 	mux := http.NewServeMux()
+	mux.Handle("/api/", manager.APIHandler()) // Management API on proxy port for remote TUI
 	mux.Handle("/", proxyHandler)
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -688,7 +711,28 @@ func runStatus(args []string) {
 	statusFlags := flag.NewFlagSet("status", flag.ExitOnError)
 	jsonOutput := statusFlags.Bool("json", false, "Output as JSON")
 	live := statusFlags.Bool("live", false, "Live dashboard with auto-refresh")
+	apiAddr := statusFlags.String("api-addr", "", "Remote daemon address (host:port)")
 	_ = statusFlags.Parse(args)
+
+	// Remote mode: connect over TCP to a daemon (e.g., in Docker)
+	if *apiAddr != "" {
+		client := newRemoteAPIClient(*apiAddr)
+		if *jsonOutput {
+			data := dashboard.FetchStatus(client.client, client.proxyBaseURL(), 0, "")
+			out, _ := json.MarshalIndent(data, "", "  ") //nolint:errcheck // marshal won't fail
+			fmt.Println(string(out))
+			return
+		}
+		if *live {
+			if err := dashboard.Run(client.client, client.proxyBaseURL(), 0, ""); err != nil {
+				tui.PrintError(fmt.Sprintf("Dashboard error: %v", err))
+			}
+			return
+		}
+		data := dashboard.FetchStatus(client.client, client.proxyBaseURL(), 0, "")
+		fmt.Println(dashboard.RenderStatic(data))
+		return
+	}
 
 	running, pid := daemon.IsRunning()
 
@@ -938,9 +982,15 @@ func runListRules(args []string) {
 	tui.WindowTitle("crust rules")
 	listFlags := flag.NewFlagSet("list-rules", flag.ExitOnError)
 	jsonOutput := listFlags.Bool("json", false, "Output as JSON")
+	apiAddr := listFlags.String("api-addr", "", "Remote daemon address (host:port)")
 	_ = listFlags.Parse(args)
 
-	client := newAPIClient()
+	var client *apiClient
+	if *apiAddr != "" {
+		client = newRemoteAPIClient(*apiAddr)
+	} else {
+		client = newAPIClient()
+	}
 	body, err := client.getRules()
 	if err != nil {
 		exitNotRunning()

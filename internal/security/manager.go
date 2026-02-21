@@ -183,6 +183,15 @@ func (m *Manager) Shutdown(ctx context.Context) error {
 	return nil
 }
 
+// APIHandler returns the management API HTTP handler.
+// Used to mount API routes on the proxy server for remote access.
+func (m *Manager) APIHandler() http.Handler {
+	if m == nil || m.apiServer == nil {
+		return http.NotFoundHandler()
+	}
+	return m.apiServer.Handler()
+}
+
 // GetInterceptor returns the interceptor
 func (m *Manager) GetInterceptor() *Interceptor {
 	if m == nil {
