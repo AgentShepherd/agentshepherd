@@ -80,13 +80,13 @@ func FetchSessionEvents(mgmtClient *http.Client, apiBase string, sessionID strin
 
 // StatusData holds all data for the dashboard display.
 type StatusData struct {
-	Running   bool
-	PID       int
-	Healthy   bool
-	LogFile   string
-	RuleCount int
-	Enabled   bool
-	Stats     SecurityStats
+	Running   bool          `json:"running"`
+	PID       int           `json:"pid"`
+	Healthy   bool          `json:"healthy"`
+	LogFile   string        `json:"log_file"`
+	RuleCount int           `json:"rule_count"`
+	Enabled   bool          `json:"enabled"`
+	Stats     SecurityStats `json:"stats"`
 }
 
 // SecurityStats mirrors API response data for security metrics.

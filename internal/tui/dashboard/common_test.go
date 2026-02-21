@@ -16,16 +16,16 @@ func newTestServer(status any, stats any, sessions any, events any) *httptest.Se
 		_, _ = w.Write([]byte("OK"))
 	})
 	mux.HandleFunc("/api/security/status", func(w http.ResponseWriter, _ *http.Request) {
-		json.NewEncoder(w).Encode(status) //nolint:errcheck
+		json.NewEncoder(w).Encode(status)
 	})
 	mux.HandleFunc("/api/security/stats", func(w http.ResponseWriter, _ *http.Request) {
-		json.NewEncoder(w).Encode(stats) //nolint:errcheck
+		json.NewEncoder(w).Encode(stats)
 	})
 	mux.HandleFunc("/api/telemetry/sessions", func(w http.ResponseWriter, _ *http.Request) {
-		json.NewEncoder(w).Encode(sessions) //nolint:errcheck
+		json.NewEncoder(w).Encode(sessions)
 	})
 	mux.HandleFunc("/api/telemetry/sessions/", func(w http.ResponseWriter, _ *http.Request) {
-		json.NewEncoder(w).Encode(events) //nolint:errcheck
+		json.NewEncoder(w).Encode(events)
 	})
 	return httptest.NewServer(mux)
 }
