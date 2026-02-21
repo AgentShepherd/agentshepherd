@@ -7,13 +7,18 @@ import (
 	"github.com/BakeLens/crust/internal/types"
 )
 
-func TestGetInterceptionConfig_RaceFree(t *testing.T) {
-	origManager := globalManager
-	defer func() {
+func saveGlobalManager(t *testing.T) {
+	t.Helper()
+	orig := globalManager
+	t.Cleanup(func() {
 		globalManagerMu.Lock()
-		globalManager = origManager
+		globalManager = orig
 		globalManagerMu.Unlock()
-	}()
+	})
+}
+
+func TestGetInterceptionConfig_RaceFree(t *testing.T) {
+	saveGlobalManager(t)
 
 	SetGlobalManager(nil)
 
@@ -55,12 +60,7 @@ func TestGetInterceptionConfig_RaceFree(t *testing.T) {
 }
 
 func TestGetInterceptionConfig_NilManager(t *testing.T) {
-	origManager := globalManager
-	defer func() {
-		globalManagerMu.Lock()
-		globalManager = origManager
-		globalManagerMu.Unlock()
-	}()
+	saveGlobalManager(t)
 
 	SetGlobalManager(nil)
 	cfg := GetInterceptionConfig()
@@ -73,12 +73,7 @@ func TestGetInterceptionConfig_NilManager(t *testing.T) {
 }
 
 func TestGetInterceptionConfig_ReadsValues(t *testing.T) {
-	origManager := globalManager
-	defer func() {
-		globalManagerMu.Lock()
-		globalManager = origManager
-		globalManagerMu.Unlock()
-	}()
+	saveGlobalManager(t)
 
 	m := &Manager{
 		bufferStreaming: true,

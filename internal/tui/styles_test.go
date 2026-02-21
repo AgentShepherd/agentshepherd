@@ -8,9 +8,14 @@ import (
 
 // These tests modify global state (plainMode) and must not run in parallel.
 
-func TestHasCapability_PlainMode(t *testing.T) {
+func enablePlainMode(t *testing.T) {
+	t.Helper()
 	SetPlainMode(true)
-	defer SetPlainMode(false)
+	t.Cleanup(func() { SetPlainMode(false) })
+}
+
+func TestHasCapability_PlainMode(t *testing.T) {
+	enablePlainMode(t)
 
 	caps := []terminal.Capability{
 		terminal.CapTruecolor,
@@ -28,8 +33,7 @@ func TestHasCapability_PlainMode(t *testing.T) {
 }
 
 func TestCapabilityHelpers_PlainMode(t *testing.T) {
-	SetPlainMode(true)
-	defer SetPlainMode(false)
+	enablePlainMode(t)
 
 	tests := []struct {
 		name string
@@ -50,8 +54,7 @@ func TestCapabilityHelpers_PlainMode(t *testing.T) {
 }
 
 func TestHyperlink_PlainMode(t *testing.T) {
-	SetPlainMode(true)
-	defer SetPlainMode(false)
+	enablePlainMode(t)
 
 	got := Hyperlink("https://example.com", "click")
 	if got != "click" {
@@ -70,8 +73,7 @@ func TestHyperlink_EmptyURL(t *testing.T) {
 }
 
 func TestPrefix_PlainMode(t *testing.T) {
-	SetPlainMode(true)
-	defer SetPlainMode(false)
+	enablePlainMode(t)
 
 	got := Prefix()
 	if got != "[crust]" {
@@ -80,8 +82,7 @@ func TestPrefix_PlainMode(t *testing.T) {
 }
 
 func TestSeverityBadge_PlainMode(t *testing.T) {
-	SetPlainMode(true)
-	defer SetPlainMode(false)
+	enablePlainMode(t)
 
 	tests := []struct {
 		severity string
@@ -140,8 +141,7 @@ func TestSeverityStyle_MapsCorrectly(t *testing.T) {
 }
 
 func TestSeparator_PlainMode(t *testing.T) {
-	SetPlainMode(true)
-	defer SetPlainMode(false)
+	enablePlainMode(t)
 
 	got := Separator("")
 	if got != "---" {

@@ -1051,81 +1051,34 @@ func TestParseOpenAIEvent_VeryLargePayload(t *testing.T) {
 // Unicode and Special Character Tests
 // =============================================================================
 
-func TestParseAnthropicEvent_UnicodeHandling(t *testing.T) {
+func TestParseEvent_UnicodeHandling(t *testing.T) {
 	tests := []struct {
 		name     string
-		data     string
+		text     string
 		expected string
 	}{
-		{
-			name:     "Chinese characters",
-			data:     `{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"你好世界"}}`,
-			expected: "你好世界",
-		},
-		{
-			name:     "Emoji",
-			data:     `{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hello 👋 World 🌍"}}`,
-			expected: "Hello 👋 World 🌍",
-		},
-		{
-			name:     "Mixed scripts",
-			data:     `{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hello こんにちは مرحبا"}}`,
-			expected: "Hello こんにちは مرحبا",
-		},
-		{
-			name:     "JSON escaped unicode",
-			data:     `{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"\\u0048\\u0065\\u006c\\u006c\\u006f"}}`,
-			expected: "\\u0048\\u0065\\u006c\\u006c\\u006f", // Not decoded by Go's JSON parser in this form
-		},
-		{
-			name:     "Real JSON unicode escapes",
-			data:     `{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"\u0048\u0065\u006c\u006c\u006f"}}`,
-			expected: "Hello",
-		},
+		{"Chinese characters", "你好世界", "你好世界"},
+		{"Emoji", "Hello 👋 World 🌍", "Hello 👋 World 🌍"},
+		{"Mixed scripts", "Hello こんにちは مرحبا", "Hello こんにちは مرحبا"},
+		{"JSON escaped unicode (literal backslash)", `\\u0048\\u0065\\u006c\\u006c\\u006f`, `\u0048\u0065\u006c\u006c\u006f`},
+		{"Real JSON unicode escapes", `\u0048\u0065\u006c\u006c\u006f`, "Hello"},
 	}
 
 	parser := NewSSEParser(false)
 	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			result := parser.ParseAnthropicEvent([]byte(tt.data))
+		t.Run("Anthropic/"+tt.name, func(t *testing.T) {
+			data := `{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"` + tt.text + `"}}`
+			result := parser.ParseAnthropicEvent([]byte(data))
 			if result.TextContent != tt.expected {
 				t.Errorf("TextContent = %q, want %q", result.TextContent, tt.expected)
 			}
-			// Verify it's valid UTF-8
 			if !utf8.ValidString(result.TextContent) {
 				t.Error("TextContent is not valid UTF-8")
 			}
 		})
-	}
-}
-
-func TestParseOpenAIEvent_UnicodeHandling(t *testing.T) {
-	tests := []struct {
-		name     string
-		data     string
-		expected string
-	}{
-		{
-			name:     "Chinese characters",
-			data:     `{"choices":[{"delta":{"content":"你好世界"}}]}`,
-			expected: "你好世界",
-		},
-		{
-			name:     "Emoji",
-			data:     `{"choices":[{"delta":{"content":"🚀 Launch!"}}]}`,
-			expected: "🚀 Launch!",
-		},
-		{
-			name:     "Real JSON unicode escapes",
-			data:     `{"choices":[{"delta":{"content":"\u4e16\u754c"}}]}`,
-			expected: "世界",
-		},
-	}
-
-	parser := NewSSEParser(false)
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			result := parser.ParseOpenAIEvent([]byte(tt.data))
+		t.Run("OpenAI/"+tt.name, func(t *testing.T) {
+			data := `{"choices":[{"delta":{"content":"` + tt.text + `"}}]}`
+			result := parser.ParseOpenAIEvent([]byte(data))
 			if result.TextContent != tt.expected {
 				t.Errorf("TextContent = %q, want %q", result.TextContent, tt.expected)
 			}

