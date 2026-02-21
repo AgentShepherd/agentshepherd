@@ -184,7 +184,7 @@ func (m *Manager) Shutdown(ctx context.Context) error {
 }
 
 // APIHandler returns the management API HTTP handler.
-// Used to mount API routes on the proxy server for remote access.
+// Mounted on the proxy server when --listen-address is non-loopback (Docker mode).
 func (m *Manager) APIHandler() http.Handler {
 	if m == nil || m.apiServer == nil {
 		return http.NotFoundHandler()

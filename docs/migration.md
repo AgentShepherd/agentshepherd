@@ -1,5 +1,24 @@
 # Migration Guide
 
+## Management API on Proxy Port (v2.0 → v2.2)
+
+### What Changed
+
+The management API (`/api/*` routes) is now also mounted on the proxy HTTP server (port 9090) when `--listen-address` is set to a non-loopback address (e.g. `0.0.0.0`). This enables remote management and dashboard usage for Docker deployments. On localhost, the API remains socket-only.
+
+### Impact
+
+- CLI commands (`status`, `list-rules`) accept `--api-addr HOST:PORT` to connect over TCP instead of the local Unix socket.
+- `curl` can now reach the API directly: `curl http://localhost:9090/api/security/status`
+- The Unix socket still works for local connections (backward compatible).
+- Docker users can run the live dashboard from the host: `crust status --live --api-addr localhost:9090`
+
+### Security Note
+
+The API is only mounted on the proxy port when `--listen-address` is non-loopback (e.g. `0.0.0.0`). On localhost (the default), management API access remains socket-only. When exposed, write endpoints (add/remove rules) are accessible to anyone who can reach the port. Restrict network access as appropriate.
+
+---
+
 ## Management API: TCP → Unix Domain Socket (v1.x → v2.0)
 
 ### What Changed
@@ -7,18 +26,20 @@
 The management API now uses Unix domain sockets instead of TCP. This provides kernel-enforced access control (`chmod 0600`), eliminates port conflicts, and is invisible to port scanners.
 
 - **Unix/macOS**: `~/.crust/crust-api-{port}.sock`
-- **Windows**: Named pipe `\\.\pipe\crust-api`
+- **Windows**: Named pipe `\\.\pipe\crust-api-{port}.sock`
 
 ### Impact
 
 - The `api.port` config key is removed. Use `api.socket_path` (or leave empty for auto-derived path).
 - CLI commands (`crust status`, `crust list-rules`) work automatically via the new transport.
 - The `--api-port` flag is removed.
-- API access via `curl` now requires `--unix-socket`:
+- Local API access via `curl` requires `--unix-socket`:
 
 ```bash
 curl --unix-socket ~/.crust/crust-api-9090.sock http://localhost/api/security/status
 ```
+
+- As of v2.2, the API is also available on the proxy port (9090) over TCP — see [v2.0 → v2.2](#management-api-on-proxy-port-v20--v22).
 
 ### Telemetry DB Concurrency
 

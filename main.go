@@ -627,7 +627,11 @@ func runDaemon(cfg *config.Config, logLevel string, disableBuiltin bool, endpoin
 
 	// Create HTTP server
 	mux := http.NewServeMux()
-	mux.Handle("/api/", manager.APIHandler()) // Management API on proxy port for remote TUI
+	if listenAddr != "" && listenAddr != "127.0.0.1" && listenAddr != "localhost" {
+		// Expose management API on proxy port for remote access (Docker/container mode).
+		// On localhost, the Unix socket is used instead (more secure).
+		mux.Handle("/api/", manager.APIHandler())
+	}
 	mux.Handle("/", proxyHandler)
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -814,7 +818,7 @@ func printUsage() {
 	fmt.Print(tui.AlignColumns([][2]string{
 		{"crust start [flags]", "Start crust (interactive or with flags)"},
 		{"crust stop", "Stop crust"},
-		{"crust status [--json]", "Check if crust is running"},
+		{"crust status [--json] [--live] [--api-addr]", "Check if crust is running"},
 		{"crust logs [-f] [-n N]", "View logs (-f to follow, -n for line count)"},
 	}, "  ", 2, tui.StyleCommand, tui.StyleMuted))
 	fmt.Println()

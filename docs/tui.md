@@ -183,12 +183,12 @@ Docker containers differ from local terminals in two ways:
 
 Crust handles both with a two-phase approach:
 
-**Phase 1: earlyinit** (`internal/earlyinit`) — runs before bubbletea's `init()` via Go's package initialization ordering (dependency order, then lexicographic tiebreaker). When `--foreground` is in `os.Args`, saves the original `TERM` and sets `TERM=dumb`. This causes termenv to skip all terminal queries.
+**Phase 1: earlyinit** (`internal/earlyinit`) — runs before bubbletea's `init()` via Go's package initialization ordering (dependency order, then lexicographic tiebreaker). When `--foreground` is in `os.Args`, saves the original `TERM` and checks if stdout is a real TTY via `term.IsTerminal()`. If stdout is **not** a TTY (e.g. `docker run -d` without `-t`), sets `TERM=dumb` to suppress terminal queries. If stdout **is** a TTY (e.g. `docker run -it`), leaves `TERM` alone so lipgloss detects color support normally.
 
 **Phase 2: runStart()** — after bubbletea's init has safely completed:
 
-1. Restores original `TERM` from earlyinit
-2. Sets `lipgloss.SetColorProfile()` and `lipgloss.SetHasDarkBackground(true)` — configures the renderer without terminal queries
+1. If earlyinit suppressed TERM: restores original `TERM`, sets `lipgloss.SetColorProfile()` and `lipgloss.SetHasDarkBackground(true)` — configures the renderer without terminal queries
+2. If earlyinit did not suppress (TTY present): no restore needed — lipgloss auto-detected correctly
 3. If stdout is a TTY and `TERM` supports colors, calls `tui.SetPlainMode(false)` — overrides the `CapNone` → plain fallback
 4. In `runDaemon()`, logger colors are enabled when stderr is a TTY (foreground), disabled otherwise (daemon writes to log files)
 
@@ -198,12 +198,12 @@ Crust handles both with a two-phase approach:
 
 | Mode | TTY | Styled output | Logger colors | Notes |
 |------|-----|---------------|---------------|-------|
-| `docker run -d` | No | No (plain) | No | No TTY → plain mode |
-| `docker run -d -t` | Yes | Yes (ANSI) | Yes | TTY allocated; `docker logs` shows styled output |
+| `docker run -d` | No | No (plain) | No | No TTY → earlyinit suppresses TERM |
+| `docker run -d -t` | Yes | Yes (ANSI) | Yes | TTY allocated; earlyinit skips suppression |
 | `docker run -t` | Yes | Yes (ANSI) | Yes | Attached with TTY |
-| `docker run -it` | Yes | Yes (ANSI) | Yes | Interactive; setup wizard available without `--auto` |
+| `docker run -it` | Yes | Yes (ANSI) | Yes | Interactive; full TUI auto-detected via TTY |
 
-All modes with `-t` get ANSI-styled output (colors, bold, icons). Without `-t`, output is plain text.
+Earlyinit checks `term.IsTerminal(stdout)` at init time. With `-t`, a real TTY exists so TERM is left alone and lipgloss auto-detects color support. Without `-t`, earlyinit sets `TERM=dumb` to suppress escape queries.
 
 ### Recommended Docker usage
 
@@ -225,6 +225,16 @@ docker run -d -t -e NO_COLOR=1 -p 9090:9090 crust
 ```
 
 The default Dockerfile entrypoint includes `--listen-address 0.0.0.0` to accept host connections.
+
+### Remote dashboard
+
+When `--listen-address` is non-loopback (as in Docker's default `0.0.0.0`), the management API is also available on the proxy port (9090), so you can run the interactive dashboard on the host:
+
+```bash
+crust status --live --api-addr localhost:9090
+```
+
+See [docker.md](docker.md#remote-dashboard-from-host) for full details.
 
 ### What works in Docker
 
