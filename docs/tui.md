@@ -242,10 +242,10 @@ All rule-based blocking, tool call inspection (Layers 0 & 1), content scanning, 
 
 ### Persistent data
 
-Telemetry and the SQLite database are stored at `/root/.crust/crust.db`. Mount a volume to persist across restarts:
+Telemetry and the SQLite database are stored at `/home/crust/.crust/crust.db`. Mount a volume to persist across restarts:
 
 ```bash
-docker run -d -t -p 9090:9090 -v crust-data:/root/.crust crust
+docker run -d -t -p 9090:9090 -v crust-data:/home/crust/.crust crust
 ```
 
 If using database encryption (`DB_KEY`), the same key must be provided on every restart.

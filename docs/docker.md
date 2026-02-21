@@ -27,8 +27,8 @@ services:
     environment:
       - OPENAI_API_KEY=${OPENAI_API_KEY}
     volumes:
-      - crust-data:/root/.crust
-      - ./config.yaml:/root/.crust/config.yaml:ro
+      - crust-data:/home/crust/.crust
+      - ./config.yaml:/home/crust/.crust/config.yaml:ro
 volumes:
   crust-data:
 ```
@@ -80,10 +80,10 @@ See [tui.md](tui.md) for the full technical breakdown of how foreground mode han
 
 ## Persistent Data
 
-Telemetry and the SQLite database are stored at `/root/.crust/crust.db`. Mount a volume to persist across restarts:
+Telemetry and the SQLite database are stored at `/home/crust/.crust/crust.db`. Mount a volume to persist across restarts:
 
 ```bash
-docker run -d -t -p 9090:9090 -v crust-data:/root/.crust crust
+docker run -d -t -p 9090:9090 -v crust-data:/home/crust/.crust crust
 ```
 
 If using database encryption (`DB_KEY`), the same key must be provided on every restart.

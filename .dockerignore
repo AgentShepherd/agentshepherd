@@ -1,0 +1,15 @@
+.git
+.github
+docs
+tests
+fonts
+scripts
+example_rules
+*.md
+*.exe
+.env*
+.gitignore
+Taskfile.yml
+sqlc.yaml
+install*.sh
+install*.ps1
