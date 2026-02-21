@@ -128,7 +128,7 @@ func (s *APIServer) handleLogs(c *gin.Context) {
 // Returns in-memory metrics for the current daemon session (not DB totals).
 func (s *APIServer) handleStats(c *gin.Context) {
 	m := GetMetrics()
-	blocked := m.Layer0Blocks.Load() + m.Layer1Blocks.Load() + m.Layer2Blocks.Load()
+	blocked := m.Layer0Blocks.Load() + m.Layer1Blocks.Load()
 
 	api.Success(c, gin.H{
 		"total_tool_calls":   m.TotalToolCalls.Load(),
@@ -137,7 +137,6 @@ func (s *APIServer) handleStats(c *gin.Context) {
 		"layer0_blocks":      m.Layer0Blocks.Load(),
 		"layer1_blocks":      m.Layer1Blocks.Load(),
 		"layer1_allowed":     m.Layer1Allowed.Load(),
-		"layer2_blocks":      m.Layer2Blocks.Load(),
 	})
 }
 

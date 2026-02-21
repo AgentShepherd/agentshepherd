@@ -39,7 +39,3 @@ rules:
   user_dir: ""              # default: ~/.crust/rules.d
   disable_builtin: false    # set true to disable embedded security rules
   watch: true               # enable hot reload via file watching
-
-# OS Sandbox (Layer 2)
-sandbox:
-  enabled: false            # Enable OS-level sandbox (Landlock on Linux, Seatbelt on macOS)

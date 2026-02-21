@@ -80,7 +80,7 @@ type Engine struct {
 	// Stats
 	hitCounts map[string]*int64
 
-	// Callbacks for reload notifications (e.g., sandbox mapper)
+	// Callbacks for reload notifications
 	onReloadCallbacks []ReloadCallback
 }
 
@@ -305,7 +305,7 @@ func (e *Engine) ReloadUserRules() error {
 
 	log.Info("Loaded %d user rules, total %d active rules", len(compiled), len(e.merged))
 
-	// Notify reload callbacks (e.g., sandbox mapper)
+	// Notify reload callbacks
 	e.notifyReload()
 
 	return nil
@@ -794,7 +794,7 @@ func (e *Engine) ValidateYAMLFull(data []byte) ([]RuleValidationResult, error) {
 }
 
 // GetAllRules returns all rules (builtin + user) as a flat slice.
-// Useful for sandbox profile generation and consistency checking.
+// Useful for bulk operations like linting and export.
 func (e *Engine) GetAllRules() []Rule {
 	e.mu.RLock()
 	defer e.mu.RUnlock()

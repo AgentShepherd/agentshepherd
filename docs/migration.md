@@ -60,7 +60,7 @@ curl --unix-socket ~/.crust/crust-api-9090.sock \
 
 The linter reports per-rule results including pattern compilation errors:
 
-```
+```text
 $ crust lint-rules
 Linting builtin rules...
   No issues found.

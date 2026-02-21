@@ -12,6 +12,7 @@
   <a href="https://getcrust.io">Website</a> •
   <a href="#quick-start">Quick Start</a> •
   <a href="#how-it-works">How It Works</a> •
+  <a href="#documentation">Docs</a> •
   <a href="https://github.com/BakeLens/crust/issues">Issues</a> •
   <a href="https://github.com/BakeLens/crust/discussions">Discussions</a>
 </p>
@@ -74,11 +75,10 @@ That's it. Crust auto-detects the provider from the model name and passes throug
   <img src="docs/crust.png" alt="Crust architecture" width="90%" />
 </p>
 
-Crust inspects tool calls at three layers:
+Crust inspects tool calls at two layers:
 
 1. **Layer 0 (Request Scan)**: Scans tool calls in conversation history before they reach the LLM — catches agents replaying dangerous actions.
 2. **Layer 1 (Response Scan)**: Scans tool calls in the LLM's response before they execute — blocks new dangerous actions in real-time.
-3. **Layer 2 (OS Sandbox)**: Kernel-level enforcement via Landlock (Linux) and Seatbelt (macOS) — last line of defense even if rules are bypassed.
 
 All activity is logged locally to encrypted storage.
 
@@ -127,113 +127,17 @@ rules:
 crust add-rule my-rules.yaml    # Rules active immediately (hot reload)
 ```
 
-<details>
-<summary><strong>CLI Reference</strong></summary>
+## Documentation
 
-```bash
-# Gateway
-crust start --auto                          # Auto mode (recommended)
-crust start --endpoint URL --api-key KEY    # Manual mode
-crust start --auto --block-mode replace     # Show block messages to agent
-crust start --foreground --auto             # Foreground mode (for Docker)
-crust stop                                  # Stop the gateway
-crust status                                # Check if running
-crust logs [-f]                             # View logs
+| Guide | Description |
+|-------|-------------|
+| [CLI Reference](docs/cli.md) | Commands, flags, environment variables |
+| [Configuration](docs/configuration.md) | `config.yaml`, providers, auto mode, block modes |
+| [Docker](docs/docker.md) | Dockerfile, docker-compose, TUI in containers |
+| [How It Works](docs/how-it-works.md) | Architecture, rule schema, protection categories |
+| [TUI Design](docs/tui.md) | Terminal UI internals, plain mode, Docker behavior |
 
-# Rules
-crust list-rules                            # List active rules
-crust add-rule FILE                         # Add custom rules (hot reload)
-crust remove-rule FILE                      # Remove user rules
-crust reload-rules                          # Force reload all rules
-crust lint-rules [FILE]                     # Validate rule syntax
-
-# Other
-crust version                               # Show version
-crust uninstall                             # Complete removal
-```
-
-</details>
-
-<details>
-<summary><strong>Configuration</strong></summary>
-
-Crust stores configuration in `~/.crust/config.yaml`:
-
-```yaml
-server:
-  port: 9090
-  log_level: info
-
-upstream:
-  url: "https://openrouter.ai/api"       # fallback upstream
-  timeout: 300
-  providers:                               # custom model routing
-    my-llama: "http://localhost:11434/v1"  # short form (URL only)
-    openai:                                # expanded form (URL + API key)
-      url: "https://api.openai.com"
-      api_key: "$OPENAI_API_KEY"           # env variable expansion
-
-security:
-  enabled: true
-  block_mode: remove    # "remove" or "replace"
-
-rules:
-  enabled: true
-  watch: true           # hot reload on file change
-
-sandbox:
-  enabled: false        # OS-level sandbox (Landlock/Seatbelt)
-```
-
-In auto mode (`--auto`), the gateway resolves providers from the model name using a [built-in registry](internal/proxy/providers.go) (Anthropic, OpenAI, DeepSeek, Gemini, Mistral, Groq, and more). Clients bring their own API keys unless a per-provider `api_key` is configured. User-defined providers take priority. API key values support `$VAR` and `${VAR}` environment variable expansion.
-
-</details>
-
-<details>
-<summary><strong>Docker</strong></summary>
-
-A [`Dockerfile`](Dockerfile) is included in the repo. Build and run:
-
-```bash
-docker build -t crust .
-docker run -p 9090:9090 crust
-```
-
-Or with docker-compose (with per-provider API keys injected via environment):
-
-```yaml
-# docker-compose.yml
-services:
-  crust:
-    build: .
-    ports:
-      - "9090:9090"
-    restart: always
-    environment:
-      - OPENAI_API_KEY=${OPENAI_API_KEY}
-    volumes:
-      - ./config.yaml:/root/.crust/config.yaml:ro
-```
-
-```yaml
-# config.yaml — provider keys reference env vars
-upstream:
-  providers:
-    openai:
-      url: "https://api.openai.com"
-      api_key: "$OPENAI_API_KEY"
-```
-
-Point your agents to `http://<docker-host>:9090` instead of `localhost`.
-
-The `--foreground` flag keeps the process in the foreground so the container stays alive. `--listen-address 0.0.0.0` binds to all interfaces so the host can reach the container.
-
-**What works in Docker:** All rule-based blocking, tool call inspection (Layers 0 & 1), content scanning, telemetry, and auto-mode provider resolution. These operate on API traffic passing through the proxy and work regardless of where Crust runs.
-
-</details>
-
-<details>
-<summary><strong>Build from Source</strong></summary>
+## Build from Source
 
 Requires Go 1.24+ and [Task](https://taskfile.dev).
 
@@ -243,8 +147,6 @@ cd crust
 task build
 ./crust version
 ```
-
-</details>
 
 ## Contributing
 

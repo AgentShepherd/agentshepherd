@@ -10,7 +10,6 @@ body:
       description: Which part of Crust does this relate to?
       options:
         - Rules Engine (Layer 0/1)
-        - Sandbox (Layer 2)
         - CLI / TUI
         - Proxy
         - Configuration

@@ -4,7 +4,7 @@
 
 **Do NOT open a public issue for security vulnerabilities.**
 
-If you discover a security bypass, sandbox escape, or any vulnerability in Crust,
+If you discover a security bypass or any vulnerability in Crust,
 please report it privately using one of these methods:
 
 1. **GitHub Private Vulnerability Reporting** (preferred):
@@ -17,7 +17,7 @@ please report it privately using one of these methods:
 
 - Crust version (`crust version`)
 - Operating system and version
-- Which security layer was bypassed (Layer 0/1/2)
+- Which security layer was bypassed (Layer 0/1)
 - Steps to reproduce
 - Impact assessment
 
@@ -30,7 +30,6 @@ please report it privately using one of these methods:
 ### Scope
 
 The following are in scope:
-- Sandbox escapes (Layer 2 bypass)
 - Rule engine bypasses (Layer 0/1)
 - Path traversal or glob matching bugs
 - Network filter bypasses

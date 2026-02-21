@@ -13,8 +13,11 @@ import (
 	"os/signal"
 	"slices"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
+
+	"github.com/BakeLens/crust/internal/earlyinit" // must be first: prevents terminal queries before bubbletea init
 
 	"github.com/BakeLens/crust/internal/completion"
 	"github.com/BakeLens/crust/internal/config"
@@ -22,7 +25,6 @@ import (
 	"github.com/BakeLens/crust/internal/logger"
 	"github.com/BakeLens/crust/internal/proxy"
 	"github.com/BakeLens/crust/internal/rules"
-	"github.com/BakeLens/crust/internal/sandbox"
 	"github.com/BakeLens/crust/internal/security"
 	"github.com/BakeLens/crust/internal/telemetry"
 	"github.com/BakeLens/crust/internal/tui"
@@ -34,6 +36,10 @@ import (
 	"github.com/BakeLens/crust/internal/tui/spinner"
 	"github.com/BakeLens/crust/internal/tui/startup"
 	"github.com/BakeLens/crust/internal/types"
+
+	"github.com/charmbracelet/lipgloss"
+	"github.com/muesli/termenv"
+	"golang.org/x/term"
 )
 
 // Version is set at build time via ldflags: -X main.Version=x.y.z
@@ -143,17 +149,6 @@ func (c *apiClient) getRulesParsed() (*rulesResponse, error) {
 	return &rulesResp, nil
 }
 
-// toSecurityRules converts []rules.Rule to []sandbox.SecurityRule.
-// This adapter allows main.go to bridge the rules engine and sandbox packages
-// without the sandbox package importing internal/rules.
-func toSecurityRules(rr []rules.Rule) []sandbox.SecurityRule {
-	out := make([]sandbox.SecurityRule, len(rr))
-	for i := range rr {
-		out[i] = &rr[i]
-	}
-	return out
-}
-
 var log = logger.New("main")
 
 func main() {
@@ -201,15 +196,6 @@ func main() {
 		case "uninstall":
 			runUninstall()
 			return
-		case "wrap":
-			runWrap(os.Args[2:])
-			return
-		case "check-sandbox":
-			runCheckSandbox()
-			return
-		case "repair-sandbox":
-			runRepairSandbox()
-			return
 		case "completion":
 			runCompletion(os.Args[2:])
 			return
@@ -228,6 +214,26 @@ func main() {
 
 // runStart handles the start subcommand
 func runStart(args []string) {
+	// Foreground mode: earlyinit already set TERM=dumb to suppress termenv's
+	// OSC queries during bubbletea's package init(). Now restore the original
+	// TERM and color profile so styled output works. HasDarkBackground is set
+	// explicitly to prevent any future terminal queries.
+	if earlyinit.Foreground {
+		os.Setenv("TERM", earlyinit.OrigTERM)
+		lipgloss.SetHasDarkBackground(true)
+		lipgloss.SetColorProfile(colorProfileFromTERM(earlyinit.OrigTERM))
+
+		// Enable styled TUI output when stdout is a TTY and TERM supports
+		// colors. Docker containers lack terminal-specific env vars, so
+		// auto-detection falls back to CapNone → plain mode. Override that
+		// here since the TTY + restored color profile are sufficient.
+		_, noColor := os.LookupEnv("NO_COLOR")
+		isTTY := term.IsTerminal(int(os.Stdout.Fd())) //nolint:gosec // Fd() fits int
+		if !noColor && isTTY && earlyinit.OrigTERM != "" && earlyinit.OrigTERM != "dumb" {
+			tui.SetPlainMode(false)
+		}
+	}
+
 	tui.WindowTitle("crust setup")
 
 	// Check if already running
@@ -297,14 +303,9 @@ func runStart(args []string) {
 		return
 	}
 
-	// Foreground mode - run server directly without daemonizing (for Docker/containers)
-	if *foreground {
-		runDaemon(cfg, *logLevel, *disableBuiltin, *endpoint, *apiKey, *dbKey,
-			*proxyPort, *listenAddr, *telemetryEnabled, *retentionDays, *blockMode, *autoMode)
-		return
-	}
-
-	// Foreground mode - run server directly without daemonizing (for Docker/containers)
+	// Foreground mode - run server directly without daemonizing (for Docker/containers).
+	// If detached (non-interactive), TUI was already disabled by earlyinit.
+	// If interactive (docker run -it), full TUI is available.
 	if *foreground {
 		runDaemon(cfg, *logLevel, *disableBuiltin, *endpoint, *apiKey, *dbKey,
 			*proxyPort, *listenAddr, *telemetryEnabled, *retentionDays, *blockMode, *autoMode)
@@ -466,8 +467,11 @@ func runDaemon(cfg *config.Config, logLevel string, disableBuiltin bool, endpoin
 	} else {
 		logger.SetGlobalLevelFromString(string(cfg.Server.LogLevel))
 	}
-	// Always disable color in daemon mode (no terminal)
-	logger.SetColored(false)
+	// Enable logger colors in foreground mode when stderr is a TTY.
+	// Daemon mode (re-executed process) writes to log files — no colors.
+	if !earlyinit.Foreground || !term.IsTerminal(int(os.Stderr.Fd())) { //nolint:gosec // Fd() fits int
+		logger.SetColored(false)
+	}
 
 	// Apply command-line overrides
 	if endpoint != "" {
@@ -542,24 +546,6 @@ func runDaemon(cfg *config.Config, logLevel string, disableBuiltin bool, endpoin
 			}
 		}
 
-		// Initialize sandbox rules (if enabled)
-		if cfg.Sandbox.Enabled {
-			if !sandbox.IsSupported() {
-				log.Info("Sandbox helper not installed (Layer 2 disabled). Visit https://getcrust.io for installation options.")
-			} else {
-				secRules := toSecurityRules(ruleEngine.GetAllRules())
-				sandbox.SetRules(secRules)
-				log.Info("Sandbox rules set: %d rules loaded", len(secRules))
-
-				ruleEngine.OnReload(func(reloadedRules []rules.Rule) {
-					secReloaded := toSecurityRules(reloadedRules)
-					sandbox.SetRules(secReloaded)
-					log.Debug("Sandbox rules reloaded: %d rules", len(secReloaded))
-				})
-			}
-		} else {
-			log.Debug("Sandbox disabled (set sandbox.enabled=true to enable)")
-		}
 	}
 
 	// Derive socket path for management API (unique per proxy port for multi-session)
@@ -815,11 +801,8 @@ func printUsage() {
 	}, "  ", 2, tui.StyleCommand, tui.StyleMuted))
 	fmt.Println()
 
-	fmt.Println(tui.Separator("Sandbox & Other"))
+	fmt.Println(tui.Separator("Other"))
 	fmt.Print(tui.AlignColumns([][2]string{
-		{"crust wrap [--dry-run] <cmd>", "Run command in OS sandbox"},
-		{"crust check-sandbox", "Verify rule-sandbox consistency"},
-		{"crust repair-sandbox", "Regenerate sandbox profile from rules"},
 		{"crust completion [--install]", "Install shell completion (bash/zsh/fish)"},
 		{"crust uninstall", "Uninstall crust completely"},
 		{"crust help", "Show this help message"},
@@ -838,6 +821,9 @@ func printUsage() {
 		{"--no-color", "Disable colored log output"},
 		{"--disable-builtin", "Disable builtin security rules"},
 		{"--proxy-port int", "Proxy server port (default from config)"},
+		{"--listen-address string", "Bind address (default 127.0.0.1, use 0.0.0.0 for Docker)"},
+		{"--foreground", "Run in foreground (don't daemonize); for Docker/containers"},
+		{"--block-mode string", "Block mode: remove (delete tool calls) or replace (echo)"},
 		{"--telemetry", "Enable/disable telemetry (default false)"},
 		{"--retention-days int", "Telemetry retention in days (0=forever)"},
 	}, "  ", 2, tui.StyleCommand, tui.StyleMuted))
@@ -856,9 +842,33 @@ func printUsage() {
 		{"crust start", "Interactive setup"},
 		{"LLM_API_KEY=sk-xxx crust start --endpoint https://openrouter.ai/api/v1", ""},
 		{"crust start --auto", "Auto mode"},
+		{"crust start --foreground --auto --listen-address 0.0.0.0", "Docker/container mode"},
 		{"crust logs -f", "Follow logs"},
 		{"crust stop", "Stop crust"},
 	}, "  ", 2, tui.StyleCommand, tui.StyleMuted))
+}
+
+// notifyRulesReload triggers a hot reload if the server is running,
+// or prints an info message with the given offline hint.
+func notifyRulesReload(client *apiClient, running bool, offlineHint string) {
+	if running {
+		if _, err := client.reloadRules(); err == nil {
+			tui.PrintSuccess("Hot reload triggered")
+		}
+	} else {
+		tui.PrintInfo(offlineHint)
+	}
+}
+
+// exitNotRunning prints a "not running" error and exits.
+func exitNotRunning() {
+	tui.PrintError("Crust is not running")
+	if tui.IsPlainMode() {
+		fmt.Fprintln(os.Stderr, "  Start it first with: crust start")
+	} else {
+		fmt.Fprintf(os.Stderr, "  Start it first with: %s\n", tui.StyleCommand.Render("crust start"))
+	}
+	os.Exit(1)
 }
 
 // runAddRule handles the add-rule subcommand
@@ -892,14 +902,7 @@ func runAddRule(args []string) {
 	}
 
 	tui.PrintSuccess("Rule file added: " + destPath)
-
-	if serverRunning {
-		if _, err := client.reloadRules(); err == nil {
-			tui.PrintSuccess("Hot reload triggered")
-		}
-	} else {
-		tui.PrintInfo("Crust is not running. Rules will be loaded on next start.")
-	}
+	notifyRulesReload(client, serverRunning, "Crust is not running. Rules will be loaded on next start.")
 }
 
 // runRemoveRule handles the remove-rule subcommand
@@ -926,14 +929,7 @@ func runRemoveRule(args []string) {
 	}
 
 	tui.PrintSuccess("Rule file removed: " + filename)
-
-	if serverRunning {
-		if _, err := client.reloadRules(); err == nil {
-			tui.PrintSuccess("Hot reload triggered")
-		}
-	} else {
-		tui.PrintInfo("Crust is not running. Rules will be updated on next start.")
-	}
+	notifyRulesReload(client, serverRunning, "Crust is not running. Rules will be updated on next start.")
 }
 
 // runListRules handles the list-rules subcommand
@@ -946,13 +942,7 @@ func runListRules(args []string) {
 	client := newAPIClient()
 	body, err := client.getRules()
 	if err != nil {
-		tui.PrintError("Crust is not running")
-		if tui.IsPlainMode() {
-			fmt.Fprintln(os.Stderr, "  Start it first with: crust start")
-		} else {
-			fmt.Fprintf(os.Stderr, "  Start it first with: %s\n", tui.StyleCommand.Render("crust start"))
-		}
-		os.Exit(1)
+		exitNotRunning()
 	}
 
 	if *jsonOutput {
@@ -977,13 +967,7 @@ func runReloadRules(_ []string) {
 	client := newAPIClient()
 	body, err := client.reloadRules()
 	if err != nil {
-		tui.PrintError("Crust is not running")
-		if tui.IsPlainMode() {
-			fmt.Fprintln(os.Stderr, "  Start it first with: crust start")
-		} else {
-			fmt.Fprintf(os.Stderr, "  Start it first with: %s\n", tui.StyleCommand.Render("crust start"))
-		}
-		os.Exit(1)
+		exitNotRunning()
 	}
 	fmt.Println(string(body))
 }
@@ -1045,224 +1029,6 @@ func runUninstall() {
 
 	fmt.Println()
 	tui.PrintSuccess("Crust uninstalled")
-}
-
-// runWrap handles the wrap subcommand - runs a command in OS sandbox
-func runWrap(args []string) {
-	wrapFlags := flag.NewFlagSet("wrap", flag.ExitOnError)
-	dryRun := wrapFlags.Bool("dry-run", false, "Preview sandbox policy without executing")
-	_ = wrapFlags.Parse(args)
-
-	remainingArgs := wrapFlags.Args()
-	if len(remainingArgs) == 0 {
-		tui.PrintError("Usage: crust wrap [--dry-run] <command> [args...]")
-		os.Exit(1)
-	}
-
-	if !sandbox.IsSupported() {
-		tui.PrintError("bakelens-sandbox binary not found")
-		fmt.Fprintf(os.Stderr, "  Visit %s for installation options.\n", tui.Hyperlink("https://getcrust.io", "https://getcrust.io"))
-		os.Exit(1)
-	}
-
-	// Load configuration
-	cfg, err := config.Load(config.DefaultConfigPath())
-	if err != nil {
-		cfg = config.DefaultConfig()
-	}
-
-	rulesDir := cfg.Rules.UserDir
-	if rulesDir == "" {
-		rulesDir = rules.DefaultUserRulesDir()
-	}
-
-	// Load rules and set them for sandbox policy generation
-	loader := rules.NewLoader(rulesDir)
-	var builtinRules []rules.Rule
-	if !cfg.Rules.DisableBuiltin {
-		builtinRules, err = loader.LoadBuiltin()
-		if err != nil {
-			tui.PrintWarning(fmt.Sprintf("Failed to load builtin rules: %v", err))
-		}
-	}
-
-	userRules, err := loader.LoadUser()
-	if err != nil {
-		tui.PrintWarning(fmt.Sprintf("Failed to load user rules: %v", err))
-	}
-
-	allRules := slices.Concat(builtinRules, userRules)
-	sandbox.SetRules(toSecurityRules(allRules))
-
-	// If the Crust proxy is running, inject its URL so agents route through it
-	if running, _ := daemon.IsRunning(); running {
-		if port, err := daemon.ReadPort(); err == nil {
-			sandbox.SetProxyURL(fmt.Sprintf("http://localhost:%d", port))
-		}
-	}
-
-	if *dryRun {
-		// Dry-run: build policy and pipe to Rust sandbox
-		tui.PrintInfo("Sandbox Platform: " + sandbox.Platform())
-		fmt.Println()
-		policyJSON, err := sandbox.BuildPolicy(remainingArgs)
-		if err != nil {
-			tui.PrintError(fmt.Sprintf("Error building policy: %v", err))
-			os.Exit(1)
-		}
-		sb := sandbox.New()
-		exitCode, err := sb.RunHelper(policyJSON)
-		if err != nil {
-			tui.PrintError(err.Error())
-			os.Exit(1)
-		}
-		os.Exit(exitCode)
-	}
-
-	// Create sandbox and execute
-	sb := sandbox.New()
-	exitCode, err := sb.Wrap(remainingArgs)
-	if err != nil {
-		var se *sandbox.Error
-		if errors.As(err, &se) {
-			switch se.Code {
-			case sandbox.ErrCommandNotFound:
-				tui.PrintError("Command not found: " + se.Message)
-			case sandbox.ErrEnforcementUnavailable:
-				tui.PrintError("Sandbox enforcement unavailable: " + se.Message)
-			case sandbox.ErrExecFailed:
-				tui.PrintError("Failed to execute command: " + se.Message)
-			case sandbox.ErrParse:
-				tui.PrintError("Invalid sandbox policy: " + se.Message)
-			default:
-				tui.PrintError("Sandbox error: " + se.Message)
-			}
-		} else {
-			tui.PrintError("Sandbox error: " + err.Error())
-		}
-		if exitCode == 0 {
-			exitCode = 1
-		}
-		os.Exit(exitCode)
-	}
-	os.Exit(exitCode)
-}
-
-// runCheckSandbox handles the check-sandbox subcommand - verifies rule-sandbox consistency.
-// Delegates to Rust's bakelens-sandbox check mode.
-func runCheckSandbox() {
-	cfg, err := config.Load(config.DefaultConfigPath())
-	if err != nil {
-		cfg = config.DefaultConfig()
-	}
-
-	if !cfg.Sandbox.Enabled {
-		tui.PrintInfo("Sandbox is disabled in config - skipping consistency check")
-		return
-	}
-
-	if !sandbox.IsSupported() {
-		tui.PrintError("bakelens-sandbox binary not found")
-		tui.PrintInfo("Visit " + tui.Hyperlink("https://getcrust.io", "https://getcrust.io") + " for installation options")
-		os.Exit(1)
-	}
-
-	tui.PrintInfo("Checking sandbox consistency...")
-	tui.PrintInfo("Platform: " + sandbox.Platform())
-	fmt.Println()
-
-	// Load rules and set them for policy generation
-	loadAndSetRules(cfg)
-
-	// Run a no-op command in the sandbox to verify it works
-	policyJSON, err := sandbox.BuildPolicy([]string{"true"})
-	if err != nil {
-		tui.PrintError(fmt.Sprintf("Error building check policy: %v", err))
-		os.Exit(1)
-	}
-
-	sb := sandbox.New()
-	exitCode, err := sb.RunHelper(policyJSON)
-	if err != nil {
-		tui.PrintError(fmt.Sprintf("Check failed: %v", err))
-		os.Exit(1)
-	}
-	if exitCode != 0 {
-		tui.PrintWarning("Run 'crust repair-sandbox' to fix")
-		os.Exit(exitCode)
-	}
-	tui.PrintSuccess("Rules and sandbox are consistent")
-}
-
-// runRepairSandbox handles the repair-sandbox subcommand - regenerates sandbox profile from rules.
-// Delegates to Rust's bakelens-sandbox repair mode.
-func runRepairSandbox() {
-	cfg, err := config.Load(config.DefaultConfigPath())
-	if err != nil {
-		cfg = config.DefaultConfig()
-	}
-
-	if !cfg.Sandbox.Enabled {
-		tui.PrintInfo("Sandbox is disabled in config - skipping repair")
-		return
-	}
-
-	if !sandbox.IsSupported() {
-		tui.PrintError("bakelens-sandbox binary not found")
-		tui.PrintInfo("Visit " + tui.Hyperlink("https://getcrust.io", "https://getcrust.io") + " for installation options")
-		os.Exit(1)
-	}
-
-	tui.PrintInfo("Repairing sandbox...")
-	tui.PrintInfo("Platform: " + sandbox.Platform())
-	fmt.Println()
-
-	// Load rules and set them for policy generation
-	loadAndSetRules(cfg)
-
-	// Run a no-op command in the sandbox to exercise full setup path
-	policyJSON, err := sandbox.BuildPolicy([]string{"true"})
-	if err != nil {
-		tui.PrintError(fmt.Sprintf("Error building repair policy: %v", err))
-		os.Exit(1)
-	}
-
-	sb := sandbox.New()
-	exitCode, err := sb.RunHelper(policyJSON)
-	if err != nil {
-		tui.PrintError(fmt.Sprintf("Repair failed: %v", err))
-		os.Exit(1)
-	}
-	if exitCode != 0 {
-		os.Exit(exitCode)
-	}
-	tui.PrintSuccess("Sandbox repaired successfully")
-}
-
-// loadAndSetRules loads builtin + user rules and sets them for sandbox policy generation.
-func loadAndSetRules(cfg *config.Config) {
-	rulesDir := cfg.Rules.UserDir
-	if rulesDir == "" {
-		rulesDir = rules.DefaultUserRulesDir()
-	}
-
-	loader := rules.NewLoader(rulesDir)
-	var builtinRules []rules.Rule
-	if !cfg.Rules.DisableBuiltin {
-		var err error
-		builtinRules, err = loader.LoadBuiltin()
-		if err != nil {
-			tui.PrintWarning(fmt.Sprintf("Failed to load builtin rules: %v", err))
-		}
-	}
-
-	userRules, err := loader.LoadUser()
-	if err != nil {
-		tui.PrintWarning(fmt.Sprintf("Failed to load user rules: %v", err))
-	}
-
-	allRules := slices.Concat(builtinRules, userRules)
-	sandbox.SetRules(toSecurityRules(allRules))
 }
 
 // runLintRules handles the lint-rules subcommand - validates rule syntax and patterns
@@ -1386,4 +1152,25 @@ func runCompletion(args []string) {
 		}, "  ", 2, tui.StyleCommand, tui.StyleMuted))
 		fmt.Println()
 	}
+}
+
+// colorProfileFromTERM maps a TERM value to a termenv color profile.
+// Mirrors termenv's ColorProfile() logic for the common cases.
+func colorProfileFromTERM(term string) termenv.Profile {
+	switch term {
+	case "":
+		return termenv.Ascii
+	case "dumb":
+		return termenv.Ascii
+	case "linux", "xterm":
+		return termenv.ANSI
+	}
+	switch {
+	case strings.Contains(term, "256color"):
+		return termenv.ANSI256
+	case strings.Contains(term, "color"), strings.Contains(term, "ansi"):
+		return termenv.ANSI
+	}
+	// xterm-kitty, xterm-ghostty, alacritty, etc.
+	return termenv.TrueColor
 }

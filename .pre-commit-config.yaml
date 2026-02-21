@@ -106,16 +106,6 @@ repos:
         pass_filenames: false
         files: (internal/rules/builtin/security\.yaml|internal/rules/.*_test\.go)$
 
-  # Sandbox consistency check - ensure rules translate to sandbox correctly
-  - repo: local
-    hooks:
-      - id: sandbox-consistency
-        name: sandbox consistency check
-        entry: bash -c 'go build -o /tmp/crust-check . && /tmp/crust-check check-sandbox'
-        language: system
-        pass_filenames: false
-        files: (internal/rules/builtin/.*\.yaml|internal/sandbox/.*\.go)$
-
   # Go unit tests
   - repo: local
     hooks:
@@ -125,17 +115,6 @@ repos:
         language: system
         pass_filenames: false
         files: \.go$
-        stages: [pre-commit]
-
-  # E2E / integration tests (sandbox)
-  - repo: local
-    hooks:
-      - id: go-test-e2e
-        name: go test e2e
-        entry: bash -c 'go test -race ./internal/sandbox/... -run "TestSandbox" -v'
-        language: system
-        pass_filenames: false
-        files: internal/sandbox/.*\.go$
         stages: [pre-commit]
 
   # Demo GIF regeneration (pre-push only, skips if vhs not installed)

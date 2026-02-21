@@ -10,7 +10,6 @@
 
 ## Security checklist
 
-<!-- For changes touching rules, sandbox, or proxy -->
+<!-- For changes touching rules or proxy -->
 - [ ] No new path traversal or glob bypass vectors
 - [ ] No secrets or credentials in code
-- [ ] Sandbox policy changes tested on target OS

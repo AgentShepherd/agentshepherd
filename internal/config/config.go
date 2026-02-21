@@ -26,17 +26,10 @@ type Config struct {
 	Telemetry TelemetryConfig `yaml:"telemetry"`
 	Security  SecurityConfig  `yaml:"security"`
 	Rules     RulesConfig     `yaml:"rules"`
-	Sandbox   SandboxConfig   `yaml:"sandbox"`
-
 	// ProviderEnvKeys holds env var names referenced in provider api_key fields
 	// (e.g., "OPENAI_API_KEY" from "$OPENAI_API_KEY"). Used by the daemon
 	// to propagate these env vars to the child process.
 	ProviderEnvKeys []string `yaml:"-"`
-}
-
-// SandboxConfig holds OS sandbox settings
-type SandboxConfig struct {
-	Enabled bool `yaml:"enabled"` // enable OS-level sandbox
 }
 
 // APIConfig holds management API settings
@@ -74,7 +67,7 @@ func (p *ProviderConfig) UnmarshalYAML(value *yaml.Node) error {
 
 // MarshalYAML redacts the API key to prevent accidental credential exposure
 // when the config is serialized (e.g., debug dumps, error reports).
-func (p ProviderConfig) MarshalYAML() (interface{}, error) {
+func (p *ProviderConfig) MarshalYAML() (any, error) {
 	if p.APIKey != "" {
 		return map[string]string{"url": p.URL, "api_key": "***"}, nil
 	}
@@ -82,18 +75,18 @@ func (p ProviderConfig) MarshalYAML() (interface{}, error) {
 }
 
 // MarshalJSON redacts the API key in JSON serialization.
-func (p ProviderConfig) MarshalJSON() ([]byte, error) {
+func (p *ProviderConfig) MarshalJSON() ([]byte, error) {
 	if p.APIKey != "" {
 		return json.Marshal(struct {
 			URL    string `json:"url"`
-			APIKey string `json:"api_key"`
+			APIKey string `json:"api_key"` //nolint:gosec // redacted value, not a credential
 		}{URL: p.URL, APIKey: "***"})
 	}
 	return json.Marshal(p.URL)
 }
 
 // String returns a redacted string representation, safe for logging.
-func (p ProviderConfig) String() string {
+func (p *ProviderConfig) String() string {
 	if p.APIKey != "" {
 		return fmt.Sprintf("{URL: %s, APIKey: ***}", p.URL)
 	}
@@ -224,9 +217,6 @@ func DefaultConfig() *Config {
 			UserDir:        "", // empty means use default ~/.crust/rules.d
 			DisableBuiltin: false,
 			Watch:          true,
-		},
-		Sandbox: SandboxConfig{
-			Enabled: false, // disabled by default - requires explicit opt-in
 		},
 	}
 }

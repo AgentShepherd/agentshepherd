@@ -93,7 +93,7 @@ type Proxy struct {
 	apiKey        string
 	client        *http.Client
 	userProviders map[string]config.ProviderConfig // user-defined keyword → provider config
-	autoMode      bool              // true = resolve provider from model name; false = always use upstreamURL
+	autoMode      bool                             // true = resolve provider from model name; false = always use upstreamURL
 }
 
 // NewProxy creates a new proxy

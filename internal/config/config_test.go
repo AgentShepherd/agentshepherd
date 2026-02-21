@@ -2,7 +2,6 @@ package config
 
 import (
 	"encoding/json"
-	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -93,9 +92,6 @@ func TestDefaultConfig_Values(t *testing.T) {
 	}
 	if cfg.API.SocketPath != "" {
 		t.Errorf("API.SocketPath should be empty (auto-derived), got %q", cfg.API.SocketPath)
-	}
-	if cfg.Sandbox.Enabled {
-		t.Error("Sandbox should be disabled by default")
 	}
 	if cfg.Rules.DisableBuiltin {
 		t.Error("Builtin rules should be enabled by default")
@@ -430,7 +426,7 @@ func TestLoad_ProviderShortFormNoExpansion(t *testing.T) {
 
 func TestProviderConfig_MarshalYAML(t *testing.T) {
 	// With API key: should redact
-	out, err := yaml.Marshal(ProviderConfig{URL: "https://api.openai.com", APIKey: "sk-secret"})
+	out, err := yaml.Marshal(&ProviderConfig{URL: "https://api.openai.com", APIKey: "sk-secret"})
 	if err != nil {
 		t.Fatalf("marshal failed: %v", err)
 	}
@@ -443,7 +439,7 @@ func TestProviderConfig_MarshalYAML(t *testing.T) {
 	}
 
 	// Without API key: should be simple string
-	out, err = yaml.Marshal(ProviderConfig{URL: "http://localhost:11434/v1"})
+	out, err = yaml.Marshal(&ProviderConfig{URL: "http://localhost:11434/v1"})
 	if err != nil {
 		t.Fatalf("marshal failed: %v", err)
 	}
@@ -454,7 +450,7 @@ func TestProviderConfig_MarshalYAML(t *testing.T) {
 
 func TestProviderConfig_MarshalJSON(t *testing.T) {
 	// With API key: should redact
-	out, err := json.Marshal(ProviderConfig{URL: "https://api.openai.com", APIKey: "sk-secret"})
+	out, err := json.Marshal(&ProviderConfig{URL: "https://api.openai.com", APIKey: "sk-secret"})
 	if err != nil {
 		t.Fatalf("marshal failed: %v", err)
 	}
@@ -470,7 +466,7 @@ func TestProviderConfig_MarshalJSON(t *testing.T) {
 	}
 
 	// Without API key: should be simple string
-	out, err = json.Marshal(ProviderConfig{URL: "http://localhost:11434/v1"})
+	out, err = json.Marshal(&ProviderConfig{URL: "http://localhost:11434/v1"})
 	if err != nil {
 		t.Fatalf("marshal failed: %v", err)
 	}
@@ -481,7 +477,8 @@ func TestProviderConfig_MarshalJSON(t *testing.T) {
 
 func TestProviderConfig_String(t *testing.T) {
 	// With API key: should redact
-	s := fmt.Sprint(ProviderConfig{URL: "https://api.openai.com", APIKey: "sk-secret"})
+	p := &ProviderConfig{URL: "https://api.openai.com", APIKey: "sk-secret"}
+	s := p.String()
 	if strings.Contains(s, "sk-secret") {
 		t.Error("API key should be redacted in String()")
 	}
@@ -493,7 +490,8 @@ func TestProviderConfig_String(t *testing.T) {
 	}
 
 	// Without API key: just URL
-	s = fmt.Sprint(ProviderConfig{URL: "http://localhost:11434/v1"})
+	p2 := &ProviderConfig{URL: "http://localhost:11434/v1"}
+	s = p2.String()
 	if s != "http://localhost:11434/v1" {
 		t.Errorf("expected plain URL, got %q", s)
 	}

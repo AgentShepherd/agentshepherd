@@ -54,9 +54,6 @@ func TestMetricsCountAccuracy(t *testing.T) {
 	if got := m.Layer1Allowed.Load(); got != 1 {
 		t.Errorf("Layer1Allowed = %d, want 1", got)
 	}
-	if got := m.Layer2Blocks.Load(); got != 0 {
-		t.Errorf("Layer2Blocks = %d, want 0", got)
-	}
 	if got := m.TotalToolCalls.Load(); got != 6 {
 		t.Errorf("TotalToolCalls = %d, want 6", got)
 	}
@@ -69,8 +66,7 @@ func TestMetricsReset(t *testing.T) {
 	m.Layer0Blocks.Add(5)
 	m.Layer1Blocks.Add(3)
 	m.Layer1Allowed.Add(7)
-	m.Layer2Blocks.Add(1)
-	m.TotalToolCalls.Add(16)
+	m.TotalToolCalls.Add(15)
 
 	m.Reset()
 
@@ -82,9 +78,6 @@ func TestMetricsReset(t *testing.T) {
 	}
 	if got := m.Layer1Allowed.Load(); got != 0 {
 		t.Errorf("Layer1Allowed after reset = %d, want 0", got)
-	}
-	if got := m.Layer2Blocks.Load(); got != 0 {
-		t.Errorf("Layer2Blocks after reset = %d, want 0", got)
 	}
 	if got := m.TotalToolCalls.Load(); got != 0 {
 		t.Errorf("TotalToolCalls after reset = %d, want 0", got)
@@ -99,17 +92,16 @@ func TestBlockedTotal(t *testing.T) {
 	RecordEvent(Event{Layer: LayerL1, ToolName: "Bash", WasBlocked: true, RuleName: "r2"})
 	RecordEvent(Event{Layer: LayerL1Stream, ToolName: "Write", WasBlocked: true, RuleName: "r3"})
 	RecordEvent(Event{Layer: LayerL1Buffer, ToolName: "Edit", WasBlocked: true, RuleName: "r4"})
-	RecordEvent(Event{Layer: LayerL2, ToolName: "Bash", WasBlocked: true, RuleName: "r5"})
 	RecordEvent(Event{Layer: LayerL1, ToolName: "Read", WasBlocked: false})
 
 	m := GetMetrics()
-	blocked := m.Layer0Blocks.Load() + m.Layer1Blocks.Load() + m.Layer2Blocks.Load()
+	blocked := m.Layer0Blocks.Load() + m.Layer1Blocks.Load()
 
-	if blocked != 5 {
-		t.Errorf("total blocked = %d, want 5", blocked)
+	if blocked != 4 {
+		t.Errorf("total blocked = %d, want 4", blocked)
 	}
-	if got := m.TotalToolCalls.Load(); got != 6 {
-		t.Errorf("TotalToolCalls = %d, want 6", got)
+	if got := m.TotalToolCalls.Load(); got != 5 {
+		t.Errorf("TotalToolCalls = %d, want 5", got)
 	}
 
 	// Verify invariant: total = blocked + allowed
@@ -140,9 +132,6 @@ func TestGetStatsMap(t *testing.T) {
 	if stats["layer1_allowed"] != 1 {
 		t.Errorf("layer1_allowed = %d, want 1", stats["layer1_allowed"])
 	}
-	if stats["layer2_blocks"] != 0 {
-		t.Errorf("layer2_blocks = %d, want 0", stats["layer2_blocks"])
-	}
 }
 
 func TestLayer0NonBlockedDroppedFromMetrics(t *testing.T) {
@@ -150,7 +139,7 @@ func TestLayer0NonBlockedDroppedFromMetrics(t *testing.T) {
 
 	// Non-blocked L0 events shouldn't happen in practice.
 	// They are silently dropped to preserve the invariant:
-	//   TotalToolCalls == Layer0Blocks + Layer1Blocks + Layer1Allowed + Layer2Blocks
+	//   TotalToolCalls == Layer0Blocks + Layer1Blocks + Layer1Allowed
 	RecordEvent(Event{Layer: LayerL0, ToolName: "Read", WasBlocked: false})
 
 	m := GetMetrics()
@@ -159,22 +148,6 @@ func TestLayer0NonBlockedDroppedFromMetrics(t *testing.T) {
 	}
 	if got := m.TotalToolCalls.Load(); got != 0 {
 		t.Errorf("TotalToolCalls = %d, want 0 (non-blocked L0 dropped)", got)
-	}
-}
-
-func TestLayer2NonBlockedDroppedFromMetrics(t *testing.T) {
-	globalMetrics.Reset()
-
-	// Non-blocked L2 events shouldn't happen in practice.
-	// They are silently dropped to preserve the invariant.
-	RecordEvent(Event{Layer: LayerL2, ToolName: "Bash", WasBlocked: false})
-
-	m := GetMetrics()
-	if got := m.Layer2Blocks.Load(); got != 0 {
-		t.Errorf("Layer2Blocks = %d, want 0", got)
-	}
-	if got := m.TotalToolCalls.Load(); got != 0 {
-		t.Errorf("TotalToolCalls = %d, want 0 (non-blocked L2 dropped)", got)
 	}
 }
 
@@ -189,20 +162,18 @@ func TestInvariantTotalEqualsSubcounters(t *testing.T) {
 	RecordEvent(Event{Layer: LayerL1Stream, ToolName: "Write", WasBlocked: true, RuleName: "r4"})
 	RecordEvent(Event{Layer: LayerL1Stream, ToolName: "Edit", WasBlocked: false})
 	RecordEvent(Event{Layer: LayerL1Buffer, ToolName: "Bash", WasBlocked: true, RuleName: "r5"})
-	RecordEvent(Event{Layer: LayerL2, ToolName: "Bash", WasBlocked: true, RuleName: "r6"})
-	// These two should be silently dropped:
+	// Non-blocked L0 should be silently dropped:
 	RecordEvent(Event{Layer: LayerL0, ToolName: "Read", WasBlocked: false})
-	RecordEvent(Event{Layer: LayerL2, ToolName: "Bash", WasBlocked: false})
 
 	m := GetMetrics()
-	sum := m.Layer0Blocks.Load() + m.Layer1Blocks.Load() + m.Layer1Allowed.Load() + m.Layer2Blocks.Load()
+	sum := m.Layer0Blocks.Load() + m.Layer1Blocks.Load() + m.Layer1Allowed.Load()
 
 	if m.TotalToolCalls.Load() != sum {
-		t.Errorf("invariant broken: TotalToolCalls(%d) != L0(%d)+L1B(%d)+L1A(%d)+L2(%d) = %d",
+		t.Errorf("invariant broken: TotalToolCalls(%d) != L0(%d)+L1B(%d)+L1A(%d) = %d",
 			m.TotalToolCalls.Load(), m.Layer0Blocks.Load(), m.Layer1Blocks.Load(),
-			m.Layer1Allowed.Load(), m.Layer2Blocks.Load(), sum)
+			m.Layer1Allowed.Load(), sum)
 	}
-	if m.TotalToolCalls.Load() != 8 {
-		t.Errorf("TotalToolCalls = %d, want 8 (2 non-blocked L0/L2 dropped)", m.TotalToolCalls.Load())
+	if m.TotalToolCalls.Load() != 7 {
+		t.Errorf("TotalToolCalls = %d, want 7 (1 non-blocked L0 dropped)", m.TotalToolCalls.Load())
 	}
 }

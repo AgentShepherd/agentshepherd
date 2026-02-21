@@ -26,7 +26,7 @@ Crust's terminal UI is an optional layer over plain CLI output. Every command wo
 
 ## Package Layout
 
-```
+```text
 internal/tui/
   styles.go         Centralized colors, styles, capability-aware helpers
   icons.go          Unicode BMP icon constants
@@ -156,7 +156,7 @@ At startup, `internal/tui/terminal/` detects the terminal emulator via environme
 
 **Known limitations:**
 - SSH sessions: terminal env vars are not forwarded by default → `Unknown`
-- Containers: no terminal env vars → `Unknown` (conservative fallback)
+- Containers: no terminal env vars → `Unknown`; `--foreground` overrides plain mode when TTY is present (see [Docker / Containers](#docker--containers))
 - tmux/screen: env vars may not propagate; detection is best-effort
 
 **Usage:**
@@ -169,6 +169,76 @@ em   := tui.Italic("emphasis")
 del  := tui.Strikethrough("removed")
 tui.WindowTitle("crust status")
 ```
+
+## Docker / Containers
+
+Crust's TUI adapts automatically when running inside containers with `--foreground`.
+
+### How foreground mode works
+
+Docker containers differ from local terminals in two ways:
+
+1. **No terminal emulator processes escape queries.** bubbletea's package `init()` sends OSC 11 and DSR sequences to stdout. Without a terminal emulator, these appear as garbage (`^[]11;?^[\^[[6n]`) in `docker logs`.
+2. **No terminal-specific env vars.** Containers lack `WT_SESSION`, `KITTY_WINDOW_ID`, `VTE_VERSION`, etc., so terminal detection returns `CapNone` → plain mode, even with a TTY via `-t`.
+
+Crust handles both with a two-phase approach:
+
+**Phase 1: earlyinit** (`internal/earlyinit`) — runs before bubbletea's `init()` via Go's package initialization ordering (dependency order, then lexicographic tiebreaker). When `--foreground` is in `os.Args`, saves the original `TERM` and sets `TERM=dumb`. This causes termenv to skip all terminal queries.
+
+**Phase 2: runStart()** — after bubbletea's init has safely completed:
+
+1. Restores original `TERM` from earlyinit
+2. Sets `lipgloss.SetColorProfile()` and `lipgloss.SetHasDarkBackground(true)` — configures the renderer without terminal queries
+3. If stdout is a TTY and `TERM` supports colors, calls `tui.SetPlainMode(false)` — overrides the `CapNone` → plain fallback
+4. In `runDaemon()`, logger colors are enabled when stderr is a TTY (foreground), disabled otherwise (daemon writes to log files)
+
+`NO_COLOR` and `--no-color` still take priority and force plain mode.
+
+### Behavior by Docker mode
+
+| Mode | TTY | Styled output | Logger colors | Notes |
+|------|-----|---------------|---------------|-------|
+| `docker run -d` | No | No (plain) | No | No TTY → plain mode |
+| `docker run -d -t` | Yes | Yes (ANSI) | Yes | TTY allocated; `docker logs` shows styled output |
+| `docker run -t` | Yes | Yes (ANSI) | Yes | Attached with TTY |
+| `docker run -it` | Yes | Yes (ANSI) | Yes | Interactive; setup wizard available without `--auto` |
+
+All modes with `-t` get ANSI-styled output (colors, bold, icons). Without `-t`, output is plain text.
+
+### Recommended Docker usage
+
+```bash
+# Production: detached with styled logs
+docker run -d -t -p 9090:9090 crust
+
+# Production: plain text logs (no -t)
+docker run -d -p 9090:9090 crust
+
+# Interactive setup inside container
+docker run -it --entrypoint crust crust start --foreground
+
+# View logs (styled with -t, plain without)
+docker logs <container>
+
+# Force plain even with TTY
+docker run -d -t -e NO_COLOR=1 -p 9090:9090 crust
+```
+
+The default Dockerfile entrypoint includes `--listen-address 0.0.0.0` to accept host connections.
+
+### What works in Docker
+
+All rule-based blocking, tool call inspection (Layers 0 & 1), content scanning, telemetry, and auto-mode provider resolution. These operate on API traffic passing through the proxy and work regardless of where Crust runs.
+
+### Persistent data
+
+Telemetry and the SQLite database are stored at `/root/.crust/crust.db`. Mount a volume to persist across restarts:
+
+```bash
+docker run -d -t -p 9090:9090 -v crust-data:/root/.crust crust
+```
+
+If using database encryption (`DB_KEY`), the same key must be provided on every restart.
 
 ## Adding a New TUI Component
 
