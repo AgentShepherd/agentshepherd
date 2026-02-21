@@ -51,7 +51,8 @@ irm https://raw.githubusercontent.com/BakeLens/crust/main/install.ps1 | iex
 
 **Docker:**
 ```bash
-docker run -p 9090:9090 ghcr.io/bakelens/crust
+docker build -t crust https://github.com/BakeLens/crust.git
+docker run -p 9090:9090 crust
 ```
 
 Then start the gateway:
@@ -59,6 +60,8 @@ Then start the gateway:
 ```bash
 crust start --auto
 ```
+
+Auto mode detects your LLM provider from the model name — no endpoint URL or API key configuration needed. Your agent's existing auth is passed through.
 
 Point your agent to Crust:
 
@@ -74,6 +77,12 @@ Point your agent to Crust:
 | **Any OpenAI-compatible agent** | Set your LLM base URL to `http://localhost:9090/v1` |
 
 That's it. Crust auto-detects the provider from the model name and passes through your auth. Works with all 7 major coding agents out of the box — each agent's tool names are recognized automatically.
+
+```bash
+crust status     # Check if running
+crust logs -f    # Follow logs
+crust stop       # Stop crust
+```
 
 ## Built-in Protection
 
@@ -145,13 +154,13 @@ All activity is logged locally to encrypted storage.
 
 ## Build from Source
 
-Requires Go 1.24+ and [Task](https://taskfile.dev).
+Requires Go 1.24+ and a C compiler (CGO is needed for SQLite).
 
 ```bash
 git clone https://github.com/BakeLens/crust.git
 cd crust
-task build
-./crust version
+go build .
+./crust version   # Windows: .\crust.exe version
 ```
 
 ## Contributing
