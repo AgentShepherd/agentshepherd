@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/BakeLens/crust/internal/config"
@@ -151,5 +152,24 @@ func TestResolveProvider_BuiltinHasNoAPIKey(t *testing.T) {
 	}
 	if result.APIKey != "" {
 		t.Fatalf("expected empty api key for builtin provider, got %s", result.APIKey)
+	}
+}
+
+func TestRequestContext_String(t *testing.T) {
+	ctx := &RequestContext{
+		Model:          "gpt-4o",
+		TargetURL:      "https://api.openai.com/v1/chat/completions",
+		APIType:        "openai",
+		ProviderAPIKey: "sk-secret-key-12345",
+	}
+	s := ctx.String()
+	if strings.Contains(s, "sk-secret-key-12345") {
+		t.Error("ProviderAPIKey should not appear in String()")
+	}
+	if !strings.Contains(s, "gpt-4o") {
+		t.Error("expected Model in String()")
+	}
+	if !strings.Contains(s, "https://api.openai.com") {
+		t.Error("expected TargetURL in String()")
 	}
 }

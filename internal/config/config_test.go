@@ -1,6 +1,8 @@
 package config
 
 import (
+	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -447,5 +449,80 @@ func TestProviderConfig_MarshalYAML(t *testing.T) {
 	}
 	if !strings.Contains(string(out), "http://localhost:11434/v1") {
 		t.Error("expected URL in output")
+	}
+}
+
+func TestProviderConfig_MarshalJSON(t *testing.T) {
+	// With API key: should redact
+	out, err := json.Marshal(ProviderConfig{URL: "https://api.openai.com", APIKey: "sk-secret"})
+	if err != nil {
+		t.Fatalf("marshal failed: %v", err)
+	}
+	s := string(out)
+	if strings.Contains(s, "sk-secret") {
+		t.Error("API key should be redacted in JSON output")
+	}
+	if !strings.Contains(s, "***") {
+		t.Error("expected redacted marker '***'")
+	}
+	if !strings.Contains(s, "https://api.openai.com") {
+		t.Error("expected URL in JSON output")
+	}
+
+	// Without API key: should be simple string
+	out, err = json.Marshal(ProviderConfig{URL: "http://localhost:11434/v1"})
+	if err != nil {
+		t.Fatalf("marshal failed: %v", err)
+	}
+	if !strings.Contains(string(out), "http://localhost:11434/v1") {
+		t.Error("expected URL in JSON output")
+	}
+}
+
+func TestProviderConfig_String(t *testing.T) {
+	// With API key: should redact
+	s := fmt.Sprint(ProviderConfig{URL: "https://api.openai.com", APIKey: "sk-secret"})
+	if strings.Contains(s, "sk-secret") {
+		t.Error("API key should be redacted in String()")
+	}
+	if !strings.Contains(s, "***") {
+		t.Error("expected redacted marker")
+	}
+	if !strings.Contains(s, "https://api.openai.com") {
+		t.Error("expected URL in String()")
+	}
+
+	// Without API key: just URL
+	s = fmt.Sprint(ProviderConfig{URL: "http://localhost:11434/v1"})
+	if s != "http://localhost:11434/v1" {
+		t.Errorf("expected plain URL, got %q", s)
+	}
+}
+
+func TestLoad_ProviderEnvKeys(t *testing.T) {
+	t.Setenv("CRUST_TEST_PKEY", "sk-test")
+
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.yaml")
+	data := []byte("upstream:\n  providers:\n    test:\n      url: \"http://localhost:8000\"\n      api_key: \"$CRUST_TEST_PKEY\"\n    test2:\n      url: \"http://localhost:8001\"\n      api_key: \"${CRUST_TEST_PKEY2}\"\n")
+	if err := os.WriteFile(cfgPath, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := Load(cfgPath)
+	if err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+
+	// Should collect both env var names
+	found := map[string]bool{}
+	for _, k := range cfg.ProviderEnvKeys {
+		found[k] = true
+	}
+	if !found["CRUST_TEST_PKEY"] {
+		t.Error("expected CRUST_TEST_PKEY in ProviderEnvKeys")
+	}
+	if !found["CRUST_TEST_PKEY2"] {
+		t.Error("expected CRUST_TEST_PKEY2 in ProviderEnvKeys")
 	}
 }
