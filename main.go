@@ -250,7 +250,7 @@ func runStart(args []string) {
 	endpoint := startFlags.String("endpoint", "", "LLM API endpoint URL")
 	apiKey := startFlags.String("api-key", "", "API key for the endpoint (prefer LLM_API_KEY env var)")
 	dbKey := startFlags.String("db-key", "", "Database encryption key (prefer DB_KEY env var)")
-	autoMode := startFlags.Bool("auto", false, "Auto mode: resolve providers from model names, clients bring their own auth")
+	autoMode := startFlags.Bool("auto", false, "Auto mode: resolve providers from model names (per-provider keys or client auth)")
 
 	// Advanced options
 	proxyPort := startFlags.Int("proxy-port", 0, "Proxy server port (default from config)")
@@ -399,7 +399,7 @@ func runStart(args []string) {
 			SuccessMsg: "Daemon launched",
 			Fn: func() error {
 				var err error
-				pid, err = daemon.Daemonize(daemonArgs)
+				pid, err = daemon.Daemonize(daemonArgs, cfg.ProviderEnvKeys)
 				if err != nil {
 					return fmt.Errorf("failed to start daemon: %w", err)
 				}

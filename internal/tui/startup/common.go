@@ -17,7 +17,7 @@ import (
 // Config holds the configuration collected from the startup prompts
 type Config struct {
 	// Mode
-	AutoMode bool // auto mode: resolve provider from model name, clients bring their own auth
+	AutoMode bool // auto mode: resolve provider from model name (per-provider keys or client auth)
 	// Basic
 	EndpointURL   string
 	APIKey        string //nolint:gosec // not a hardcoded credential, user-provided config field
@@ -109,7 +109,7 @@ func runStartupReader(defaultEndpoint string, defaultProxyPort int) (Config, err
 	fmt.Println()
 
 	prompt := ">"
-	fmt.Printf("  %s Use auto mode? (resolve provider from model name, clients bring their own auth) [Y/n]: ", prompt)
+	fmt.Printf("  %s Use auto mode? (resolve provider from model name, per-provider keys or client auth) [Y/n]: ", prompt)
 	modeAnswer, _ := reader.ReadString('\n')
 	modeAnswer = strings.TrimSpace(strings.ToLower(modeAnswer))
 

@@ -2,6 +2,7 @@ package config
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/url"
@@ -26,6 +27,11 @@ type Config struct {
 	Security  SecurityConfig  `yaml:"security"`
 	Rules     RulesConfig     `yaml:"rules"`
 	Sandbox   SandboxConfig   `yaml:"sandbox"`
+
+	// ProviderEnvKeys holds env var names referenced in provider api_key fields
+	// (e.g., "OPENAI_API_KEY" from "$OPENAI_API_KEY"). Used by the daemon
+	// to propagate these env vars to the child process.
+	ProviderEnvKeys []string `yaml:"-"`
 }
 
 // SandboxConfig holds OS sandbox settings
@@ -73,6 +79,25 @@ func (p ProviderConfig) MarshalYAML() (interface{}, error) {
 		return map[string]string{"url": p.URL, "api_key": "***"}, nil
 	}
 	return p.URL, nil
+}
+
+// MarshalJSON redacts the API key in JSON serialization.
+func (p ProviderConfig) MarshalJSON() ([]byte, error) {
+	if p.APIKey != "" {
+		return json.Marshal(struct {
+			URL    string `json:"url"`
+			APIKey string `json:"api_key"`
+		}{URL: p.URL, APIKey: "***"})
+	}
+	return json.Marshal(p.URL)
+}
+
+// String returns a redacted string representation, safe for logging.
+func (p ProviderConfig) String() string {
+	if p.APIKey != "" {
+		return fmt.Sprintf("{URL: %s, APIKey: ***}", p.URL)
+	}
+	return p.URL
 }
 
 // UpstreamConfig holds upstream (downstream target) settings
@@ -302,10 +327,16 @@ func Load(path string) (*Config, error) {
 		}
 	}
 
-	// Expand environment variables in provider API keys
+	// Expand environment variables in provider API keys.
+	// Collect referenced env var names so the daemon can propagate them.
 	for name, prov := range cfg.Upstream.Providers {
 		if prov.APIKey != "" {
 			raw := prov.APIKey
+			// Collect env var names using the same parser as os.ExpandEnv
+			os.Expand(raw, func(key string) string {
+				cfg.ProviderEnvKeys = append(cfg.ProviderEnvKeys, key)
+				return ""
+			})
 			prov.APIKey = os.ExpandEnv(prov.APIKey)
 			if prov.APIKey == "" {
 				cfgLog.Warn("upstream.providers.%s: api_key references unset env var %q (expanded to empty)", name, raw)

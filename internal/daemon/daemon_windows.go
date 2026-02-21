@@ -121,7 +121,8 @@ func Stop() error {
 
 // Daemonize starts the current program as a background process.
 // On Windows, uses CREATE_NEW_PROCESS_GROUP to detach from the console.
-func Daemonize(args []string) (int, error) {
+// extraEnvKeys specifies additional environment variable names to propagate.
+func Daemonize(args []string, extraEnvKeys []string) (int, error) {
 	// Open log file for daemon output
 	logFile, err := fileutil.SecureOpenFile(LogFile(), os.O_CREATE|os.O_WRONLY|os.O_APPEND)
 	if err != nil {
@@ -175,6 +176,12 @@ func Daemonize(args []string) (int, error) {
 		"NO_PROXY", "no_proxy",
 		"ALL_PROXY", "all_proxy",
 	} {
+		if v := os.Getenv(key); v != "" {
+			cmd.Env = append(cmd.Env, key+"="+v)
+		}
+	}
+	// Propagate extra env vars (e.g., provider API key env vars from config)
+	for _, key := range extraEnvKeys {
 		if v := os.Getenv(key); v != "" {
 			cmd.Env = append(cmd.Env, key+"="+v)
 		}
