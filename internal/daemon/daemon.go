@@ -58,22 +58,6 @@ func WritePort(port int) error {
 	return fileutil.SecureWriteFile(portFile(), []byte(strconv.Itoa(port)))
 }
 
-// ReadPort reads the proxy port number from the port file.
-func ReadPort() (int, error) {
-	data, err := os.ReadFile(portFile())
-	if err != nil {
-		return 0, err
-	}
-	port, err := strconv.Atoi(string(data))
-	if err != nil {
-		return 0, fmt.Errorf("invalid port file content: %w", err)
-	}
-	if port < 1 || port > 65535 {
-		return 0, fmt.Errorf("invalid port value: %d", port)
-	}
-	return port, nil
-}
-
 // ReadPID reads the PID from the PID file
 func ReadPID() (int, error) {
 	data, err := os.ReadFile(pidFile())

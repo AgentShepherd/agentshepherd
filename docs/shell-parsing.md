@@ -6,7 +6,7 @@ Source: `internal/rules/extractor.go`
 
 ## Pipeline
 
-```
+```text
 extractBashCommand (entry point)
  │
  ├─ A. Collect command strings from all knownCommandFields

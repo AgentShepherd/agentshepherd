@@ -95,8 +95,8 @@ scenarios:
     description: "Variable expansion evasion"
 
   # Command substitution — on main branch (no shell runner), the AST parser
-  # cannot expand $() so the literal path isn't extractable. This is mitigated
-  # by Layer 2 sandbox. The test below uses a substitution that still produces
+  # cannot expand $() so the literal path isn't extractable. The test below
+  # uses a substitution that still produces
   # a recognizable path in the literal arg.
   - tool: Bash
     args:

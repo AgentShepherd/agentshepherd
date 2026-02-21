@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"fmt"
 	"net/http"
 	"time"
 
@@ -30,12 +31,18 @@ type RequestContext struct {
 	SpanKind  string
 
 	// Request metadata
-	Model     string
-	TargetURL string
-	APIType   types.APIType
-	Tools     []ToolDefinition
+	Model          string
+	TargetURL      string
+	APIType        types.APIType
+	Tools          []ToolDefinition
+	ProviderAPIKey string // per-provider API key (from config)
 
 	// Telemetry (optional)
 	Provider *telemetry.Provider
 	SpanCtx  *telemetry.SpanContext
+}
+
+// String returns a redacted representation, safe for logging.
+func (ctx *RequestContext) String() string {
+	return fmt.Sprintf("RequestContext{Model: %s, TargetURL: %s, APIType: %s}", ctx.Model, ctx.TargetURL, ctx.APIType)
 }

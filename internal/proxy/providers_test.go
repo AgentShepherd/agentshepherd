@@ -1,52 +1,41 @@
 package proxy
 
-import "testing"
+import (
+	"strings"
+	"testing"
 
-func TestResolveProvider_SlashSplitOpenAIVendor(t *testing.T) {
-	// "openai" is a builtin key, so "openai/gpt-4o" should match
-	base, ok := ResolveProvider("openai/gpt-4o", nil)
-	if !ok {
-		t.Fatal("expected match for openai/gpt-4o")
+	"github.com/BakeLens/crust/internal/config"
+)
+
+func TestResolveProvider_SlashSplit(t *testing.T) {
+	tests := []struct {
+		model   string
+		wantURL string
+		wantOK  bool
+	}{
+		{"openai/gpt-4o", "https://api.openai.com", true},
+		{"claude/claude-sonnet-4-5-20250929", "https://api.anthropic.com", true},
+		{"gpt/gpt-4o", "https://api.openai.com", true},
+		{"unknown/model", "", false},
 	}
-	if base != "https://api.openai.com" {
-		t.Fatalf("expected https://api.openai.com, got %s", base)
+	for _, tt := range tests {
+		result, ok := ResolveProvider(tt.model, nil)
+		if ok != tt.wantOK {
+			t.Errorf("ResolveProvider(%q) ok=%v, want %v", tt.model, ok, tt.wantOK)
+			continue
+		}
+		if ok && result.URL != tt.wantURL {
+			t.Errorf("ResolveProvider(%q) = %q, want %q", tt.model, result.URL, tt.wantURL)
+		}
 	}
 }
 
-func TestResolveProvider_SlashSplitClaude(t *testing.T) {
-	base, ok := ResolveProvider("claude/claude-sonnet-4-5-20250929", nil)
-	if !ok {
-		t.Fatal("expected match for claude/claude-sonnet-4-5-20250929")
-	}
-	if base != "https://api.anthropic.com" {
-		t.Fatalf("expected https://api.anthropic.com, got %s", base)
-	}
-}
-
-func TestResolveProvider_SlashSplitOpenAI(t *testing.T) {
-	// "gpt" is a builtin key, so "gpt/gpt-4o" should match
-	base, ok := ResolveProvider("gpt/gpt-4o", nil)
-	if !ok {
-		t.Fatal("expected match for gpt/gpt-4o")
-	}
-	if base != "https://api.openai.com" {
-		t.Fatalf("expected https://api.openai.com, got %s", base)
-	}
-}
-
-func TestResolveProvider_SlashSplitNoMatch(t *testing.T) {
-	// "unknown/model" — "unknown" is not in registry
-	_, ok := ResolveProvider("unknown/model", nil)
-	if ok {
-		t.Fatal("expected no match for unknown/model")
-	}
-}
-
-func TestResolveProvider_PrefixMatch(t *testing.T) {
+func TestResolveProvider_BuiltinMatch(t *testing.T) {
 	tests := []struct {
 		model   string
 		wantURL string
 	}{
+		// Prefix matches
 		{"deepseek-chat", "https://api.deepseek.com"},
 		{"deepseek-coder-v2", "https://api.deepseek.com"},
 		{"claude-sonnet-4-5-20250929", "https://api.anthropic.com"},
@@ -63,151 +52,124 @@ func TestResolveProvider_PrefixMatch(t *testing.T) {
 		{"kimi-latest", "https://api.moonshot.ai"},
 		{"qwen-turbo", "https://dashscope.aliyuncs.com/compatible-mode"},
 		{"minimax-abab5.5", "https://api.minimax.io/anthropic"},
-	}
-	for _, tt := range tests {
-		base, ok := ResolveProvider(tt.model, nil)
-		if !ok {
-			t.Errorf("expected match for %q", tt.model)
-			continue
-		}
-		if base != tt.wantURL {
-			t.Errorf("ResolveProvider(%q) = %q, want %q", tt.model, base, tt.wantURL)
-		}
-	}
-}
-
-func TestResolveProvider_UserPriority(t *testing.T) {
-	userProviders := map[string]string{
-		"deepseek": "http://localhost:8000",
-	}
-	base, ok := ResolveProvider("deepseek-chat", userProviders)
-	if !ok {
-		t.Fatal("expected match for deepseek-chat with user provider")
-	}
-	if base != "http://localhost:8000" {
-		t.Fatalf("expected user provider URL, got %s", base)
-	}
-}
-
-func TestResolveProvider_UserCustomModel(t *testing.T) {
-	userProviders := map[string]string{
-		"my-llama": "http://localhost:11434/v1",
-	}
-	base, ok := ResolveProvider("my-llama-70b", userProviders)
-	if !ok {
-		t.Fatal("expected match for my-llama-70b with user provider")
-	}
-	if base != "http://localhost:11434/v1" {
-		t.Fatalf("expected http://localhost:11434/v1, got %s", base)
-	}
-}
-
-func TestResolveProvider_UserSlashSplit(t *testing.T) {
-	userProviders := map[string]string{
-		"local": "http://localhost:11434/v1",
-	}
-	base, ok := ResolveProvider("local/llama-70b", userProviders)
-	if !ok {
-		t.Fatal("expected match for local/llama-70b")
-	}
-	if base != "http://localhost:11434/v1" {
-		t.Fatalf("expected http://localhost:11434/v1, got %s", base)
-	}
-}
-
-func TestResolveProvider_NoMatch(t *testing.T) {
-	_, ok := ResolveProvider("unknown-model", nil)
-	if ok {
-		t.Fatal("expected no match for unknown-model")
-	}
-}
-
-func TestResolveProvider_EmptyModel(t *testing.T) {
-	_, ok := ResolveProvider("", nil)
-	if ok {
-		t.Fatal("expected no match for empty model")
-	}
-}
-
-func TestResolveProvider_LongestPrefixWins(t *testing.T) {
-	// If user has both "o" and "o3", "o3-mini" should match "o3"
-	userProviders := map[string]string{
-		"o":  "http://short.example.com",
-		"o3": "http://o3.example.com",
-	}
-	base, ok := ResolveProvider("o3-mini", userProviders)
-	if !ok {
-		t.Fatal("expected match for o3-mini")
-	}
-	if base != "http://o3.example.com" {
-		t.Fatalf("expected http://o3.example.com (longest prefix), got %s", base)
-	}
-}
-
-func TestResolveProvider_GroqPrefix(t *testing.T) {
-	base, ok := ResolveProvider("groq-llama-3", nil)
-	if !ok {
-		t.Fatal("expected match for groq-llama-3")
-	}
-	if base != "https://api.groq.com/openai" {
-		t.Fatalf("expected https://api.groq.com/openai, got %s", base)
-	}
-}
-
-func TestResolveProvider_CodexSegmentMatch(t *testing.T) {
-	// Codex model names like "gpt-5.3-codex" start with "gpt" but should
-	// match the "codex" segment (len 5) over the "gpt" prefix (len 3).
-	tests := []struct {
-		model   string
-		wantURL string
-	}{
+		{"groq-llama-3", "https://api.groq.com/openai"},
+		// Codex segment matches (segment "codex" len 5 beats prefix "gpt" len 3)
 		{"gpt-5.3-codex", "https://chatgpt.com/backend-api/codex"},
 		{"gpt-5.2-codex", "https://chatgpt.com/backend-api/codex"},
 		{"gpt-5.1-codex-mini", "https://chatgpt.com/backend-api/codex"},
 		{"gpt-5.1-codex-max", "https://chatgpt.com/backend-api/codex"},
 		{"gpt-5-codex", "https://chatgpt.com/backend-api/codex"},
 		{"codex-mini-latest", "https://chatgpt.com/backend-api/codex"},
-		// Plain gpt models should still go to OpenAI
-		{"gpt-4o", "https://api.openai.com"},
-		{"gpt-4-turbo", "https://api.openai.com"},
+		// HuggingFace
+		{"hf:Meta-Llama-3.1-8B-Instruct", "https://api.synthetic.new/anthropic"},
+		{"hf:Qwen2.5-Coder-32B", "https://api.synthetic.new/anthropic"},
+		{"hf:moonshotai/Kimi-K2-Thinking", "https://api.synthetic.new/anthropic"},
+		{"hf:deepseek-ai/DeepSeek-R1-0528", "https://api.synthetic.new/anthropic"},
 	}
 	for _, tt := range tests {
-		base, ok := ResolveProvider(tt.model, nil)
+		result, ok := ResolveProvider(tt.model, nil)
 		if !ok {
 			t.Errorf("expected match for %q", tt.model)
 			continue
 		}
-		if base != tt.wantURL {
-			t.Errorf("ResolveProvider(%q) = %q, want %q", tt.model, base, tt.wantURL)
+		if result.URL != tt.wantURL {
+			t.Errorf("ResolveProvider(%q) = %q, want %q", tt.model, result.URL, tt.wantURL)
 		}
 	}
 }
 
-func TestResolveProvider_HuggingFace(t *testing.T) {
-	// HuggingFace models use "hf:" prefix format
-	// Supports both "hf:model" and "hf:org/model" formats
+func TestResolveProvider_NoMatch(t *testing.T) {
+	for _, model := range []string{"", "unknown-model"} {
+		if _, ok := ResolveProvider(model, nil); ok {
+			t.Errorf("expected no match for %q", model)
+		}
+	}
+}
+
+func TestResolveProvider_UserProviders(t *testing.T) {
 	tests := []struct {
-		model   string
-		wantURL string
+		name      string
+		model     string
+		providers map[string]config.ProviderConfig
+		wantURL   string
+		wantKey   string
 	}{
-		// Simple format (no slashes)
-		{"hf:Meta-Llama-3.1-8B-Instruct", "https://api.synthetic.new/anthropic"},
-		{"hf:Qwen2.5-Coder-32B", "https://api.synthetic.new/anthropic"},
-		// Org/model format (with slashes)
-		{"hf:moonshotai/Kimi-K2-Thinking", "https://api.synthetic.new/anthropic"},
-		{"hf:zai-org/GLM-4.7", "https://api.synthetic.new/anthropic"},
-		{"hf:deepseek-ai/DeepSeek-R1-0528", "https://api.synthetic.new/anthropic"},
-		{"hf:deepseek-ai/DeepSeek-V3-0324", "https://api.synthetic.new/anthropic"},
-		{"hf:deepseek-ai/DeepSeek-V3.1", "https://api.synthetic.new/anthropic"},
+		{
+			name:      "user priority over builtin",
+			model:     "deepseek-chat",
+			providers: map[string]config.ProviderConfig{"deepseek": {URL: "http://localhost:8000"}},
+			wantURL:   "http://localhost:8000",
+		},
+		{
+			name:      "custom model prefix",
+			model:     "my-llama-70b",
+			providers: map[string]config.ProviderConfig{"my-llama": {URL: "http://localhost:11434/v1"}},
+			wantURL:   "http://localhost:11434/v1",
+		},
+		{
+			name:      "slash split with user provider",
+			model:     "local/llama-70b",
+			providers: map[string]config.ProviderConfig{"local": {URL: "http://localhost:11434/v1"}},
+			wantURL:   "http://localhost:11434/v1",
+		},
+		{
+			name:  "longest prefix wins",
+			model: "o3-mini",
+			providers: map[string]config.ProviderConfig{
+				"o":  {URL: "http://short.example.com"},
+				"o3": {URL: "http://o3.example.com"},
+			},
+			wantURL: "http://o3.example.com",
+		},
+		{
+			name:      "per-provider API key",
+			model:     "deepseek-chat",
+			providers: map[string]config.ProviderConfig{"deepseek": {URL: "https://api.deepseek.com", APIKey: "sk-deepseek-test"}},
+			wantURL:   "https://api.deepseek.com",
+			wantKey:   "sk-deepseek-test",
+		},
 	}
 	for _, tt := range tests {
-		base, ok := ResolveProvider(tt.model, nil)
-		if !ok {
-			t.Errorf("expected match for %q", tt.model)
-			continue
-		}
-		if base != tt.wantURL {
-			t.Errorf("ResolveProvider(%q) = %q, want %q", tt.model, base, tt.wantURL)
-		}
+		t.Run(tt.name, func(t *testing.T) {
+			result, ok := ResolveProvider(tt.model, tt.providers)
+			if !ok {
+				t.Fatalf("expected match for %q", tt.model)
+			}
+			if result.URL != tt.wantURL {
+				t.Errorf("URL = %q, want %q", result.URL, tt.wantURL)
+			}
+			if result.APIKey != tt.wantKey {
+				t.Errorf("APIKey = %q, want %q", result.APIKey, tt.wantKey)
+			}
+		})
+	}
+}
+
+func TestResolveProvider_BuiltinHasNoAPIKey(t *testing.T) {
+	result, ok := ResolveProvider("gpt-4o", nil)
+	if !ok {
+		t.Fatal("expected match for gpt-4o")
+	}
+	if result.APIKey != "" {
+		t.Fatalf("expected empty api key for builtin provider, got %s", result.APIKey)
+	}
+}
+
+func TestRequestContext_String(t *testing.T) {
+	ctx := &RequestContext{
+		Model:          "gpt-4o",
+		TargetURL:      "https://api.openai.com/v1/chat/completions",
+		APIType:        "openai",
+		ProviderAPIKey: "sk-secret-key-12345",
+	}
+	s := ctx.String()
+	if strings.Contains(s, "sk-secret-key-12345") {
+		t.Error("ProviderAPIKey should not appear in String()")
+	}
+	if !strings.Contains(s, "gpt-4o") {
+		t.Error("expected Model in String()")
+	}
+	if !strings.Contains(s, "https://api.openai.com") {
+		t.Error("expected TargetURL in String()")
 	}
 }

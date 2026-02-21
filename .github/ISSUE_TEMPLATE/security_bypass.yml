@@ -5,7 +5,7 @@ body:
   - type: markdown
     attributes:
       value: |
-        **If you have found an exploitable security bypass, sandbox escape, or vulnerability,
+        **If you have found an exploitable security bypass or vulnerability,
         please DO NOT use this form.** Report it privately via
         [GitHub Security Advisories](https://github.com/BakeLab/crust-dev/security/advisories)
         or see our [SECURITY.md](https://github.com/BakeLab/crust-dev/blob/main/SECURITY.md).
@@ -29,7 +29,6 @@ body:
       options:
         - Layer 0 (request history scanning)
         - Layer 1 (response scanning)
-        - Layer 2 (OS sandbox)
         - Rules configuration
         - Unsure
     validations:

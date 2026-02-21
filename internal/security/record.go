@@ -13,12 +13,11 @@ const (
 	LayerL1       = "L1"        // Response-side blocking (Layer 1, non-streaming)
 	LayerL1Stream = "L1_stream" // Response-side streaming (unbuffered, log-only)
 	LayerL1Buffer = "L1_buffer" // Response-side buffered streaming
-	LayerL2       = "L2"        // Sandbox blocking (Layer 2)
 )
 
 // Event represents a tool call evaluation event at any layer.
 type Event struct {
-	Layer      string // LayerL0, LayerL1, LayerL1Stream, LayerL1Buffer, LayerL2
+	Layer      string // LayerL0, LayerL1, LayerL1Stream, LayerL1Buffer
 	TraceID    string
 	SessionID  string
 	ToolName   string
@@ -38,8 +37,8 @@ func RecordEvent(event Event) {
 
 	// Update in-memory metrics.
 	// TotalToolCalls is only incremented alongside a sub-counter to preserve:
-	//   TotalToolCalls == Layer0Blocks + Layer1Blocks + Layer1Allowed + Layer2Blocks
-	// L0/L2 events are only emitted when blocked; non-blocked L0/L2 events are
+	//   TotalToolCalls == Layer0Blocks + Layer1Blocks + Layer1Allowed
+	// L0 events are only emitted when blocked; non-blocked L0 events are
 	// silently dropped from metrics (they shouldn't occur in practice).
 	switch event.Layer {
 	case LayerL0:
@@ -54,11 +53,6 @@ func RecordEvent(event Event) {
 			m.Layer1Allowed.Add(1)
 		}
 		m.TotalToolCalls.Add(1)
-	case LayerL2:
-		if event.WasBlocked {
-			m.Layer2Blocks.Add(1)
-			m.TotalToolCalls.Add(1)
-		}
 	}
 
 	// Log to database

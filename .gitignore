@@ -13,16 +13,12 @@ crust
 
 # Build
 *.o
-!internal/sandbox/bpf/*.o
 *.exe
 **/target/
 
 # OS
 .DS_Store
 Thumbs.db
-
-# BPF (machine-specific, regenerate with: bpftool btf dump file /sys/kernel/btf/vmlinux format c)
-internal/sandbox/bpf/c/vmlinux.h
 
 # VHS recordings (keep only GIF)
 docs/*.webm
@@ -32,6 +28,3 @@ tests/agents/config.local.yaml
 
 # Claude settings
 .claude/settings.local.json
-
-# Local test config (contains API keys)
-tests/agents/config.local.yaml

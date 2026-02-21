@@ -279,7 +279,7 @@ func BenchmarkNormalizer_Combined(b *testing.B) {
 	}
 }
 
-// BenchmarkNormalizer_Pattern benchmarks NormalizePattern (glob-safe normalization for sandbox).
+// BenchmarkNormalizer_Pattern benchmarks NormalizePattern (glob-safe pattern normalization).
 func BenchmarkNormalizer_Pattern(b *testing.B) {
 	b.ReportAllocs()
 	normalizer := NewNormalizerWithEnv("/home/user", "/home/user/project", map[string]string{

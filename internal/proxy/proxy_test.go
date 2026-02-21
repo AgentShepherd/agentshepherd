@@ -169,7 +169,7 @@ func TestBuildUpstreamURL_EndpointMode(t *testing.T) {
 			u, _ := url.Parse(tt.upstream)
 			p := &Proxy{upstreamURL: u, autoMode: false}
 
-			got, err := p.buildUpstreamURL(tt.reqPath, tt.model)
+			got, _, err := p.buildUpstreamURL(tt.reqPath, tt.model)
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
@@ -246,7 +246,7 @@ func TestBuildUpstreamURL_AutoMode(t *testing.T) {
 			u, _ := url.Parse(tt.upstream)
 			p := &Proxy{upstreamURL: u, autoMode: true}
 
-			got, err := p.buildUpstreamURL(tt.reqPath, tt.model)
+			got, _, err := p.buildUpstreamURL(tt.reqPath, tt.model)
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}

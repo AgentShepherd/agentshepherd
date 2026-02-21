@@ -21,6 +21,7 @@ import (
 
 	"github.com/klauspost/compress/zstd"
 
+	"github.com/BakeLens/crust/internal/config"
 	"github.com/BakeLens/crust/internal/logger"
 	"github.com/BakeLens/crust/internal/rules"
 	"github.com/BakeLens/crust/internal/security"
@@ -91,12 +92,12 @@ type Proxy struct {
 	upstreamURL   *url.URL
 	apiKey        string
 	client        *http.Client
-	userProviders map[string]string // user-defined keyword → base URL
-	autoMode      bool              // true = resolve provider from model name; false = always use upstreamURL
+	userProviders map[string]config.ProviderConfig // user-defined keyword → provider config
+	autoMode      bool                             // true = resolve provider from model name; false = always use upstreamURL
 }
 
 // NewProxy creates a new proxy
-func NewProxy(upstreamURL string, apiKey string, timeout time.Duration, userProviders map[string]string, autoMode bool) (*Proxy, error) {
+func NewProxy(upstreamURL string, apiKey string, timeout time.Duration, userProviders map[string]config.ProviderConfig, autoMode bool) (*Proxy, error) {
 	u, err := url.Parse(upstreamURL)
 	if err != nil {
 		return nil, err
@@ -304,7 +305,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Build upstream URL
-	upstreamURL, err := p.buildUpstreamURL(r.URL.Path, reqBody.Model)
+	upstreamURL, providerAPIKey, err := p.buildUpstreamURL(r.URL.Path, reqBody.Model)
 	if err != nil {
 		log.Warn("Failed to build upstream URL: %v", err)
 		http.Error(w, "invalid upstream URL", http.StatusBadGateway)
@@ -333,34 +334,28 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Remove hop-by-hop headers (including Connection-listed per RFC 7230 §6.1)
 	stripHopByHopHeaders(upstreamReq.Header)
 
-	// Auth passthrough: only inject gateway key if client didn't provide auth
-	if !hasClientAuth(upstreamReq.Header) && p.apiKey != "" {
-		if apiType.IsAnthropic() {
-			upstreamReq.Header.Set("X-Api-Key", p.apiKey)
-		} else {
-			upstreamReq.Header.Set("Authorization", "Bearer "+p.apiKey)
-		}
-	}
+	injectAuth(upstreamReq.Header, providerAPIKey, p.apiKey, apiType.IsAnthropic())
 
 	// For streaming requests, use reverse proxy for better streaming support
 	if reqBody.Stream {
 		ctx := &RequestContext{
-			Writer:      w,
-			Request:     r,
-			UpstreamReq: upstreamReq,
-			BodyBytes:   bodyBytes,
-			RequestBody: requestBody,
-			StartTime:   startTime,
-			TraceID:     traceID,
-			SessionID:   sessionID,
-			SpanName:    spanName,
-			SpanKind:    spanKind,
-			Model:       reqBody.Model,
-			TargetURL:   targetURLStr,
-			APIType:     apiType,
-			Tools:       reqBody.Tools,
-			Provider:    tp,
-			SpanCtx:     spanCtx,
+			Writer:         w,
+			Request:        r,
+			UpstreamReq:    upstreamReq,
+			BodyBytes:      bodyBytes,
+			RequestBody:    requestBody,
+			StartTime:      startTime,
+			TraceID:        traceID,
+			SessionID:      sessionID,
+			SpanName:       spanName,
+			SpanKind:       spanKind,
+			Model:          reqBody.Model,
+			TargetURL:      targetURLStr,
+			APIType:        apiType,
+			Tools:          reqBody.Tools,
+			ProviderAPIKey: providerAPIKey,
+			Provider:       tp,
+			SpanCtx:        spanCtx,
 		}
 		p.handleStreamingRequest(ctx)
 		return
@@ -476,14 +471,7 @@ func (p *Proxy) handleStreamingRequest(ctx *RequestContext) {
 			copyHeaders(pr.Out.Header, ctx.UpstreamReq.Header)
 			pr.Out.Body = io.NopCloser(bytes.NewReader(ctx.BodyBytes))
 			pr.Out.ContentLength = int64(len(ctx.BodyBytes))
-			// Auth passthrough: only inject gateway key if client didn't provide auth
-			if !hasClientAuth(pr.Out.Header) && p.apiKey != "" {
-				if ctx.APIType.IsAnthropic() {
-					pr.Out.Header.Set("X-Api-Key", p.apiKey)
-				} else {
-					pr.Out.Header.Set("Authorization", "Bearer "+p.apiKey)
-				}
-			}
+			injectAuth(pr.Out.Header, ctx.ProviderAPIKey, p.apiKey, ctx.APIType.IsAnthropic())
 		},
 		ModifyResponse: func(resp *http.Response) error {
 			if resp.StatusCode >= 200 && resp.StatusCode < 300 {
@@ -728,18 +716,39 @@ func hasClientAuth(h http.Header) bool {
 	return h.Get("Authorization") != "" || h.Get("X-Api-Key") != ""
 }
 
+// injectAuth sets auth headers on the request. Per-provider key always wins,
+// then client auth passthrough, then global gateway key as fallback.
+func injectAuth(h http.Header, providerKey, gatewayKey string, isAnthropic bool) {
+	if providerKey != "" {
+		if isAnthropic {
+			h.Set("X-Api-Key", providerKey)
+			h.Del("Authorization")
+		} else {
+			h.Set("Authorization", "Bearer "+providerKey)
+			h.Del("X-Api-Key")
+		}
+	} else if !hasClientAuth(h) && gatewayKey != "" {
+		if isAnthropic {
+			h.Set("X-Api-Key", gatewayKey)
+		} else {
+			h.Set("Authorization", "Bearer "+gatewayKey)
+		}
+	}
+}
+
 // buildUpstreamURL constructs the target URL for a proxy request.
 // In auto mode it resolves the provider from the model name; in endpoint mode
 // it always uses the configured upstream URL.
-func (p *Proxy) buildUpstreamURL(reqPath, model string) (url.URL, error) {
+// Returns the target URL and an optional per-provider API key.
+func (p *Proxy) buildUpstreamURL(reqPath, model string) (url.URL, string, error) {
 	u := *p.upstreamURL
 
 	if p.autoMode {
 		// Auto mode: resolve provider from model name
-		if resolvedBaseURL, ok := ResolveProvider(model, p.userProviders); ok {
-			resolvedURL, err := url.Parse(resolvedBaseURL)
+		if result, ok := ResolveProvider(model, p.userProviders); ok {
+			resolvedURL, err := url.Parse(result.URL)
 			if err != nil {
-				return url.URL{}, fmt.Errorf("invalid provider URL %q: %w", resolvedBaseURL, err)
+				return url.URL{}, "", fmt.Errorf("invalid provider URL %q: %w", result.URL, err)
 			}
 			// Normalize /responses → /v1/responses only when the provider
 			// has no meaningful path (e.g. "https://api.openai.com").
@@ -753,7 +762,7 @@ func (p *Proxy) buildUpstreamURL(reqPath, model string) (url.URL, error) {
 			// path.Join concatenates provider path + request path and
 			// cleans the result (collapses double slashes, resolves dots).
 			u.Path = path.Join(resolvedURL.Path, reqPath)
-			return u, nil
+			return u, result.APIKey, nil
 		}
 	}
 
@@ -765,7 +774,7 @@ func (p *Proxy) buildUpstreamURL(reqPath, model string) (url.URL, error) {
 	}
 	ref := &url.URL{Path: reqPath}
 	resolved := u.ResolveReference(ref)
-	return *resolved, nil
+	return *resolved, "", nil
 }
 
 // extractUsageAndBody extracts token usage and body from response

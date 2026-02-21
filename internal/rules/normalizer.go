@@ -181,7 +181,7 @@ func (n *Normalizer) NormalizeAll(paths []string) []string {
 	return result
 }
 
-// NormalizePattern normalizes a glob pattern for sandbox profile generation.
+// NormalizePattern normalizes a glob pattern for profile generation.
 // Unlike Normalize(), it does NOT convert relative paths to absolute or run
 // filepath.Clean, which would destroy glob syntax like ** and *.
 // It applies: null byte removal, NFKC, confusable stripping, tilde expansion,

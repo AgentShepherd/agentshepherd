@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/BakeLens/crust/internal/rules"
+	"github.com/muesli/termenv"
 )
 
 func TestRuleUnmarshal(t *testing.T) {
@@ -363,5 +364,33 @@ func TestRulesResponseUnmarshal(t *testing.T) {
 
 	if resp.Rules[0].Name != "rule-one" {
 		t.Errorf("rules[0].name = %q, want %q", resp.Rules[0].Name, "rule-one")
+	}
+}
+
+func TestColorProfileFromTERM(t *testing.T) {
+	tests := []struct {
+		term string
+		want termenv.Profile
+	}{
+		{"", termenv.Ascii},
+		{"dumb", termenv.Ascii},
+		{"linux", termenv.ANSI},
+		{"xterm", termenv.ANSI},
+		{"xterm-256color", termenv.ANSI256},
+		{"screen-256color", termenv.ANSI256},
+		{"tmux-256color", termenv.ANSI256},
+		{"xterm-color", termenv.ANSI},
+		{"ansi", termenv.ANSI},
+		{"xterm-kitty", termenv.TrueColor},
+		{"xterm-ghostty", termenv.TrueColor},
+		{"alacritty", termenv.TrueColor},
+		{"foot", termenv.TrueColor},
+	}
+	for _, tt := range tests {
+		t.Run(tt.term, func(t *testing.T) {
+			if got := colorProfileFromTERM(tt.term); got != tt.want {
+				t.Errorf("colorProfileFromTERM(%q) = %v, want %v", tt.term, got, tt.want)
+			}
+		})
 	}
 }
