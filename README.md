@@ -11,6 +11,7 @@
 <p align="center">
   <a href="https://getcrust.io">Website</a> •
   <a href="#quick-start">Quick Start</a> •
+  <a href="#built-in-protection">Protection</a> •
   <a href="#how-it-works">How It Works</a> •
   <a href="#documentation">Docs</a> •
   <a href="https://github.com/BakeLens/crust/issues">Issues</a> •
@@ -48,6 +49,11 @@ Crust is a transparent, local gateway between your AI agents and LLM providers. 
 irm https://raw.githubusercontent.com/BakeLens/crust/main/install.ps1 | iex
 ```
 
+**Docker:**
+```bash
+docker run -p 9090:9090 ghcr.io/bakelens/crust
+```
+
 Then start the gateway:
 
 ```bash
@@ -68,19 +74,6 @@ Point your agent to Crust:
 | **Any OpenAI-compatible agent** | Set your LLM base URL to `http://localhost:9090/v1` |
 
 That's it. Crust auto-detects the provider from the model name and passes through your auth. Works with all 7 major coding agents out of the box — each agent's tool names are recognized automatically.
-
-## How It Works
-
-<p align="center">
-  <img src="docs/crust.png" alt="Crust architecture" width="90%" />
-</p>
-
-Crust inspects tool calls at two layers:
-
-1. **Layer 0 (Request Scan)**: Scans tool calls in conversation history before they reach the LLM — catches agents replaying dangerous actions.
-2. **Layer 1 (Response Scan)**: Scans tool calls in the LLM's response before they execute — blocks new dangerous actions in real-time.
-
-All activity is logged locally to encrypted storage.
 
 ## Built-in Protection
 
@@ -126,6 +119,19 @@ rules:
 ```bash
 crust add-rule my-rules.yaml    # Rules active immediately (hot reload)
 ```
+
+## How It Works
+
+<p align="center">
+  <img src="docs/crust.png" alt="Crust architecture" width="90%" />
+</p>
+
+Crust inspects tool calls at two layers:
+
+1. **Layer 0 (Request Scan)**: Scans tool calls in conversation history before they reach the LLM — catches agents replaying dangerous actions.
+2. **Layer 1 (Response Scan)**: Scans tool calls in the LLM's response before they execute — blocks new dangerous actions in real-time.
+
+All activity is logged locally to encrypted storage.
 
 ## Documentation
 

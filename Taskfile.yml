@@ -60,34 +60,6 @@ tasks:
       - nilaway ./...
 
 
-  install-bpf:
-    desc: Install LSM daemon systemd service (Linux only)
-    preconditions:
-      - sh: '[ "$(uname -s)" = "Linux" ]'
-        msg: LSM daemon is Linux-only
-    cmds:
-      - sudo install -d /usr/libexec/crust
-      - sudo cp init/crust-bpf@.service /etc/systemd/system/
-      - sudo systemctl daemon-reload
-      - |
-        echo "Installed LSM daemon systemd service."
-        echo ""
-        echo "Enable for your user:"
-        echo "  sudo systemctl enable --now crust-bpf@$(whoami).service"
-
-  uninstall-bpf:
-    desc: Remove LSM daemon systemd service (Linux only)
-    preconditions:
-      - sh: '[ "$(uname -s)" = "Linux" ]'
-        msg: LSM daemon is Linux-only
-    cmds:
-      - sudo systemctl stop "crust-bpf@$(whoami).service" 2>/dev/null || true
-      - sudo systemctl disable "crust-bpf@$(whoami).service" 2>/dev/null || true
-      - sudo rm -f /etc/systemd/system/crust-bpf@.service
-      - sudo rm -rf "/etc/systemd/system/crust-bpf@$(whoami).service.d"
-      - sudo systemctl daemon-reload
-      - echo "Uninstalled LSM daemon service"
-
   clean:
     desc: Clean build artifacts
     cmds:
