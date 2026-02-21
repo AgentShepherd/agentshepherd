@@ -56,11 +56,20 @@ type apiClient struct {
 	remote string       // non-empty when connecting to a remote daemon
 }
 
-// newAPIClient creates a new CLI API client using the local Unix socket
-func newAPIClient() *apiClient {
+// newAPIClient creates a CLI API client.
+// If remoteAddr is empty, connects via local Unix socket / named pipe.
+// If remoteAddr is set (e.g., "localhost:9090"), connects over TCP.
+func newAPIClient(remoteAddr ...string) *apiClient {
 	cfg, err := config.Load(config.DefaultConfigPath())
 	if err != nil {
 		cfg = config.DefaultConfig()
+	}
+	if len(remoteAddr) > 0 && remoteAddr[0] != "" {
+		return &apiClient{
+			cfg:    cfg,
+			client: &http.Client{},
+			remote: remoteAddr[0],
+		}
 	}
 	socketPath := cfg.API.SocketPath
 	if socketPath == "" {
@@ -72,20 +81,6 @@ func newAPIClient() *apiClient {
 	}
 }
 
-// newRemoteAPIClient creates a CLI API client that connects over TCP.
-// Used when --api-addr is specified (e.g., connecting to a Docker daemon).
-func newRemoteAPIClient(addr string) *apiClient {
-	cfg, err := config.Load(config.DefaultConfigPath())
-	if err != nil {
-		cfg = config.DefaultConfig()
-	}
-	return &apiClient{
-		cfg:    cfg,
-		client: &http.Client{},
-		remote: addr,
-	}
-}
-
 // apiURL returns the base URL for the management API.
 // For local: dummy host routed via socket/pipe.
 // For remote: TCP address of the daemon.
@@ -93,7 +88,7 @@ func (c *apiClient) apiURL() string {
 	if c.remote != "" {
 		return "http://" + c.remote
 	}
-	return "http://crust-api"
+	return dashboard.DefaultAPIBase
 }
 
 // proxyBaseURL returns the proxy base URL
@@ -714,61 +709,49 @@ func runStatus(args []string) {
 	apiAddr := statusFlags.String("api-addr", "", "Remote daemon address (host:port)")
 	_ = statusFlags.Parse(args)
 
-	// Remote mode: connect over TCP to a daemon (e.g., in Docker)
+	// Resolve client, PID, and log file based on local vs remote
+	var client *apiClient
+	var pid int
+	var logFile string
+
 	if *apiAddr != "" {
-		client := newRemoteAPIClient(*apiAddr)
+		client = newAPIClient(*apiAddr)
+	} else {
+		running, localPID := daemon.IsRunning()
 		if *jsonOutput {
-			data := dashboard.FetchStatus(client.client, client.apiURL(), client.proxyBaseURL(), 0, "")
-			out, _ := json.MarshalIndent(data, "", "  ") //nolint:errcheck // marshal won't fail
+			status := map[string]any{"running": running, "pid": localPID}
+			if running {
+				c := newAPIClient()
+				healthy, _ := c.checkHealth() //nolint:errcheck // error means unhealthy
+				status["healthy"] = healthy
+				status["log_file"] = daemon.LogFile()
+			}
+			out, _ := json.MarshalIndent(status, "", "  ") //nolint:errcheck // marshal of map[string]any won't fail
 			fmt.Println(string(out))
 			return
 		}
-		if *live {
-			if err := dashboard.Run(client.client, client.apiURL(), client.proxyBaseURL(), 0, ""); err != nil {
-				tui.PrintError(fmt.Sprintf("Dashboard error: %v", err))
-			}
+		if !running {
+			tui.PrintInfo("Crust is not running")
 			return
 		}
-		data := dashboard.FetchStatus(client.client, client.apiURL(), client.proxyBaseURL(), 0, "")
-		fmt.Println(dashboard.RenderStatic(data))
-		return
+		client = newAPIClient()
+		pid = localPID
+		logFile = daemon.LogFileDisplay()
 	}
 
-	running, pid := daemon.IsRunning()
-
-	if *jsonOutput {
-		status := map[string]any{
-			"running": running,
-			"pid":     pid,
-		}
-		if running {
-			client := newAPIClient()
-			healthy, _ := client.checkHealth() //nolint:errcheck // error means unhealthy
-			status["healthy"] = healthy
-			status["log_file"] = daemon.LogFile()
-		}
-		out, _ := json.MarshalIndent(status, "", "  ") //nolint:errcheck // marshal of map[string]any won't fail
-		fmt.Println(string(out))
-		return
-	}
-
-	if !running {
-		tui.PrintInfo("Crust is not running")
-		return
-	}
-
-	client := newAPIClient()
-
-	// Live dashboard mode
 	if *live {
-		if err := dashboard.Run(client.client, dashboard.DefaultAPIBase, client.proxyBaseURL(), pid, daemon.LogFileDisplay()); err != nil {
+		if err := dashboard.Run(client.client, client.apiURL(), client.proxyBaseURL(), pid, logFile); err != nil {
 			tui.PrintError(fmt.Sprintf("Dashboard error: %v", err))
 		}
 		return
 	}
 
-	// Static display — FetchStatus handles health, security, and stats in one call
-	data := dashboard.FetchStatus(client.client, dashboard.DefaultAPIBase, client.proxyBaseURL(), pid, daemon.LogFileDisplay())
+	data := dashboard.FetchStatus(client.client, client.apiURL(), client.proxyBaseURL(), pid, logFile)
+	if *jsonOutput {
+		out, _ := json.MarshalIndent(data, "", "  ") //nolint:errcheck // marshal won't fail
+		fmt.Println(string(out))
+		return
+	}
 	fmt.Println(dashboard.RenderStatic(data))
 }
 
@@ -985,12 +968,7 @@ func runListRules(args []string) {
 	apiAddr := listFlags.String("api-addr", "", "Remote daemon address (host:port)")
 	_ = listFlags.Parse(args)
 
-	var client *apiClient
-	if *apiAddr != "" {
-		client = newRemoteAPIClient(*apiAddr)
-	} else {
-		client = newAPIClient()
-	}
+	client := newAPIClient(*apiAddr)
 	body, err := client.getRules()
 	if err != nil {
 		exitNotRunning()
