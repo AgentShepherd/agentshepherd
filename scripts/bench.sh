@@ -47,7 +47,6 @@ fi
 echo "Running benchmarks (count=$COUNT, pattern=$BENCH_PATTERN)..."
 go test -bench="$BENCH_PATTERN" -benchmem -count=$COUNT \
     ./internal/rules/... \
-    ./internal/sandbox/... \
     ./internal/proxy/... \
     ./internal/security/... \
     2>&1 | tee "$CURRENT_FILE"
