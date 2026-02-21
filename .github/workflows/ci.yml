@@ -60,3 +60,30 @@ jobs:
       - name: Unit tests (with race detector)
         run: go test -race ./... -short
 
+  docker-test:
+    name: Docker
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build image
+        run: docker build -t crust-test .
+
+      - name: Start container
+        run: |
+          docker run -d --name crust-ci -p 9090:9090 crust-test
+          sleep 3
+
+      - name: Health check
+        run: curl -sf http://localhost:9090/health
+
+      - name: Graceful shutdown
+        run: |
+          docker stop --time 5 crust-ci
+          EXIT_CODE=$(docker inspect crust-ci --format='{{.State.ExitCode}}')
+          [ "$EXIT_CODE" = "0" ] || { echo "Exit code: $EXIT_CODE"; docker logs crust-ci; exit 1; }
+
+      - name: Logs on failure
+        if: failure()
+        run: docker logs crust-ci 2>&1 || true
+
